@@ -36,12 +36,28 @@ export interface ProcessMetric {
   gpuUuid: string
   gpuIndex: number
   pid: number
+  parentPid: number
   username: string
   command: string
   memoryUsedMb: number
+  smUtilization: number | null
   cpuPercent: number
   elapsed: string
   isCurrentUser: boolean
+  isGroupLeader: boolean
+}
+
+export interface CpuProcessMetric {
+  pid: number
+  parentPid: number
+  username: string
+  command: string
+  cpuPercent: number
+  memoryPercent: number
+  memoryUsedBytes: number
+  elapsed: string
+  isCurrentUser: boolean
+  isGroupLeader: boolean
 }
 
 export interface SystemMetric {
@@ -68,6 +84,7 @@ export interface Snapshot {
   system: SystemMetric
   gpus: GpuMetric[]
   processes: ProcessMetric[]
+  cpuProcesses: CpuProcessMetric[]
   processesSampled: boolean
   nvidiaSmi: 'available' | 'missing' | 'permissionDenied' | 'failed'
   nvidiaMessage?: string | null
@@ -105,6 +122,29 @@ export interface AppSettings {
   currentUserAccent: string
   theme: 'system' | 'light' | 'dark'
   reduceMotion: boolean
+}
+
+export interface IdleReservationFilters {
+  gpuMemoryGb: number
+  cpuMemoryGb: number
+  otherUserProcess: 'all' | 'without'
+  gpuModel: string
+  cpuModel: string
+  duration: number
+  tag: string
+}
+
+export type IdleReservationStatus = 'active' | 'paused' | 'completed' | 'expired'
+
+export interface IdleReservation {
+  id: string
+  name: string
+  filters: IdleReservationFilters
+  createdAt: number
+  expiresAt: number | null
+  notifyMode: 'once' | 'continuous'
+  status: IdleReservationStatus
+  matchedGpuKeys: string[]
 }
 
 export type DetailTab = 'overview' | 'gpu' | 'cpu' | 'processes' | 'history' | 'logs' | 'connection'

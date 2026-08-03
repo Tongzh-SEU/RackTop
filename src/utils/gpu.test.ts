@@ -17,7 +17,7 @@ function gpu(memoryUsedMb: number, memoryTotalMb = 40_960, utilization = 0): Gpu
 }
 
 function process(username: string, memoryUsedMb: number, command = 'python train.py', isCurrentUser = false): ProcessMetric {
-  return { gpuUuid: 'GPU-test', gpuIndex: 0, pid: 42, username, command, memoryUsedMb, cpuPercent: 0, elapsed: '00:10', isCurrentUser }
+  return { gpuUuid: 'GPU-test', gpuIndex: 0, pid: 42, parentPid: 1, username, command, memoryUsedMb, smUtilization: null, cpuPercent: 0, elapsed: '00:10', isCurrentUser, isGroupLeader: true }
 }
 
 describe('GPU memory display semantics', () => {
@@ -85,4 +85,5 @@ describe('GPU memory display semantics', () => {
     expect(hasOtherUserGpuWorkload(metric, [process('researcher', 40_960 * 0.031)])).toBe(true)
     expect(hasOtherUserGpuWorkload(metric, [process('tongzh', 10_000, 'python train.py', true)])).toBe(false)
   })
+
 })

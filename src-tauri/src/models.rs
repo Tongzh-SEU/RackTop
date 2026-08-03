@@ -64,12 +64,30 @@ pub struct ProcessMetric {
     pub gpu_uuid: String,
     pub gpu_index: u32,
     pub pid: u32,
+    pub parent_pid: u32,
     pub username: String,
     pub command: String,
     pub memory_used_mb: f64,
+    pub sm_utilization: Option<f64>,
     pub cpu_percent: f64,
     pub elapsed: String,
     pub is_current_user: bool,
+    pub is_group_leader: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CpuProcessMetric {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub username: String,
+    pub command: String,
+    pub cpu_percent: f64,
+    pub memory_percent: f64,
+    pub memory_used_bytes: u64,
+    pub elapsed: String,
+    pub is_current_user: bool,
+    pub is_group_leader: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -102,6 +120,8 @@ pub struct Snapshot {
     pub gpus: Vec<GpuMetric>,
     pub processes: Vec<ProcessMetric>,
     #[serde(default)]
+    pub cpu_processes: Vec<CpuProcessMetric>,
+    #[serde(default)]
     pub processes_sampled: bool,
     pub nvidia_smi: String,
     pub nvidia_message: Option<String>,
@@ -118,6 +138,20 @@ pub struct HistoryPoint {
     pub gpu_utilizations: HashMap<String, f64>,
     #[serde(default)]
     pub gpu_memory_utilizations: HashMap<String, f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdleReservation {
+    pub id: String,
+    pub name: String,
+    pub filters: serde_json::Value,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub notify_mode: String,
+    pub status: String,
+    #[serde(default)]
+    pub matched_gpu_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

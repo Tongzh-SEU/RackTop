@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
-import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import type { AppSettings, HistoryPoint, HostKeyInfo, Server, ServerDraft, Snapshot } from '../types/models'
+import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
+import type { AppSettings, HistoryPoint, HostKeyInfo, IdleReservation, Server, ServerDraft, Snapshot } from '../types/models'
 import { clampPercent, gpuMemoryPercent } from '../utils/gpu'
 
 const isTauri = '__TAURI_INTERNALS__' in window
@@ -78,6 +78,7 @@ const demoSnapshot: Snapshot = {
     { index: 1, uuid: 'GPU-d3f2', name: 'NVIDIA GeForce RTX 4090 D', utilization: 0, memoryUtilization: 0, memoryUsedMb: 15, memoryTotalMb: 24564, temperatureCelsius: 45, powerWatts: 18.81 },
   ],
   processes: [],
+  cpuProcesses: [],
   processesSampled: true,
   nvidiaSmi: 'available',
 }
@@ -108,8 +109,12 @@ const a100Snapshot: Snapshot = {
     { index: 2, uuid: 'GPU-86d3', name: 'NVIDIA A100-PCIE-40GB', utilization: 0, memoryUtilization: 0, memoryUsedMb: 14, memoryTotalMb: 40960, temperatureCelsius: 34, powerWatts: 34.92 },
   ],
   processes: [
-    { gpuUuid: 'GPU-f689', gpuIndex: 0, pid: 2146705, username: 'zxy', command: 'VLLM::EngineCore', memoryUsedMb: 37682, cpuPercent: 27, elapsed: '13:15:10', isCurrentUser: false },
-    { gpuUuid: 'GPU-4b25', gpuIndex: 1, pid: 1542739, username: 'qjz', command: 'VLLM::EngineCore', memoryUsedMb: 11920, cpuPercent: 5, elapsed: '3-03:49:20', isCurrentUser: false },
+    { gpuUuid: 'GPU-f689', gpuIndex: 0, pid: 2146705, parentPid: 1, username: 'zxy', command: 'VLLM::EngineCore', memoryUsedMb: 37682, smUtilization: 99, cpuPercent: 27, elapsed: '13:15:10', isCurrentUser: false, isGroupLeader: true },
+    { gpuUuid: 'GPU-4b25', gpuIndex: 1, pid: 1542739, parentPid: 1, username: 'qjz', command: 'VLLM::EngineCore', memoryUsedMb: 11920, smUtilization: null, cpuPercent: 5, elapsed: '3-03:49:20', isCurrentUser: false, isGroupLeader: true },
+  ],
+  cpuProcesses: [
+    { pid: 2146812, parentPid: 2146705, username: 'zxy', command: 'python vllm-worker.py', cpuPercent: 18.4, memoryPercent: 2.1, memoryUsedBytes: 5_675_417_600, elapsed: '13:14:58', isCurrentUser: false, isGroupLeader: false },
+    { pid: 1542810, parentPid: 1542739, username: 'qjz', command: 'python tokenizer-worker.py', cpuPercent: 4.2, memoryPercent: 0.8, memoryUsedBytes: 2_162_166_784, elapsed: '3-03:48:59', isCurrentUser: false, isGroupLeader: false },
   ],
   processesSampled: true,
   nvidiaSmi: 'available',
@@ -117,6 +122,7 @@ const a100Snapshot: Snapshot = {
 
 let browserServers = [...demoServers]
 let browserSettings = { ...defaultSettings }
+let browserReservations: IdleReservation[] = []
 
 function rollingHistory(snapshot: Snapshot): HistoryPoint[] {
   const historyNow = Math.floor(Date.now() / 1000)
@@ -154,8 +160,8 @@ export const api = {
     if (isTauri) return invoke('delete_server', { serverId })
     browserServers = browserServers.filter((server) => server.id !== serverId)
   },
-  async collectServer(serverId: string, includeProcesses = true): Promise<Snapshot> {
-    if (isTauri) return invoke('collect_server', { serverId, includeProcesses })
+  async collectServer(serverId: string, includeProcesses = true, recordHistory = true): Promise<Snapshot> {
+    if (isTauri) return invoke('collect_server', { serverId, includeProcesses, recordHistory })
     await new Promise((resolve) => setTimeout(resolve, 450))
     const source = serverId === 'demo-132' ? a100Snapshot : demoSnapshot
     return { ...source, serverId, timestamp: Math.floor(Date.now() / 1000), processesSampled: includeProcesses }
@@ -164,6 +170,18 @@ export const api = {
     if (isTauri) return invoke('get_history', { serverId, fromTimestamp })
     const source = serverId === 'demo-132' ? a100Snapshot : demoSnapshot
     return rollingHistory({ ...source, serverId })
+  },
+  async listIdleReservations(): Promise<IdleReservation[]> {
+    return isTauri ? invoke('list_idle_reservations') : browserReservations
+  },
+  async saveIdleReservation(reservation: IdleReservation): Promise<IdleReservation> {
+    if (isTauri) return invoke('save_idle_reservation', { reservation })
+    browserReservations = [reservation, ...browserReservations.filter((item) => item.id !== reservation.id)]
+    return reservation
+  },
+  async deleteIdleReservation(reservationId: string): Promise<void> {
+    if (isTauri) return invoke('delete_idle_reservation', { reservationId })
+    browserReservations = browserReservations.filter((item) => item.id !== reservationId)
   },
   async importSshConfig(path?: string): Promise<ServerDraft[]> {
     if (isTauri) return invoke('import_ssh_config', { path: path || null })
@@ -191,10 +209,19 @@ export const api = {
     if (isTauri) return invoke('install_nvidia_driver', { serverId, confirmed: true })
     return `已在演示服务器 ${serverId} 上模拟执行安装。`
   },
-  async notify(title: string, body: string): Promise<void> {
+  async terminateProcess(serverId: string, pid: number): Promise<string> {
+    if (isTauri) return invoke('terminate_process', { serverId, pid, confirmed: true })
+    return `已在演示服务器 ${serverId} 上模拟结束 PID ${pid}。`
+  },
+  async notify(title: string, body: string, extra?: Record<string, unknown>): Promise<void> {
     if (!isTauri) return
     let granted = await isPermissionGranted()
     if (!granted) granted = (await requestPermission()) === 'granted'
-    if (granted) sendNotification({ title, body })
+    if (granted) sendNotification({ title, body, extra, autoCancel: true })
+  },
+  async onNotificationAction(callback: (extra: Record<string, unknown>) => void): Promise<() => void> {
+    if (!isTauri) return () => {}
+    const listener = await onAction((notification) => callback(notification.extra ?? {}))
+    return () => listener.unregister()
   },
 }

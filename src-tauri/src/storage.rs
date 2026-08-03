@@ -1,4 +1,4 @@
-use crate::models::{AppSettings, HistoryPoint, Server, ServerDraft, Snapshot};
+use crate::models::{AppSettings, HistoryPoint, IdleReservation, Server, ServerDraft, Snapshot};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::{HashMap, HashSet},
@@ -56,6 +56,16 @@ impl Database {
                  CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value_json TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS idle_reservations (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    filters_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER,
+                    notify_mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    matched_gpu_keys_json TEXT NOT NULL DEFAULT '[]'
                  );",
             )
             .map_err(|error| error.to_string())?;
@@ -215,6 +225,56 @@ impl Database {
         connection.execute("INSERT INTO settings(key,value_json) VALUES('app',?1) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json", [json]).map_err(|error| error.to_string())?;
         Ok(())
     }
+
+    pub fn list_idle_reservations(&self) -> Result<Vec<IdleReservation>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare(
+            "SELECT id,name,filters_json,created_at,expires_at,notify_mode,status,matched_gpu_keys_json FROM idle_reservations ORDER BY created_at DESC",
+        ).map_err(|error| error.to_string())?;
+        let rows = statement.query_map([], |row| {
+            let filters_json: String = row.get(2)?;
+            let matched_json: String = row.get(7)?;
+            Ok(IdleReservation {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                filters: serde_json::from_str(&filters_json).unwrap_or(serde_json::Value::Null),
+                created_at: row.get(3)?,
+                expires_at: row.get(4)?,
+                notify_mode: row.get(5)?,
+                status: row.get(6)?,
+                matched_gpu_keys: serde_json::from_str(&matched_json).unwrap_or_default(),
+            })
+        }).map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
+    pub fn save_idle_reservation(&self, reservation: IdleReservation) -> Result<IdleReservation, String> {
+        if reservation.id.trim().is_empty() || reservation.name.trim().is_empty() {
+            return Err("预约名称不能为空".into());
+        }
+        if !matches!(reservation.notify_mode.as_str(), "once" | "continuous") {
+            return Err("预约通知方式无效".into());
+        }
+        if !matches!(reservation.status.as_str(), "active" | "paused" | "completed" | "expired") {
+            return Err("预约状态无效".into());
+        }
+        let filters_json = serde_json::to_string(&reservation.filters).map_err(|error| error.to_string())?;
+        let matched_json = serde_json::to_string(&reservation.matched_gpu_keys).map_err(|error| error.to_string())?;
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection.execute(
+            "INSERT INTO idle_reservations(id,name,filters_json,created_at,expires_at,notify_mode,status,matched_gpu_keys_json)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name,filters_json=excluded.filters_json,expires_at=excluded.expires_at,notify_mode=excluded.notify_mode,status=excluded.status,matched_gpu_keys_json=excluded.matched_gpu_keys_json",
+            params![reservation.id, reservation.name.trim(), filters_json, reservation.created_at, reservation.expires_at, reservation.notify_mode, reservation.status, matched_json],
+        ).map_err(|error| error.to_string())?;
+        Ok(IdleReservation { name: reservation.name.trim().to_string(), ..reservation })
+    }
+
+    pub fn delete_idle_reservation(&self, id: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection.execute("DELETE FROM idle_reservations WHERE id=?1", [id]).map_err(|error| error.to_string())?;
+        Ok(())
+    }
 }
 
 fn blank_to_none(value: Option<String>) -> Option<String> {
@@ -258,6 +318,7 @@ mod tests {
             system: SystemMetric { cpu_model: "Test CPU".into(), memory_total_bytes: 1024, ..Default::default() },
             gpus: Vec::new(),
             processes: Vec::new(),
+            cpu_processes: Vec::new(),
             processes_sampled: true,
             nvidia_smi: "available".into(),
             nvidia_message: None,
@@ -300,6 +361,31 @@ mod tests {
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
         let saved = db.save_server(draft("GPU", 0)).unwrap();
         assert_eq!(saved.history_retention_days, 1);
+    }
+
+    #[test]
+    fn idle_reservations_round_trip_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let saved = db.save_idle_reservation(IdleReservation {
+            id: "reservation-1".into(),
+            name: "  A100 预约  ".into(),
+            filters: serde_json::json!({ "gpuMemoryGb": 40, "duration": 0 }),
+            created_at: 1_000,
+            expires_at: Some(2_000),
+            notify_mode: "continuous".into(),
+            status: "active".into(),
+            matched_gpu_keys: vec!["server-1:gpu-0".into()],
+        }).unwrap();
+        assert_eq!(saved.name, "A100 预约");
+
+        let reservations = db.list_idle_reservations().unwrap();
+        assert_eq!(reservations.len(), 1);
+        assert_eq!(reservations[0].filters["gpuMemoryGb"], 40);
+        assert_eq!(reservations[0].matched_gpu_keys, vec!["server-1:gpu-0"]);
+
+        db.delete_idle_reservation("reservation-1").unwrap();
+        assert!(db.list_idle_reservations().unwrap().is_empty());
     }
 
     #[test]
