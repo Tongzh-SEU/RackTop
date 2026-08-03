@@ -45,7 +45,9 @@ export function historyHeatmapValue(point: HistoryHeatmapPoint, resource: 'cpu' 
   const raw = resource === 'cpu'
     ? (metric === 'utilization' ? point.cpuUtilization : point.memoryUtilization)
     : (metric === 'utilization' ? point.gpuUtilizations[resource] : point.gpuMemoryUtilizations[resource])
-  return raw === undefined || raw === null || !Number.isFinite(raw) ? null : clampPercent(raw)
+  if (raw === undefined || raw === null || !Number.isFinite(raw)) return null
+  const safe = clampPercent(raw)
+  return safe < 3 ? 0 : safe
 }
 
 export function heatmapLevel(value: number): number {

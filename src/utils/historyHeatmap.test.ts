@@ -34,4 +34,9 @@ describe('history heatmap', () => {
     expect(heatmapLevel(0)).toBe(0)
     expect(heatmapLevel(81)).toBe(5)
   })
+
+  it('treats utilization below three percent as unused gray zero', () => {
+    expect(historyHeatmapValue({ ...point, cpuUtilization: 2.99 }, 'cpu', 'utilization')).toBe(0)
+    expect(historyHeatmapValue({ ...point, cpuUtilization: 3 }, 'cpu', 'utilization')).toBe(3)
+  })
 })
