@@ -590,9 +590,9 @@ function GpuCard({ gpu, processes, onOpen }: { gpu: Snapshot['gpus'][number]; pr
   return (
     <button className={`panel gpu-card gpu-card--${memoryLevel}`} onClick={onOpen}>
       <PanelHeader title={`GPU ${gpu.index}`} subtitle={gpu.name.replace('NVIDIA ', '')} action={<ChevronRight size={16} />} />
-      <MetricBar label="MEM" value={displayedMemoryPercent} detail={`${(gpu.memoryUsedMb / 1024).toFixed(1)} / ${(gpu.memoryTotalMb / 1024).toFixed(0)} GB`} accent="purple" currentUserValue={ownMemoryPercent} />
+      <MetricBar label="MEM" value={displayedMemoryPercent} detail={`${(gpu.memoryUsedMb / 1024).toFixed(1)} / ${(gpu.memoryTotalMb / 1024).toFixed(0)} GB`} accent="purple" currentUserValue={ownMemoryPercent} currentUserDetail={`${(ownMemoryMb / 1024).toFixed(1)} GB`} />
       <MetricBar label="UTL" value={clampPercent(gpu.utilization)} accent={gpuLoadAccent(gpu.utilization)} />
-      <div className="gpu-card__footer"><span><HardDrive size={14} />MBW {clampPercent(gpu.memoryUtilization).toFixed(0)}%</span><span><Zap size={14} />{gpu.powerWatts.toFixed(0)} W</span><span><Activity size={14} />{gpu.temperatureCelsius}°C</span><span><Box size={14} />{processes.length} 进程</span>{ownMemoryMb > 0 && <span className="gpu-card__own"><UserRound size={13} />你 {(ownMemoryMb / 1024).toFixed(1)} GB</span>}</div>
+      <div className="gpu-card__footer"><span><HardDrive size={14} />MBW {clampPercent(gpu.memoryUtilization).toFixed(0)}%</span><span><Zap size={14} />{gpu.powerWatts.toFixed(0)} W</span><span><Activity size={14} />{gpu.temperatureCelsius}°C</span><span><Box size={14} />{processes.length} 进程</span></div>
     </button>
   )
 }

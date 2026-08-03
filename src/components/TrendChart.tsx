@@ -5,11 +5,11 @@ import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/compon
 import { CanvasRenderer } from 'echarts/renderers'
 import type { HistoryPoint, Snapshot } from '../types/models'
 import { clampPercent, gpuMemoryPercent } from '../utils/gpu'
+import { formatFiveMinuteTimeLabel, MINUTE_MS, minuteTickSplitNumber } from '../utils/timeAxis'
 
 echarts.use([LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
 const BYTES_PER_GB = 1024 ** 3
-
 function percentTooltip(value: number) {
   return `${Number(value).toFixed(1)}%`
 }
@@ -30,6 +30,7 @@ interface TrendChartProps {
 
 export function TrendChart({ points, snapshot, mode = 'all', height = 260, animate = false }: TrendChartProps) {
   const series = []
+  const timestamps = points.map((point) => point.timestamp * 1000)
   if (mode === 'all' || mode === 'cpu') {
     series.push({
       name: 'CPU',
@@ -105,9 +106,12 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
         xAxis: {
           type: 'time',
           boundaryGap: false,
+          splitNumber: minuteTickSplitNumber(timestamps),
+          minInterval: MINUTE_MS,
+          maxInterval: MINUTE_MS,
           axisLine: { show: false },
           axisTick: { show: false },
-          axisLabel: { color: '#8e9198', fontSize: 10 },
+          axisLabel: { formatter: formatFiveMinuteTimeLabel, color: '#8e9198', fontSize: 10 },
           splitLine: { show: false },
         },
         yAxis: {

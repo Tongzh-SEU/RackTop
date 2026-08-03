@@ -171,11 +171,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .gpu-card--critical { border-color: color-mix(in srgb, var(--red) 10%, var(--border)); background: color-mix(in srgb, var(--red) 0.8%, var(--surface)); }
 .metric-bar { margin: 11px 0; }
 .metric-bar__header { display: flex; justify-content: space-between; margin-bottom: 6px; color: var(--text-secondary); font-size: 10px; }
+.metric-bar--with-own-marker .metric-bar__header { margin-bottom: 20px; }
 .metric-bar__value { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
-.metric-bar__track { position: relative; overflow: hidden; height: 6px; border-radius: 999px; background: var(--surface-subtle); }
+.metric-bar__track { position: relative; height: 6px; border-radius: 999px; background: var(--surface-subtle); }
 .metric-bar__fill, .metric-bar__own { position: absolute; inset: 0 auto 0 0; border-radius: inherit; }
 .metric-bar__fill--blue { background: var(--blue); }.metric-bar__fill--green { background: var(--green); }.metric-bar__fill--orange { background: var(--orange); }.metric-bar__fill--red { background: var(--red); }.metric-bar__fill--purple { background: var(--purple); }
 .metric-bar__own { background: var(--own-accent); box-shadow: 1px 0 rgba(255,255,255,.5); }
+.metric-bar__own-marker { position: absolute; z-index: 2; top: -4px; left: var(--own-position); width: 3px; height: 14px; border-radius: 999px; background: var(--own-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--own-accent) 18%, transparent), 0 0 8px color-mix(in srgb, var(--own-accent) 42%, transparent); transform: translateX(-50%); }
+.metric-bar__own-label { position: absolute; z-index: 2; bottom: calc(100% + 5px); left: clamp(30px, var(--own-position), calc(100% - 30px)); color: var(--own-accent); font-size: 9px; font-variant-numeric: tabular-nums; font-weight: 700; line-height: 1; white-space: nowrap; transform: translateX(-50%); }
 .gpu-card__footer { display: flex; gap: 18px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--text-secondary); font-size: 10px; }
 .gpu-card__footer { flex-wrap: wrap; row-gap: 7px; }
 .gpu-card__footer span { display: inline-flex; align-items: center; gap: 5px; }
