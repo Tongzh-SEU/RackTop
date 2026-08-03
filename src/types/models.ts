@@ -4,6 +4,7 @@ export type AuthMethod = 'sshAgent' | 'privateKey' | 'password' | 'sshConfig'
 export interface Server {
   id: string
   name: string
+  location?: string | null
   host: string
   port: number
   username: string
@@ -111,6 +112,7 @@ export type DetailTab = 'overview' | 'gpu' | 'cpu' | 'processes' | 'history' | '
 export interface ServerDraft {
   id?: string
   name: string
+  location?: string
   host: string
   port: number
   username: string

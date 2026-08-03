@@ -33,6 +33,7 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
   const timestamps = points.map((point) => point.timestamp * 1000)
   if (mode === 'all' || mode === 'cpu') {
     series.push({
+      id: 'cpu-utilization',
       name: 'CPU',
       type: 'line',
       showSymbol: false,
@@ -47,6 +48,7 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
   }
   if (mode === 'systemMemory') {
     series.push({
+      id: 'system-memory-utilization',
       name: '系统内存',
       type: 'line',
       showSymbol: false,
@@ -59,6 +61,7 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
       areaStyle: { color: 'rgba(175, 82, 222, 0.08)' },
     })
     series.push({
+      id: 'swap-utilization',
       name: 'SWP',
       type: 'line',
       showSymbol: false,
@@ -76,6 +79,7 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
       const colors = ['#30d158', '#bf5af2', '#ff9f0a', '#64d2ff']
       const isMemory = mode === 'gpuMemory'
       series.push({
+        id: `${isMemory ? 'gpu-memory' : 'gpu-utilization'}:${gpu.uuid}`,
         name: `GPU ${gpu.index}`,
         type: 'line',
         showSymbol: false,

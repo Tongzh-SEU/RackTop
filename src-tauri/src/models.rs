@@ -6,6 +6,7 @@ use std::collections::HashMap;
 pub struct Server {
     pub id: String,
     pub name: String,
+    pub location: Option<String>,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -26,6 +27,7 @@ pub struct Server {
 pub struct ServerDraft {
     pub id: Option<String>,
     pub name: String,
+    pub location: Option<String>,
     pub host: String,
     pub port: u16,
     pub username: String,
