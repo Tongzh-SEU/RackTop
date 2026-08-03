@@ -43,7 +43,8 @@ import { MetricBar } from './components/MetricBar'
 import { ServerForm } from './components/ServerForm'
 import { StatusPill } from './components/StatusPill'
 import { TrendChart } from './components/TrendChart'
-import { clampPercent, displayedGpuMemoryPercent, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle } from './utils/gpu'
+import { clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle } from './utils/gpu'
+import { duplicateImportIndexes } from './utils/serverIdentity'
 
 const tabs: Array<{ value: DetailTab; label: string }> = [
   { value: 'overview', label: '概览' },
@@ -153,10 +154,12 @@ function App() {
   const [fleetDescending, setFleetDescending] = useState(() => localStorage.getItem('racktop.fleetDescending') === 'true')
   const [busy, setBusy] = useState<Set<string>>(new Set())
   const [manualRefreshingAll, setManualRefreshingAll] = useState(false)
+  const [manualRefreshRevision, setManualRefreshRevision] = useState(0)
   const [manualRefreshingServers, setManualRefreshingServers] = useState<Set<string>>(new Set())
   const [paused, setPaused] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [pendingHostKey, setPendingHostKey] = useState<HostKeyInfo | null>(null)
+  const [serverPendingDelete, setServerPendingDelete] = useState<Server | null>(null)
   const initialLoad = useRef(false)
   const snapshotsRef = useRef<Record<string, Snapshot>>({})
   const failureCounts = useRef<Record<string, number>>({})
@@ -245,7 +248,7 @@ function App() {
   const runManualRefreshAll = useCallback(async () => {
     if (manualRefreshingAll) return
     setManualRefreshingAll(true)
-    try { await refreshAll(false) } finally { setManualRefreshingAll(false) }
+    try { await refreshAll(false); setManualRefreshRevision((value) => value + 1) } finally { setManualRefreshingAll(false) }
   }, [manualRefreshingAll, refreshAll])
 
   const runManualRefreshServer = useCallback(async (serverId: string) => {
@@ -340,7 +343,6 @@ function App() {
   }
 
   async function removeServer(server: Server) {
-    if (!window.confirm(`删除“${server.name}”？历史数据也会一并删除。`)) return
     deletedServerIds.current.add(server.id)
     try {
       await api.deleteServer(server.id)
@@ -364,9 +366,11 @@ function App() {
       delete nextRetryAt.current[server.id]
       for (const key of Object.keys(conditionSince.current)) if (key.includes(`:${server.id}:`)) delete conditionSince.current[key]
       for (const key of notifiedConditions.current) if (key.includes(`:${server.id}:`) || key === `offline:${server.id}`) notifiedConditions.current.delete(key)
+      setServerPendingDelete(null)
+      setToast(`已删除“${server.name}”及其本地历史数据`)
     } catch (error) {
       deletedServerIds.current.delete(server.id)
-      setToast(`删除服务器失败：${String(error)}`)
+      throw error
     }
   }
 
@@ -386,14 +390,16 @@ function App() {
   return (
     <div className="app-shell">
       <aside className={`sidebar ${api.isDesktop ? 'sidebar--desktop' : ''}`}>
-        <div className="traffic-spacer" aria-hidden="true" />
-        <div className="brand">
-          <span className="brand__mark"><Activity size={18} strokeWidth={2.4} /></span>
-          <div><strong>RackTop</strong><small>算力监控</small></div>
+        <div className="sidebar__titlebar" data-tauri-drag-region>
+          <div className="traffic-spacer" aria-hidden="true" />
+          <div className="brand">
+            <span className="brand__mark"><Activity size={18} strokeWidth={2.4} /></span>
+            <div><strong>RackTop</strong><small>算力监控</small></div>
+          </div>
         </div>
         <nav className="primary-nav" aria-label="主导航">
           <button className={mainView === 'fleet' ? 'is-active' : ''} onClick={() => setMainView('fleet')}><LayoutDashboard size={17} />总览 <span className="nav-count">{totals.gpus}</span></button>
-          <button className={mainView === 'idle' ? 'is-active' : ''} onClick={() => setMainView('idle')}><Zap size={17} />空闲 GPU <span className="nav-count">{totals.idle}</span></button>
+          <button className={mainView === 'idle' ? 'is-active' : ''} onClick={() => setMainView('idle')}><Zap size={17} />空闲算力 <span className="nav-count">{totals.idle}</span></button>
         </nav>
         <div className="sidebar__section-header"><span>服务器</span><span>{totals.online}/{servers.length}</span></div>
         <div className="search-field"><Search size={14} /><input aria-label="搜索服务器" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索" />{search && <button onClick={() => setSearch('')} aria-label="清除搜索"><X size={13} /></button>}</div>
@@ -426,12 +432,12 @@ function App() {
       </aside>
 
       <main className="workspace">
-        <header className="topbar">
-          <div>
+        <header className="topbar" data-tauri-drag-region>
+          <div className="topbar__title">
             <p className="eyebrow">{mainView === 'idle' ? '资源发现' : mainView === 'fleet' ? `${totals.online} / ${servers.length} 台在线` : selectedServer ? selectedServer.host : '所有服务器'}</p>
-            <h1>{mainView === 'idle' ? '寻找空闲 GPU' : mainView === 'fleet' ? '所有服务器的 GPU' : selectedServer?.name ?? 'RackTop 总览'}</h1>
+            <h1>{mainView === 'idle' ? '寻找空闲算力' : mainView === 'fleet' ? '算力总览' : selectedServer?.name ?? 'RackTop 总览'}</h1>
           </div>
-          <div className="topbar__actions">
+          <div className="topbar__actions" data-tauri-drag-region>
             <span className={`refresh-label ${paused ? 'is-paused' : ''}`}><Clock3 size={14} />{paused ? '采集已暂停' : mainView === 'server' && selectedServer ? relativeTime(selectedServer.lastSeenAt) : totals.latestRefresh ? relativeTime(totals.latestRefresh) : `${settings?.defaultSamplingIntervalSeconds ?? 2} 秒采样`}</span>
             <button className="button button--secondary" onClick={() => void runManualRefreshAll()} disabled={manualRefreshingAll}><RefreshCw size={16} className={manualRefreshingAll ? 'spin' : ''} />刷新全部</button>
             <button className="icon-button" aria-label="通知"><Bell size={18} />{totals.hot > 0 && <span className="notification-dot" />}</button>
@@ -441,7 +447,7 @@ function App() {
         {servers.length === 0 ? (
           <EmptyState onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
         ) : mainView === 'idle' ? (
-          <IdleGpuView servers={servers} snapshots={snapshots} history={history} onSelect={(serverId, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu'); setMainView('server') }} />
+          <IdleGpuView servers={servers} snapshots={snapshots} history={history} sortRevision={manualRefreshRevision} onSelect={(serverId, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu'); setMainView('server') }} />
         ) : mainView === 'fleet' ? (
           <FleetOverview servers={servers} snapshots={snapshots} settings={settings} totals={totals} sort={fleetSort} descending={fleetDescending} onSort={setFleetSort} onToggleOrder={() => setFleetDescending((value) => !value)} onSelect={(serverId, tab, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid ?? null); setSelectedTab(tab); setMainView('server') }} />
         ) : selectedServer && selectedSnapshot ? (
@@ -455,7 +461,7 @@ function App() {
             onTab={(tab) => { setSelectedTab(tab); if (tab !== 'gpu') setSelectedGpuUuid(null) }}
             onSelectGpu={(gpuUuid) => { setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu') }}
             onRefresh={() => void runManualRefreshServer(selectedServer.id)}
-            onDelete={() => void removeServer(selectedServer)}
+            onDelete={() => setServerPendingDelete(selectedServer)}
             onEdit={() => { setEditingServer(selectedServer); setShowServerForm(true) }}
             isRefreshing={manualRefreshingServers.has(selectedServer.id)}
             animateCharts={manualRefreshingAll || manualRefreshingServers.has(selectedServer.id)}
@@ -467,8 +473,9 @@ function App() {
 
       {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultSamplingInterval={settings?.defaultSamplingIntervalSeconds} defaultHistoryRetentionDays={settings?.historyRetentionDays} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
       {showSettings && settings && <SettingsSheet settings={settings} onClose={() => setShowSettings(false)} onSave={async (value) => { setSettings(await api.saveSettings(value)); setShowSettings(false); setToast('设置已保存') }} />}
-      {importDrafts && <SshImportSheet drafts={importDrafts} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setImportDrafts(null); setToast(`已导入 ${selected.length} 台服务器`) }} />}
+      {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setImportDrafts(null); setToast(`已导入 ${selected.length} 台服务器`) }} />}
       {pendingHostKey && <HostKeyDialog info={pendingHostKey} onClose={() => setPendingHostKey(null)} onTrust={async () => { const serverId = pendingHostKey.serverId; await api.trustHostKey(pendingHostKey); setPendingHostKey(null); setToast('已信任服务器指纹'); await refreshServer(serverId) }} />}
+      {serverPendingDelete && <DeleteServerDialog server={serverPendingDelete} onClose={() => setServerPendingDelete(null)} onDelete={() => removeServer(serverPendingDelete)} />}
       {toast && <div className="toast" role="status"><AlertCircle size={17} /><span>{toast}</span><button onClick={() => setToast(null)} aria-label="关闭"><X size={14} /></button></div>}
     </div>
   )
@@ -600,7 +607,7 @@ function GpuCard({ gpu, processes, onOpen }: { gpu: Snapshot['gpus'][number]; pr
 function CpuOverviewCard({ snapshot, memoryPercent, onOpen }: { snapshot: Snapshot; memoryPercent: number; onOpen: () => void }) {
   return (
     <button className="panel gpu-card cpu-overview-card" onClick={onOpen}>
-      <PanelHeader title="CPU" subtitle="系统资源" action={<ChevronRight size={16} />} />
+      <PanelHeader title="CPU" subtitle={snapshot.system.cpuModel || 'CPU'} action={<ChevronRight size={16} />} />
       <MetricBar label="系统 MEM" value={memoryPercent} detail={`${formatBytes(snapshot.system.memoryUsedBytes)} / ${formatBytes(snapshot.system.memoryTotalBytes)}`} accent="purple" />
       <MetricBar label="CPU UTL" value={snapshot.system.cpuUtilization} currentUserValue={snapshot.system.currentUserCpuUtilization} />
       <div className="gpu-card__footer"><span><Activity size={14} />1m {snapshot.system.load1.toFixed(2)}</span><span><Clock3 size={14} />5m {snapshot.system.load5.toFixed(2)}</span><span><Clock3 size={14} />15m {snapshot.system.load15.toFixed(2)}</span><span><HardDrive size={14} />Swap {formatBytes(snapshot.system.swapUsedBytes)}</span></div>
@@ -634,7 +641,7 @@ function CpuDetail({ snapshot, points, animateChart }: { snapshot: Snapshot; poi
 function ProcessTable({ snapshot }: { snapshot: Snapshot }) {
   const [selectedPid, setSelectedPid] = useState<number | null>(null)
   const selectedProcess = snapshot.processes.find((process) => process.pid === selectedPid)
-  return <div className="content-stack"><section className="panel process-panel"><PanelHeader icon={<TerminalSquare />} title="GPU 进程" subtitle={`${snapshot.processes.length} 个计算进程 · 点击查看详情`} />{snapshot.processes.length ? <div className="table-scroll"><table><thead><tr><th>GPU</th><th>PID</th><th>用户</th><th>命令</th><th>GPU 显存</th><th>CPU</th><th>运行时间</th></tr></thead><tbody>{snapshot.processes.map((process) => <tr key={`${process.gpuUuid}-${process.pid}`} tabIndex={0} aria-selected={process.pid === selectedPid} className={`${process.isCurrentUser ? 'is-current-user' : ''} ${process.pid === selectedPid ? 'is-selected' : ''}`} onClick={() => setSelectedPid(process.pid)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedPid(process.pid) } }}><td>GPU {process.gpuIndex}</td><td className="mono">{process.pid}</td><td>{process.isCurrentUser && <span className="own-label">你</span>}{process.username}</td><td className="process-command" title={process.command}>{process.command}</td><td>{process.memoryUsedMb} MB</td><td>{process.cpuPercent.toFixed(1)}%</td><td>{process.elapsed}</td></tr>)}</tbody></table></div> : <div className="inline-empty"><CheckCircle2 size={24} /><strong>当前没有 GPU 计算进程</strong><p>所有 GPU 都处于空闲状态。</p></div>}</section>{selectedProcess && <section className="panel process-inspector" aria-label={`进程 ${selectedProcess.pid} 详情`}><PanelHeader icon={<TerminalSquare />} title={`进程 ${selectedProcess.pid}`} subtitle={selectedProcess.isCurrentUser ? '当前 SSH 用户的任务' : `${selectedProcess.username} 的任务`} action={<button className="icon-button" aria-label="关闭进程详情" onClick={() => setSelectedPid(null)}><X size={15} /></button>} /><dl className="definition-list"><div><dt>GPU</dt><dd>GPU {selectedProcess.gpuIndex}</dd></div><div><dt>用户</dt><dd>{selectedProcess.isCurrentUser && <span className="own-label">你</span>}{selectedProcess.username}</dd></div><div><dt>显存</dt><dd>{selectedProcess.memoryUsedMb} MB</dd></div><div><dt>CPU</dt><dd>{selectedProcess.cpuPercent.toFixed(1)}%</dd></div><div><dt>运行时间</dt><dd>{selectedProcess.elapsed}</dd></div><div><dt>命令</dt><dd className="mono process-inspector__command">{selectedProcess.command}</dd></div></dl></section>}</div>
+  return <div className="content-stack"><section className="panel process-panel"><PanelHeader icon={<TerminalSquare />} title="GPU 进程" subtitle={`${snapshot.processes.length} 个计算进程 · 点击查看详情`} />{snapshot.processes.length ? <div className="table-scroll"><table><thead><tr><th>GPU</th><th>PID</th><th>用户</th><th>命令</th><th>GPU 显存</th><th>CPU</th><th>运行时间</th></tr></thead><tbody>{snapshot.processes.map((process) => <tr key={`${process.gpuUuid}-${process.pid}`} tabIndex={0} aria-selected={process.pid === selectedPid} className={`${process.isCurrentUser ? 'is-current-user' : ''} ${process.pid === selectedPid ? 'is-selected' : ''}`} onClick={() => setSelectedPid(process.pid)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedPid(process.pid) } }}><td>GPU {process.gpuIndex}</td><td className="mono">{process.pid}</td><td>{process.isCurrentUser && <span className="own-label">你</span>}{process.username}</td><td className="process-command" title={process.command}>{process.command}</td><td>{formatGpuProcessMemory(process.memoryUsedMb)}</td><td>{process.cpuPercent.toFixed(1)}%</td><td>{process.elapsed}</td></tr>)}</tbody></table></div> : <div className="inline-empty"><CheckCircle2 size={24} /><strong>当前没有 GPU 计算进程</strong><p>所有 GPU 都处于空闲状态。</p></div>}</section>{selectedProcess && <section className="panel process-inspector" aria-label={`进程 ${selectedProcess.pid} 详情`}><PanelHeader icon={<TerminalSquare />} title={`进程 ${selectedProcess.pid}`} subtitle={selectedProcess.isCurrentUser ? '当前 SSH 用户的任务' : `${selectedProcess.username} 的任务`} action={<button className="icon-button" aria-label="关闭进程详情" onClick={() => setSelectedPid(null)}><X size={15} /></button>} /><dl className="definition-list"><div><dt>GPU</dt><dd>GPU {selectedProcess.gpuIndex}</dd></div><div><dt>用户</dt><dd>{selectedProcess.isCurrentUser && <span className="own-label">你</span>}{selectedProcess.username}</dd></div><div><dt>显存</dt><dd>{formatGpuProcessMemory(selectedProcess.memoryUsedMb)}</dd></div><div><dt>CPU</dt><dd>{selectedProcess.cpuPercent.toFixed(1)}%</dd></div><div><dt>运行时间</dt><dd>{selectedProcess.elapsed}</dd></div><div><dt>命令</dt><dd className="mono process-inspector__command">{selectedProcess.command}</dd></div></dl></section>}</div>
 }
 
 function HistoryView({ snapshot, points, animateChart }: { snapshot: Snapshot; points: HistoryPoint[]; animateChart: boolean }) {
@@ -768,7 +775,7 @@ function FleetOverview({ servers, snapshots, settings, totals, sort, descending,
   </div>
 }
 
-function IdleGpuView({ servers, snapshots, history, onSelect }: { servers: Server[]; snapshots: Record<string, Snapshot>; history: Record<string, HistoryPoint[]>; onSelect: (serverId: string, gpuUuid: string) => void }) {
+function IdleGpuView({ servers, snapshots, history, sortRevision, onSelect }: { servers: Server[]; snapshots: Record<string, Snapshot>; history: Record<string, HistoryPoint[]>; sortRevision: number; onSelect: (serverId: string, gpuUuid: string) => void }) {
   const defaults = { gpuMemoryGb: 0, cpuMemoryGb: 0, duration: 0 }
   const [gpuMemoryInput, setGpuMemoryInput] = useState(String(defaults.gpuMemoryGb))
   const [cpuMemoryInput, setCpuMemoryInput] = useState(String(defaults.cpuMemoryGb))
@@ -782,7 +789,7 @@ function IdleGpuView({ servers, snapshots, history, onSelect }: { servers: Serve
   const gpuModels = Array.from(new Set(Object.values(snapshots).flatMap((snapshot) => snapshot.gpus.map((gpu) => gpu.name)))).sort()
   const cpuModels = Array.from(new Set(Object.values(snapshots).map((snapshot) => snapshot.system.cpuModel || '未知 CPU'))).sort()
   const tags = Array.from(new Set(servers.flatMap((server) => server.tags))).sort()
-  const items = servers.flatMap((server) => (snapshots[server.id]?.gpus ?? []).map((gpu) => ({ server, gpu }))).filter(({ server, gpu }) => {
+  const rankedItems = servers.flatMap((server) => (snapshots[server.id]?.gpus ?? []).map((gpu) => ({ server, gpu }))).filter(({ server, gpu }) => {
     const snapshot = snapshots[server.id]
     if (gpuModel !== 'all' && gpu.name !== gpuModel) return false
     if (cpuModel !== 'all' && (snapshot?.system.cpuModel || '未知 CPU') !== cpuModel) return false
@@ -807,11 +814,24 @@ function IdleGpuView({ servers, snapshots, history, onSelect }: { servers: Serve
     })
     return { server, gpu, available: meetsSnapshot && meetsDuration }
   }).sort((left, right) => Number(right.available) - Number(left.available) || (right.gpu.memoryTotalMb - right.gpu.memoryUsedMb) - (left.gpu.memoryTotalMb - left.gpu.memoryUsedMb) || ((snapshots[right.server.id]?.system.memoryTotalBytes ?? 0) - (snapshots[right.server.id]?.system.memoryUsedBytes ?? 0)) - ((snapshots[left.server.id]?.system.memoryTotalBytes ?? 0) - (snapshots[left.server.id]?.system.memoryUsedBytes ?? 0)))
+  const filterSignature = `${gpuMemoryGb}|${cpuMemoryGb}|${otherUserProcess}|${duration}|${gpuModel}|${cpuModel}|${tag}|${sortRevision}`
+  const orderRef = useRef<{ signature: string; keys: string[] }>({ signature: '', keys: [] })
+  const currentKeys = rankedItems.map(({ server, gpu }) => `${server.id}:${gpu.uuid}`)
+  if (orderRef.current.signature !== filterSignature) {
+    orderRef.current = { signature: filterSignature, keys: currentKeys }
+  } else {
+    const currentKeySet = new Set(currentKeys)
+    const retained = orderRef.current.keys.filter((key) => currentKeySet.has(key))
+    const retainedSet = new Set(retained)
+    orderRef.current.keys = [...retained, ...currentKeys.filter((key) => !retainedSet.has(key))]
+  }
+  const order = new Map(orderRef.current.keys.map((key, index) => [key, index]))
+  const items = [...rankedItems].sort((left, right) => (order.get(`${left.server.id}:${left.gpu.uuid}`) ?? Number.MAX_SAFE_INTEGER) - (order.get(`${right.server.id}:${right.gpu.uuid}`) ?? Number.MAX_SAFE_INTEGER))
   const availableCount = items.filter((item) => item.available).length
   const reset = () => { setGpuMemoryInput(String(defaults.gpuMemoryGb)); setCpuMemoryInput(String(defaults.cpuMemoryGb)); setOtherUserProcess('without'); setGpuModel('all'); setCpuModel('all'); setDuration(defaults.duration); setTag('all') }
 
   return <div className="detail-page idle-page">
-    <section className="idle-filters" aria-label="空闲 GPU 筛选条件">
+    <section className="idle-filters" aria-label="空闲算力筛选条件">
       <header><div><SlidersHorizontal size={17} /><div><strong>空闲条件</strong><small>仅检测其他用户；系统显示进程与不超过 GPU MEM 3% 的小占用不计入</small></div></div><button className="button button--secondary button--small" onClick={reset}><RotateCcw size={13} />重置</button></header>
       <div className="idle-filter-grid">
         <label>GPU MEM 至少<div><input inputMode="decimal" type="number" min="0" step="1" value={gpuMemoryInput} onChange={(event) => setGpuMemoryInput(event.target.value)} onBlur={() => setGpuMemoryInput(String(gpuMemoryGb))} /><span>GB</span></div></label>
@@ -845,12 +865,20 @@ function SettingsGroup({ icon, title, children }: { icon: React.ReactNode; title
   return <section className="settings-group"><header><span>{icon}</span><h3>{title}</h3></header><div>{children}</div></section>
 }
 
-function SshImportSheet({ drafts, onClose, onImport }: { drafts: ServerDraft[]; onClose: () => void; onImport: (drafts: ServerDraft[]) => Promise<void> }) {
-  const [selected, setSelected] = useState(() => new Set(drafts.map((_, index) => index)))
+function SshImportSheet({ drafts, servers, onClose, onImport }: { drafts: ServerDraft[]; servers: Server[]; onClose: () => void; onImport: (drafts: ServerDraft[]) => Promise<void> }) {
+  const duplicates = useMemo(() => duplicateImportIndexes(drafts, servers), [drafts, servers])
+  const availableCount = drafts.length - duplicates.size
+  const [selected, setSelected] = useState(() => new Set(drafts.map((_, index) => index).filter((index) => !duplicates.has(index))))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const toggle = (index: number) => setSelected((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next })
-  return <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="sheet import-sheet" role="dialog" aria-modal="true" aria-labelledby="ssh-import-title"><header className="sheet__header"><div><p className="eyebrow">OpenSSH Config</p><h2 id="ssh-import-title">选择要监控的服务器</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="import-list">{drafts.map((draft, index) => <label className="import-row" key={`${draft.sshAlias}-${draft.host}`}><input type="checkbox" checked={selected.has(index)} onChange={() => toggle(index)} /><span><strong>{draft.sshAlias || draft.name}</strong><small>{draft.username}@{draft.host}:{draft.port}{draft.proxyJump ? ` · via ${draft.proxyJump}` : ''}</small></span></label>)}{error && <p className="form-error" role="alert">{error}</p>}</div><footer className="sheet__footer"><span className="sheet__selection-count">已选 {selected.size} / {drafts.length}</span><button className="button button--secondary" onClick={onClose}>取消</button><button className="button button--primary" disabled={saving || selected.size === 0} onClick={async () => { setSaving(true); setError(null); try { await onImport(drafts.filter((_, index) => selected.has(index))) } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '导入中…' : `导入 ${selected.size} 台`}</button></footer></section></div>
+  const toggle = (index: number) => { if (!duplicates.has(index)) setSelected((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next }) }
+  return <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="sheet import-sheet" role="dialog" aria-modal="true" aria-labelledby="ssh-import-title"><header className="sheet__header"><div><p className="eyebrow">OpenSSH Config</p><h2 id="ssh-import-title">选择要监控的服务器</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="import-list">{duplicates.size > 0 && <p className="import-notice" role="status"><AlertCircle size={15} /><span>已识别并跳过 {duplicates.size} 台重复服务器；相同用户名、地址与端口只保留一条连接。</span></p>}{drafts.map((draft, index) => { const duplicate = duplicates.has(index); return <label className={`import-row ${duplicate ? 'import-row--duplicate' : ''}`} key={`${draft.sshAlias}-${draft.host}-${index}`}><input type="checkbox" checked={selected.has(index)} disabled={duplicate} onChange={() => toggle(index)} /><span><strong>{draft.sshAlias || draft.name}</strong><small>{draft.username}@{draft.host}:{draft.port}{draft.proxyJump ? ` · via ${draft.proxyJump}` : ''}</small></span>{duplicate && <em>已存在</em>}</label>})}{error && <p className="form-error" role="alert">{error}</p>}</div><footer className="sheet__footer"><span className="sheet__selection-count">已选 {selected.size} / {availableCount} 台可导入</span><button className="button button--secondary" onClick={onClose}>取消</button><button className="button button--primary" disabled={saving || selected.size === 0} onClick={async () => { setSaving(true); setError(null); try { await onImport(drafts.filter((_, index) => selected.has(index))) } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '导入中…' : `导入 ${selected.size} 台`}</button></footer></section></div>
+}
+
+function DeleteServerDialog({ server, onClose, onDelete }: { server: Server; onClose: () => void; onDelete: () => Promise<void> }) {
+  const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  return <div className="scrim"><section className="sheet delete-server-sheet" role="alertdialog" aria-modal="true" aria-labelledby="delete-server-title"><header className="sheet__header"><div><p className="eyebrow">删除服务器</p><h2 id="delete-server-title">确认删除“{server.name}”？</h2></div><button className="icon-button" onClick={onClose} disabled={deleting} aria-label="关闭"><X size={18} /></button></header><div className="delete-server-body"><span className="delete-server-icon"><Trash2 size={24} /></span><div><p>将从 RackTop 移除 <strong>{server.username}@{server.host}:{server.port}</strong>，并删除这台服务器保存在本机的历史数据。</p><small>服务器本身及远程文件不会受到影响。</small></div>{error && <p className="form-error" role="alert">删除失败：{error}</p>}</div><footer className="sheet__footer"><button className="button button--secondary" onClick={onClose} disabled={deleting}>取消</button><button className="button button--danger" disabled={deleting} onClick={async () => { setDeleting(true); setError(null); try { await onDelete() } catch (reason) { setError(String(reason)); setDeleting(false) } }}>{deleting ? '删除中…' : '删除服务器'}</button></footer></section></div>
 }
 
 function HostKeyDialog({ info, onClose, onTrust }: { info: HostKeyInfo; onClose: () => void; onTrust: () => Promise<void> }) {

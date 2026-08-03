@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
-import { AlertTriangle, Check, KeyRound, ShieldCheck, X } from 'lucide-react'
+import { AlertTriangle, Check, Copy, KeyRound, ShieldCheck, X } from 'lucide-react'
 import type { ServerDraft } from '../types/models'
+import { unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
 
 interface ServerFormProps {
   initial?: Partial<ServerDraft>
@@ -28,8 +29,22 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [passwordAcknowledged, setPasswordAcknowledged] = useState(false)
+  const [setupCopied, setSetupCopied] = useState(false)
 
   const set = <K extends keyof ServerDraft>(key: K, value: ServerDraft[K]) => setDraft((current) => ({ ...current, [key]: value }))
+  const setupPlatform = /Windows/i.test(navigator.userAgent) ? 'windows' : 'unix'
+  const setupTarget = { username: draft.username, host: draft.host, port: draft.port }
+  const setupScript = setupPlatform === 'unix' ? unixSshSetupScript(setupTarget) : windowsSshSetupScript(setupTarget)
+
+  async function copySetupScript() {
+    try {
+      await navigator.clipboard.writeText(setupScript)
+      setSetupCopied(true)
+      window.setTimeout(() => setSetupCopied(false), 1600)
+    } catch {
+      setError('无法访问剪贴板，请手动选择脚本复制。')
+    }
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -111,13 +126,11 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
           </div>
           <details className="key-guide">
             <summary><KeyRound size={17} />SSH 密钥快速配置</summary>
-            <ol>
-              <li>生成密钥：<code>ssh-keygen -t ed25519 -C "RackTop"</code></li>
-              <li>上传公钥：<code>ssh-copy-id {draft.username || 'user'}@{draft.host || 'server'}</code></li>
-              <li>测试：<code>ssh {draft.username || 'user'}@{draft.host || 'server'}</code></li>
-              <li>Windows 没有 ssh-copy-id 时，在 PowerShell 执行：<code>Get-Content $env:USERPROFILE\.ssh\id_ed25519.pub | ssh {draft.username || 'user'}@{draft.host || 'server'} "mkdir -p ~/.ssh; cat &gt;&gt; ~/.ssh/authorized_keys"</code></li>
-              <li>带密码的私钥可交给系统 SSH Agent：<code>ssh-add ~/.ssh/id_ed25519</code></li>
-            </ol>
+            <div className="key-guide__toolbar">
+              <span className="key-guide__platform-label">已检测：{setupPlatform === 'windows' ? '本机 Windows PowerShell → 远程 Linux' : '本机 macOS Terminal → 远程 Linux'}</span>
+              <button type="button" className="button button--secondary button--small" onClick={() => void copySetupScript()}>{setupCopied ? <Check size={13} /> : <Copy size={13} />}{setupCopied ? '已复制' : '复制整段'}</button>
+            </div>
+            <pre><code>{setupScript}</code></pre>
           </details>
           {error && <p className="form-error" role="alert">{error}</p>}
           <footer className="sheet__footer">

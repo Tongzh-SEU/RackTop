@@ -110,6 +110,14 @@ impl Database {
         let name = if draft.name.trim().is_empty() { draft.host.trim().to_string() } else { draft.name.trim().to_string() };
         let tags = serde_json::to_string(&draft.tags).map_err(|error| error.to_string())?;
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let duplicate_name = connection.query_row(
+            "SELECT name FROM servers WHERE lower(trim(host))=lower(trim(?1)) AND port=?2 AND trim(username)=trim(?3) AND id<>?4 LIMIT 1",
+            params![draft.host, draft.port, draft.username, id],
+            |row| row.get::<_, String>(0),
+        ).optional().map_err(|error| error.to_string())?;
+        if let Some(existing_name) = duplicate_name {
+            return Err(format!("服务器已存在：{existing_name}（{}@{}:{}）", draft.username.trim(), draft.host.trim(), draft.port));
+        }
         connection.execute(
             "INSERT INTO servers (id,name,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,auth_method,status)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'unknown')
@@ -260,7 +268,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
         let short = db.save_server(draft("short", 1)).unwrap();
-        let long = db.save_server(draft("long", 30)).unwrap();
+        let long = db.save_server(ServerDraft { port: 2222, ..draft("long", 30) }).unwrap();
         let old_timestamp = 1_000_000;
 
         db.save_snapshot(&snapshot(&short.id, old_timestamp)).unwrap();
@@ -281,6 +289,20 @@ mod tests {
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
         let saved = db.save_server(draft("GPU", 0)).unwrap();
         assert_eq!(saved.history_retention_days, 1);
+    }
+
+    #[test]
+    fn rejects_duplicate_connection_targets_and_deletes_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let saved = db.save_server(draft("first", 30)).unwrap();
+        let duplicate = db.save_server(ServerDraft { name: "duplicate".into(), ..draft("duplicate", 30) });
+        assert!(duplicate.unwrap_err().contains("服务器已存在"));
+
+        db.save_snapshot(&snapshot(&saved.id, 1_000_000)).unwrap();
+        db.delete_server(&saved.id).unwrap();
+        assert!(db.list_servers().unwrap().is_empty());
+        assert!(db.get_history(&saved.id, 0).unwrap().is_empty());
     }
 
     #[test]
