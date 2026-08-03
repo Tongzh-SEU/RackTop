@@ -10,6 +10,7 @@ const demoServers: Server[] = [
   {
     id: 'demo-233',
     name: 'gpu-server-233',
+    location: '计算中心 3 楼 · R2 机架',
     host: '10.201.37.233',
     port: 22,
     username: 'tongzh',
@@ -23,6 +24,7 @@ const demoServers: Server[] = [
   {
     id: 'demo-132',
     name: 'a100-server-132',
+    location: '实验室 301 · A12 机位',
     host: '10.201.127.132',
     port: 22,
     username: 'tongzh',

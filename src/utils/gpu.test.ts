@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GpuMetric, ProcessMetric } from '../types/models'
-import { clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
+import { aggregateGpuMemoryPercent, clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
 
 function gpu(memoryUsedMb: number, memoryTotalMb = 40_960, utilization = 0): GpuMetric {
   return {
@@ -48,6 +48,13 @@ describe('GPU memory display semantics', () => {
   it('keeps core utilization as an independent idle condition', () => {
     expect(isGpuIdle(gpu(14, 40_960, 10), 10)).toBe(false)
     expect(isGpuIdle(gpu(14, 40_960, 9.9), 10)).toBe(true)
+  })
+
+  it('weights aggregate GPU memory usage by device capacity', () => {
+    const smallerGpu = gpu(10_240, 20_480)
+    const largerGpu = gpu(20_480, 81_920)
+    expect(aggregateGpuMemoryPercent([smallerGpu, largerGpu])).toBe(30)
+    expect(aggregateGpuMemoryPercent([])).toBe(0)
   })
 
   it('uses orange and red memory thresholds', () => {

@@ -25,6 +25,7 @@ impl Database {
                  CREATE TABLE IF NOT EXISTS servers (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
+                    location TEXT,
                     host TEXT NOT NULL,
                     port INTEGER NOT NULL,
                     username TEXT NOT NULL,
@@ -69,23 +70,31 @@ impl Database {
         if !snapshot_columns.contains("swap_utilization") {
             connection.execute("ALTER TABLE snapshots ADD COLUMN swap_utilization REAL NOT NULL DEFAULT 0", []).map_err(|error| error.to_string())?;
         }
+        let server_columns = {
+            let mut statement = connection.prepare("PRAGMA table_info(servers)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
+            columns.filter_map(Result::ok).collect::<HashSet<_>>()
+        };
+        if !server_columns.contains("location") {
+            connection.execute("ALTER TABLE servers ADD COLUMN location TEXT", []).map_err(|error| error.to_string())?;
+        }
         Ok(Self { connection: Mutex::new(connection), session_passwords: Mutex::new(HashMap::new()) })
     }
 
     pub fn list_servers(&self) -> Result<Vec<Server>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection
-            .prepare("SELECT id,name,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,auth_method,status,last_error,last_seen_at FROM servers ORDER BY name COLLATE NOCASE")
+            .prepare("SELECT id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,auth_method,status,last_error,last_seen_at FROM servers ORDER BY name COLLATE NOCASE")
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], |row| {
-                let tags: String = row.get(8)?;
+                let tags: String = row.get(9)?;
                 Ok(Server {
-                    id: row.get(0)?, name: row.get(1)?, host: row.get(2)?, port: row.get(3)?, username: row.get(4)?,
-                    ssh_alias: row.get(5)?, identity_file: row.get(6)?, proxy_jump: row.get(7)?,
-                    tags: serde_json::from_str(&tags).unwrap_or_default(), sampling_interval_seconds: row.get(9)?,
-                    history_retention_days: row.get(10)?, auth_method: row.get(11)?, status: row.get(12)?,
-                    last_error: row.get(13)?, last_seen_at: row.get(14)?,
+                    id: row.get(0)?, name: row.get(1)?, location: row.get(2)?, host: row.get(3)?, port: row.get(4)?, username: row.get(5)?,
+                    ssh_alias: row.get(6)?, identity_file: row.get(7)?, proxy_jump: row.get(8)?,
+                    tags: serde_json::from_str(&tags).unwrap_or_default(), sampling_interval_seconds: row.get(10)?,
+                    history_retention_days: row.get(11)?, auth_method: row.get(12)?, status: row.get(13)?,
+                    last_error: row.get(14)?, last_seen_at: row.get(15)?,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -119,10 +128,10 @@ impl Database {
             return Err(format!("服务器已存在：{existing_name}（{}@{}:{}）", draft.username.trim(), draft.host.trim(), draft.port));
         }
         connection.execute(
-            "INSERT INTO servers (id,name,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,auth_method,status)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'unknown')
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name,host=excluded.host,port=excluded.port,username=excluded.username,ssh_alias=excluded.ssh_alias,identity_file=excluded.identity_file,proxy_jump=excluded.proxy_jump,tags_json=excluded.tags_json,sampling_interval_seconds=excluded.sampling_interval_seconds,history_retention_days=excluded.history_retention_days,auth_method=excluded.auth_method",
-            params![id, name, draft.host.trim(), draft.port, draft.username.trim(), blank_to_none(draft.ssh_alias), blank_to_none(draft.identity_file), blank_to_none(draft.proxy_jump), tags, draft.sampling_interval_seconds.max(2), draft.history_retention_days.max(1), draft.auth_method],
+            "INSERT INTO servers (id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,auth_method,status)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'unknown')
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name,location=excluded.location,host=excluded.host,port=excluded.port,username=excluded.username,ssh_alias=excluded.ssh_alias,identity_file=excluded.identity_file,proxy_jump=excluded.proxy_jump,tags_json=excluded.tags_json,sampling_interval_seconds=excluded.sampling_interval_seconds,history_retention_days=excluded.history_retention_days,auth_method=excluded.auth_method",
+            params![id, name, blank_to_none(draft.location), draft.host.trim(), draft.port, draft.username.trim(), blank_to_none(draft.ssh_alias), blank_to_none(draft.identity_file), blank_to_none(draft.proxy_jump), tags, draft.sampling_interval_seconds.max(2), draft.history_retention_days.max(1), draft.auth_method],
         ).map_err(|error| error.to_string())?;
         drop(connection);
 
@@ -221,6 +230,7 @@ mod tests {
         ServerDraft {
             id: None,
             name: name.into(),
+            location: None,
             host: "10.0.0.1".into(),
             port: 22,
             username: "test".into(),
@@ -258,8 +268,9 @@ mod tests {
     fn server_round_trip_does_not_store_password() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
-        let saved = db.save_server(ServerDraft { sampling_interval_seconds: 1, password: Some("secret".into()), ..draft("GPU", 30) }).unwrap();
+        let saved = db.save_server(ServerDraft { location: Some("Lab 301 / Rack R2".into()), sampling_interval_seconds: 1, password: Some("secret".into()), ..draft("GPU", 30) }).unwrap();
         assert_eq!(saved.sampling_interval_seconds, 2);
+        assert_eq!(saved.location.as_deref(), Some("Lab 301 / Rack R2"));
         assert_eq!(db.list_servers().unwrap().len(), 1);
     }
 
@@ -325,5 +336,35 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].swap_utilization, 25.0);
         assert_eq!(history[0].gpu_memory_utilizations.get("GPU-memory"), Some(&25.0));
+    }
+
+    #[test]
+    fn migrates_server_location_without_losing_existing_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-servers.sqlite");
+        let legacy = Connection::open(&path).unwrap();
+        legacy.execute_batch(
+            "CREATE TABLE servers (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL,
+                username TEXT NOT NULL, ssh_alias TEXT, identity_file TEXT, proxy_jump TEXT,
+                tags_json TEXT NOT NULL DEFAULT '[]', sampling_interval_seconds INTEGER NOT NULL DEFAULT 2,
+                history_retention_days INTEGER NOT NULL DEFAULT 30, auth_method TEXT NOT NULL DEFAULT 'sshAgent',
+                status TEXT NOT NULL DEFAULT 'unknown', last_error TEXT, last_seen_at INTEGER
+            );
+            INSERT INTO servers (id,name,host,port,username) VALUES ('legacy','Legacy GPU','10.0.0.9',22,'test');",
+        ).unwrap();
+        drop(legacy);
+
+        let db = Database::open(&path).unwrap();
+        let existing = db.get_server("legacy").unwrap();
+        assert_eq!(existing.name, "Legacy GPU");
+        assert_eq!(existing.location, None);
+
+        let updated = db.save_server(ServerDraft {
+            id: Some(existing.id),
+            location: Some("Lab 301 / Rack R2 / U18".into()),
+            ..draft("Legacy GPU", 30)
+        }).unwrap();
+        assert_eq!(updated.location.as_deref(), Some("Lab 301 / Rack R2 / U18"));
     }
 }

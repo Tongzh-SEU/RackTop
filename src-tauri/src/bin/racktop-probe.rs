@@ -12,7 +12,7 @@ async fn main() {
     for (index, target) in targets.into_iter().enumerate() {
         let (username, host) = target.split_once('@').unwrap_or(("tongzh", target.as_str()));
         let server = Server {
-            id: format!("probe-{index}"), name: target.clone(), host: host.into(), port: 22, username: username.into(),
+            id: format!("probe-{index}"), name: target.clone(), location: None, host: host.into(), port: 22, username: username.into(),
             ssh_alias: None, identity_file: None, proxy_jump: None, tags: vec!["integration-test".into()],
             sampling_interval_seconds: 2, history_retention_days: 1, auth_method: "sshAgent".into(),
             status: "unknown".into(), last_error: None, last_seen_at: None,

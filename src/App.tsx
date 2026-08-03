@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   Activity,
   AlertCircle,
@@ -43,7 +44,7 @@ import { MetricBar } from './components/MetricBar'
 import { ServerForm } from './components/ServerForm'
 import { StatusPill } from './components/StatusPill'
 import { TrendChart } from './components/TrendChart'
-import { clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, hasOtherUserGpuWorkload, isGpuIdle } from './utils/gpu'
+import { aggregateGpuMemoryPercent, clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, hasOtherUserGpuWorkload, isGpuIdle } from './utils/gpu'
 import { DEFAULT_IDLE_FILTERS, loadIdleFilters, rankIdleGpuItems, saveIdleFilters, type IdleFilters, type IdleGpuItem } from './utils/idleFilters'
 import { duplicateImportIndexes } from './utils/serverIdentity'
 
@@ -72,10 +73,17 @@ function relativeTime(timestamp?: number | null) {
   return `${Math.floor(seconds / 86_400)} 天前`
 }
 
+function startWindowDrag(event: MouseEvent<HTMLElement>) {
+  if (!api.isDesktop || event.button !== 0 || event.detail !== 1) return
+  if ((event.target as HTMLElement).closest('button, input, select, textarea, a, [role="button"]')) return
+  void getCurrentWindow().startDragging()
+}
+
 function serverToDraft(server: Server): Partial<ServerDraft> {
   return {
     id: server.id,
     name: server.name,
+    location: server.location ?? undefined,
     host: server.host,
     port: server.port,
     username: server.username,
@@ -317,7 +325,7 @@ function App() {
   const visibleServers = useMemo(() => {
     const needle = search.trim().toLowerCase()
     if (!needle) return servers
-    return servers.filter((server) => [server.name, server.host, server.username, ...server.tags].some((value) => value.toLowerCase().includes(needle)))
+    return servers.filter((server) => [server.name, server.location ?? '', server.host, server.username, ...server.tags].some((value) => value.toLowerCase().includes(needle)))
   }, [servers, search])
 
   const idleGpuItems = useMemo(() => rankIdleGpuItems(servers, snapshots, history, idleFilters), [servers, snapshots, history, idleFilters])
@@ -397,7 +405,7 @@ function App() {
   return (
     <div className="app-shell">
       <aside className={`sidebar ${api.isDesktop ? 'sidebar--desktop' : ''}`}>
-        <div className="sidebar__titlebar" data-tauri-drag-region>
+        <div className="sidebar__titlebar" onMouseDown={startWindowDrag}>
           <div className="traffic-spacer" aria-hidden="true" />
           <div className="brand">
             <span className="brand__mark"><Activity size={18} strokeWidth={2.4} /></span>
@@ -422,7 +430,7 @@ function App() {
                 <span className={`server-row__status server-row__status--${server.status}`} />
                 <span className="server-row__content">
                   <span className="server-row__title">{server.name}</span>
-                  <span className="server-row__meta">{snapshot ? `${snapshot.gpus.length} GPU · CPU ${Math.round(clampPercent(snapshot.system.cpuUtilization))}%` : server.host}</span>
+                  <span className="server-row__meta">{snapshot ? `${snapshot.gpus.length} GPU ${Math.round(aggregateGpuMemoryPercent(snapshot.gpus))}% · CPU ${Math.round(clampPercent(snapshot.system.memoryTotalBytes ? snapshot.system.memoryUsedBytes / snapshot.system.memoryTotalBytes * 100 : 0))}%` : server.host}</span>
                 </span>
                 {snapshot?.processes.some((process) => process.isCurrentUser) && <span className="own-task-dot" title="有你的任务"><UserRound size={11} /></span>}
                 <ChevronRight size={14} className="server-row__chevron" />
@@ -439,43 +447,45 @@ function App() {
       </aside>
 
       <main className="workspace">
-        <header className="topbar" data-tauri-drag-region>
+        <header className="topbar" onMouseDown={startWindowDrag}>
           <div className="topbar__title">
             <p className="eyebrow">{mainView === 'idle' ? '资源发现' : mainView === 'fleet' ? `${totals.online} / ${servers.length} 台在线` : selectedServer ? selectedServer.host : '所有服务器'}</p>
             <h1>{mainView === 'idle' ? '寻找空闲算力' : mainView === 'fleet' ? '算力总览' : selectedServer?.name ?? 'RackTop 总览'}</h1>
           </div>
-          <div className="topbar__actions" data-tauri-drag-region>
+          <div className="topbar__actions">
             <span className={`refresh-label ${paused ? 'is-paused' : ''}`}><Clock3 size={14} />{paused ? '采集已暂停' : mainView === 'server' && selectedServer ? relativeTime(selectedServer.lastSeenAt) : totals.latestRefresh ? relativeTime(totals.latestRefresh) : `${settings?.defaultSamplingIntervalSeconds ?? 2} 秒采样`}</span>
             <button className="button button--secondary" onClick={() => void runManualRefreshAll()} disabled={manualRefreshingAll}><RefreshCw size={16} className={manualRefreshingAll ? 'spin' : ''} />刷新全部</button>
             <button className="icon-button" aria-label="通知"><Bell size={18} />{totals.hot > 0 && <span className="notification-dot" />}</button>
           </div>
         </header>
 
-        {servers.length === 0 ? (
-          <EmptyState onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
-        ) : mainView === 'idle' ? (
-          <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} onFiltersChange={setIdleFilters} sortRevision={manualRefreshRevision} onSelect={(serverId, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu'); setMainView('server') }} />
-        ) : mainView === 'fleet' ? (
-          <FleetOverview servers={servers} snapshots={snapshots} settings={settings} totals={totals} sort={fleetSort} descending={fleetDescending} onSort={setFleetSort} onToggleOrder={() => setFleetDescending((value) => !value)} onSelect={(serverId, tab, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid ?? null); setSelectedTab(tab); setMainView('server') }} />
-        ) : selectedServer && selectedSnapshot ? (
-          <ServerDetail
-            server={selectedServer}
-            snapshot={selectedSnapshot}
-            points={history[selectedServer.id] ?? []}
-            settings={settings}
-            tab={selectedTab}
-            selectedGpuUuid={selectedGpuUuid}
-            onTab={(tab) => { setSelectedTab(tab); if (tab !== 'gpu') setSelectedGpuUuid(null) }}
-            onSelectGpu={(gpuUuid) => { setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu') }}
-            onRefresh={() => void runManualRefreshServer(selectedServer.id)}
-            onDelete={() => setServerPendingDelete(selectedServer)}
-            onEdit={() => { setEditingServer(selectedServer); setShowServerForm(true) }}
-            isRefreshing={manualRefreshingServers.has(selectedServer.id)}
-            animateCharts={manualRefreshingAll || manualRefreshingServers.has(selectedServer.id)}
-          />
-        ) : (
-          <LoadingServer server={selectedServer} isRefreshing={selectedServer ? busy.has(selectedServer.id) : false} onRefresh={() => selectedServer && void refreshServer(selectedServer.id)} />
-        )}
+        <div className="workspace__scroll">
+          {servers.length === 0 ? (
+            <EmptyState onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
+          ) : mainView === 'idle' ? (
+            <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} onFiltersChange={setIdleFilters} sortRevision={manualRefreshRevision} onSelect={(serverId, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu'); setMainView('server') }} />
+          ) : mainView === 'fleet' ? (
+            <FleetOverview servers={servers} snapshots={snapshots} settings={settings} totals={totals} sort={fleetSort} descending={fleetDescending} onSort={setFleetSort} onToggleOrder={() => setFleetDescending((value) => !value)} onSelect={(serverId, tab, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid ?? null); setSelectedTab(tab); setMainView('server') }} />
+          ) : selectedServer && selectedSnapshot ? (
+            <ServerDetail
+              server={selectedServer}
+              snapshot={selectedSnapshot}
+              points={history[selectedServer.id] ?? []}
+              settings={settings}
+              tab={selectedTab}
+              selectedGpuUuid={selectedGpuUuid}
+              onTab={(tab) => { setSelectedTab(tab); if (tab !== 'gpu') setSelectedGpuUuid(null) }}
+              onSelectGpu={(gpuUuid) => { setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu') }}
+              onRefresh={() => void runManualRefreshServer(selectedServer.id)}
+              onDelete={() => setServerPendingDelete(selectedServer)}
+              onEdit={() => { setEditingServer(selectedServer); setShowServerForm(true) }}
+              isRefreshing={manualRefreshingServers.has(selectedServer.id)}
+              animateCharts={manualRefreshingAll || manualRefreshingServers.has(selectedServer.id)}
+            />
+          ) : (
+            <LoadingServer server={selectedServer} isRefreshing={selectedServer ? busy.has(selectedServer.id) : false} onRefresh={() => selectedServer && void refreshServer(selectedServer.id)} />
+          )}
+        </div>
       </main>
 
       {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultSamplingInterval={settings?.defaultSamplingIntervalSeconds} defaultHistoryRetentionDays={settings?.historyRetentionDays} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
@@ -530,7 +540,7 @@ function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid
   return (
     <div className="detail-page">
       <div className="server-identity">
-        <div><StatusPill status={server.status} /><span className="server-identity__meta">{snapshot.username}@{snapshot.hostname} · 端口 {server.port}</span></div>
+        <div><StatusPill status={server.status} /><span className="server-identity__meta">{server.location ? `${server.location} · ` : ''}{snapshot.username}@{snapshot.hostname} · 端口 {server.port}</span></div>
         <button className="icon-button" aria-label="编辑服务器" onClick={onEdit}><MoreHorizontal size={18} /></button>
       </div>
       <div className="detail-tabs" role="tablist">
@@ -662,7 +672,7 @@ function LogsView({ server, snapshot }: { server: Server; snapshot: Snapshot }) 
 }
 
 function ConnectionView({ server, onRefresh, onDelete, onEdit, isRefreshing }: { server: Server; onRefresh: () => void; onDelete: () => void; onEdit: () => void; isRefreshing: boolean }) {
-  return <div className="content-stack"><section className="panel connection-panel"><PanelHeader icon={<KeyRound />} title="SSH 连接" subtitle="认证信息仅在本机使用" /><dl className="definition-list"><div><dt>地址</dt><dd className="mono">{server.username}@{server.host}:{server.port}</dd></div><div><dt>认证</dt><dd>{server.authMethod === 'sshAgent' ? 'SSH Agent / 默认密钥' : server.authMethod}</dd></div><div><dt>SSH Config</dt><dd>{server.sshAlias || '未使用别名'}</dd></div><div><dt>私钥</dt><dd className="mono">{server.identityFile || '由 OpenSSH 自动选择'}</dd></div><div><dt>ProxyJump</dt><dd className="mono">{server.proxyJump || '无'}</dd></div></dl><div className="panel__actions"><button className="button button--primary" onClick={onRefresh} disabled={isRefreshing}><RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />测试并重新连接</button><button className="button button--secondary" onClick={onEdit}><Settings size={16} />编辑配置</button></div></section><section className="panel danger-zone"><div><strong>删除服务器</strong><p>同时移除该服务器在本机保存的历史数据。</p></div><button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除</button></section></div>
+  return <div className="content-stack"><section className="panel connection-panel"><PanelHeader icon={<KeyRound />} title="SSH 连接" subtitle="认证信息仅在本机使用" /><dl className="definition-list"><div><dt>物理位置</dt><dd>{server.location || '未填写'}</dd></div><div><dt>连接地址</dt><dd className="mono">{server.username}@{server.host}:{server.port}</dd></div><div><dt>认证</dt><dd>{server.authMethod === 'sshAgent' ? 'SSH Agent / 默认密钥' : server.authMethod}</dd></div><div><dt>SSH Config</dt><dd>{server.sshAlias || '未使用别名'}</dd></div><div><dt>私钥</dt><dd className="mono">{server.identityFile || '由 OpenSSH 自动选择'}</dd></div><div><dt>ProxyJump</dt><dd className="mono">{server.proxyJump || '无'}</dd></div></dl><div className="panel__actions"><button className="button button--primary" onClick={onRefresh} disabled={isRefreshing}><RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />测试并重新连接</button><button className="button button--secondary" onClick={onEdit}><Settings size={16} />编辑配置</button></div></section><section className="panel danger-zone"><div><strong>删除服务器</strong><p>同时移除该服务器在本机保存的历史数据。</p></div><button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除</button></section></div>
 }
 
 function NvidiaWarning({ snapshot, onRefresh }: { snapshot: Snapshot; onRefresh: () => void }) {
@@ -749,7 +759,7 @@ function FleetOverview({ servers, snapshots, settings, totals, sort, descending,
         return <MasonryItem key={server.id}><article className={`panel fleet-card fleet-card--${server.status}`}>
           <button className="fleet-card__header" onClick={() => onSelect(server.id, 'overview')}>
             <span className={`server-row__status server-row__status--${server.status}`} />
-            <span><strong>{server.name}</strong><small>{snapshot ? `${snapshot.username}@${snapshot.hostname}` : `${server.username}@${server.host}`}</small></span>
+            <span><strong>{server.name}</strong><small>{server.location ? `${server.location} · ` : ''}{snapshot ? `${snapshot.username}@${snapshot.hostname}` : `${server.username}@${server.host}`}</small></span>
             <StatusPill status={server.status} />
             <ChevronRight size={15} />
           </button>
@@ -838,7 +848,36 @@ function SettingsSheet({ settings, onClose, onSave }: { settings: AppSettings; o
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const set = <K extends keyof AppSettings>(key: K, next: AppSettings[K]) => setValue((current) => ({ ...current, [key]: next }))
-  return <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="sheet settings-sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title"><header className="sheet__header"><div><p className="eyebrow">偏好设置</p><h2 id="settings-title">采样、历史与外观</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="settings-body"><SettingsGroup icon={<RefreshCw />} title="采样"><label>新服务器默认采样 <span>{value.defaultSamplingIntervalSeconds} 秒</span><input type="range" min="2" max="30" value={value.defaultSamplingIntervalSeconds} onChange={(event) => set('defaultSamplingIntervalSeconds', Number(event.target.value))} /></label><label>后台最低采样间隔 <span>{value.backgroundSamplingIntervalSeconds} 秒</span><input type="range" min="5" max="120" value={value.backgroundSamplingIntervalSeconds} onChange={(event) => set('backgroundSamplingIntervalSeconds', Number(event.target.value))} /></label><label>GPU 进程刷新 <select value={value.processIntervalSeconds} onChange={(event) => set('processIntervalSeconds', Number(event.target.value))}><option value="2">2 秒</option><option value="5">5 秒</option><option value="10">10 秒</option><option value="30">30 秒</option></select></label><label>实时趋势窗口 <span>{value.realtimeWindowMinutes} 分钟</span><input type="range" min="10" max="360" step="10" value={value.realtimeWindowMinutes} onChange={(event) => set('realtimeWindowMinutes', Number(event.target.value))} /></label></SettingsGroup><SettingsGroup icon={<Database />} title="历史"><label className="switch-row"><span><strong>保存历史数据</strong><small>使用本地 SQLite，按每台服务器的策略自动清理</small></span><input type="checkbox" checked={value.historyEnabled} onChange={(event) => set('historyEnabled', event.target.checked)} /></label><label>新服务器默认保存时间 <select disabled={!value.historyEnabled} value={value.historyRetentionDays} onChange={(event) => set('historyRetentionDays', Number(event.target.value))}><option value="1">1 天</option><option value="7">7 天</option><option value="30">30 天</option><option value="90">90 天</option></select></label></SettingsGroup><SettingsGroup icon={<CircleGauge />} title="空闲与告警"><label>空闲 GPU 阈值 <span>{value.idleGpuThreshold}%</span><input type="range" min="0" max="30" value={value.idleGpuThreshold} onChange={(event) => set('idleGpuThreshold', Number(event.target.value))} /></label><label>空闲通知持续时间 <select value={value.idleDurationMinutes} onChange={(event) => set('idleDurationMinutes', Number(event.target.value))}><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option></select></label><label>显存释放阈值 <span>{(value.idleMemoryThresholdMb / 1024).toFixed(0)} GB</span><input type="range" min="0" max="163840" step="4096" value={value.idleMemoryThresholdMb} onChange={(event) => set('idleMemoryThresholdMb', Number(event.target.value))} /></label><label>温度告警 <span>{value.temperatureThresholdCelsius}°C</span><input type="range" min="60" max="95" value={value.temperatureThresholdCelsius} onChange={(event) => set('temperatureThresholdCelsius', Number(event.target.value))} /></label></SettingsGroup><SettingsGroup icon={<SlidersHorizontal />} title="外观"><label>主题<select value={value.theme} onChange={(event) => set('theme', event.target.value as AppSettings['theme'])}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label><label>个人占用强调色<input type="color" value={value.currentUserAccent} onChange={(event) => set('currentUserAccent', event.target.value)} /></label><label className="switch-row"><span><strong>减少非必要动效</strong><small>也会自动尊重系统“减少动态效果”设置</small></span><input type="checkbox" checked={value.reduceMotion} onChange={(event) => set('reduceMotion', event.target.checked)} /></label></SettingsGroup>{error && <p className="form-error" role="alert">{error}</p>}</div><footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>取消</button><button className="button button--primary" disabled={saving} onClick={async () => { setSaving(true); setError(null); try { await onSave(value) } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '保存中…' : '保存设置'}</button></footer></section></div>
+  return <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <section className="sheet settings-sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header className="sheet__header"><div><p className="eyebrow">偏好设置</p><h2 id="settings-title">外观、采样与历史</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
+      <div className="settings-body">
+        <SettingsGroup icon={<SlidersHorizontal />} title="外观">
+          <label>主题<select value={value.theme} onChange={(event) => set('theme', event.target.value as AppSettings['theme'])}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
+          <label className="switch-row"><span><strong>我的任务标记色</strong><small>用于显存光标、你的任务标签与侧栏提示</small></span><input type="color" value={value.currentUserAccent} onChange={(event) => set('currentUserAccent', event.target.value)} /></label>
+          <label className="switch-row"><span><strong>减少非必要动效</strong><small>也会自动尊重系统“减少动态效果”设置</small></span><input type="checkbox" checked={value.reduceMotion} onChange={(event) => set('reduceMotion', event.target.checked)} /></label>
+        </SettingsGroup>
+        <SettingsGroup icon={<RefreshCw />} title="采样">
+          <label>新服务器默认采样 <span>{value.defaultSamplingIntervalSeconds} 秒</span><input type="range" min="2" max="30" value={value.defaultSamplingIntervalSeconds} onChange={(event) => set('defaultSamplingIntervalSeconds', Number(event.target.value))} /></label>
+          <label>后台最低采样间隔 <span>{value.backgroundSamplingIntervalSeconds} 秒</span><input type="range" min="5" max="120" value={value.backgroundSamplingIntervalSeconds} onChange={(event) => set('backgroundSamplingIntervalSeconds', Number(event.target.value))} /></label>
+          <label>GPU 进程刷新 <select value={value.processIntervalSeconds} onChange={(event) => set('processIntervalSeconds', Number(event.target.value))}><option value="2">2 秒</option><option value="5">5 秒</option><option value="10">10 秒</option><option value="30">30 秒</option></select></label>
+          <label>实时趋势窗口 <span>{value.realtimeWindowMinutes} 分钟</span><input type="range" min="10" max="360" step="10" value={value.realtimeWindowMinutes} onChange={(event) => set('realtimeWindowMinutes', Number(event.target.value))} /></label>
+        </SettingsGroup>
+        <SettingsGroup icon={<Database />} title="历史">
+          <label className="switch-row"><span><strong>保存历史数据</strong><small>使用本地 SQLite，按每台服务器的策略自动清理</small></span><input type="checkbox" checked={value.historyEnabled} onChange={(event) => set('historyEnabled', event.target.checked)} /></label>
+          <label>新服务器默认保存时间 <select disabled={!value.historyEnabled} value={value.historyRetentionDays} onChange={(event) => set('historyRetentionDays', Number(event.target.value))}><option value="1">1 天</option><option value="7">7 天</option><option value="30">30 天</option><option value="90">90 天</option></select></label>
+        </SettingsGroup>
+        <SettingsGroup icon={<CircleGauge />} title="空闲与告警">
+          <label>空闲 GPU 阈值 <span>{value.idleGpuThreshold}%</span><input type="range" min="0" max="30" value={value.idleGpuThreshold} onChange={(event) => set('idleGpuThreshold', Number(event.target.value))} /></label>
+          <label>空闲通知持续时间 <select value={value.idleDurationMinutes} onChange={(event) => set('idleDurationMinutes', Number(event.target.value))}><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option></select></label>
+          <label>显存释放阈值 <span>{(value.idleMemoryThresholdMb / 1024).toFixed(0)} GB</span><input type="range" min="0" max="163840" step="4096" value={value.idleMemoryThresholdMb} onChange={(event) => set('idleMemoryThresholdMb', Number(event.target.value))} /></label>
+          <label>温度告警 <span>{value.temperatureThresholdCelsius}°C</span><input type="range" min="60" max="95" value={value.temperatureThresholdCelsius} onChange={(event) => set('temperatureThresholdCelsius', Number(event.target.value))} /></label>
+        </SettingsGroup>
+        {error && <p className="form-error" role="alert">{error}</p>}
+      </div>
+      <footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>取消</button><button className="button button--primary" disabled={saving} onClick={async () => { setSaving(true); setError(null); try { await onSave(value) } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '保存中…' : '保存设置'}</button></footer>
+    </section>
+  </div>
 }
 
 function SettingsGroup({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {

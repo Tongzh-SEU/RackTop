@@ -24,6 +24,14 @@ export function gpuMemoryPercent(gpu: GpuMetric): number {
   return clampPercent(gpu.memoryUsedMb / gpu.memoryTotalMb * 100)
 }
 
+export function aggregateGpuMemoryPercent(gpus: GpuMetric[]): number {
+  const totals = gpus.reduce((result, gpu) => ({
+    used: result.used + (Number.isFinite(gpu.memoryUsedMb) ? Math.max(0, gpu.memoryUsedMb) : 0),
+    capacity: result.capacity + (Number.isFinite(gpu.memoryTotalMb) ? Math.max(0, gpu.memoryTotalMb) : 0),
+  }), { used: 0, capacity: 0 })
+  return totals.capacity > 0 ? clampPercent(totals.used / totals.capacity * 100) : 0
+}
+
 export function displayedGpuMemoryPercent(memoryPercent: number): number {
   const safePercent = clampPercent(memoryPercent)
   return safePercent < 1 ? 0 : Math.round(safePercent)
