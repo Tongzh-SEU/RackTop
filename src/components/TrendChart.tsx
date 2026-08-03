@@ -4,21 +4,34 @@ import { LineChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { HistoryPoint, Snapshot } from '../types/models'
-import { clampPercent } from '../utils/gpu'
+import { clampPercent, gpuMemoryPercent } from '../utils/gpu'
+import { formatFiveMinuteTimeLabel, MINUTE_MS, minuteTickSplitNumber } from '../utils/timeAxis'
 
 echarts.use([LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
+
+const BYTES_PER_GB = 1024 ** 3
+function percentTooltip(value: number) {
+  return `${Number(value).toFixed(1)}%`
+}
+
+function capacityTooltip(value: number, totalGb: number) {
+  const percent = clampPercent(Number(value))
+  const usedGb = totalGb * percent / 100
+  return `${percent.toFixed(1)}% · ${usedGb.toFixed(1)} / ${totalGb.toFixed(1)} GB`
+}
 
 interface TrendChartProps {
   points: HistoryPoint[]
   snapshot?: Snapshot
-  mode?: 'all' | 'cpu' | 'gpu'
+  mode?: 'all' | 'cpu' | 'gpu' | 'systemMemory' | 'gpuMemory'
   height?: number
+  animate?: boolean
 }
 
-export function TrendChart({ points, snapshot, mode = 'all', height = 260 }: TrendChartProps) {
-  const reducedMotion = document.documentElement.dataset.reduceMotion === 'true' || window.matchMedia('(prefers-reduced-motion: reduce)').matches
+export function TrendChart({ points, snapshot, mode = 'all', height = 260, animate = false }: TrendChartProps) {
   const series = []
-  if (mode !== 'gpu') {
+  const timestamps = points.map((point) => point.timestamp * 1000)
+  if (mode === 'all' || mode === 'cpu') {
     series.push({
       name: 'CPU',
       type: 'line',
@@ -26,21 +39,50 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260 }: Tre
       smooth: false,
       clip: true,
       data: points.map((point) => [point.timestamp * 1000, clampPercent(point.cpuUtilization)]),
+      tooltip: { valueFormatter: percentTooltip },
       lineStyle: { width: 2, color: '#0a84ff' },
       itemStyle: { color: '#0a84ff' },
       areaStyle: { color: 'rgba(10, 132, 255, 0.08)' },
     })
   }
-  if (mode !== 'cpu') {
+  if (mode === 'systemMemory') {
+    series.push({
+      name: '系统内存',
+      type: 'line',
+      showSymbol: false,
+      smooth: false,
+      clip: true,
+      data: points.map((point) => [point.timestamp * 1000, clampPercent(point.memoryUtilization)]),
+      tooltip: { valueFormatter: (value: number) => capacityTooltip(value, (snapshot?.system.memoryTotalBytes ?? 0) / BYTES_PER_GB) },
+      lineStyle: { width: 2, color: '#af52de' },
+      itemStyle: { color: '#af52de' },
+      areaStyle: { color: 'rgba(175, 82, 222, 0.08)' },
+    })
+    series.push({
+      name: 'SWP',
+      type: 'line',
+      showSymbol: false,
+      smooth: false,
+      clip: true,
+      data: points.map((point) => [point.timestamp * 1000, clampPercent(point.swapUtilization ?? 0)]),
+      tooltip: { valueFormatter: (value: number) => capacityTooltip(value, (snapshot?.system.swapTotalBytes ?? 0) / BYTES_PER_GB) },
+      lineStyle: { width: 2, color: '#ff9f0a' },
+      itemStyle: { color: '#ff9f0a' },
+      areaStyle: { color: 'rgba(255, 159, 10, 0.05)' },
+    })
+  }
+  if (mode === 'all' || mode === 'gpu' || mode === 'gpuMemory') {
     snapshot?.gpus.forEach((gpu, index) => {
       const colors = ['#30d158', '#bf5af2', '#ff9f0a', '#64d2ff']
+      const isMemory = mode === 'gpuMemory'
       series.push({
         name: `GPU ${gpu.index}`,
         type: 'line',
         showSymbol: false,
         smooth: false,
         clip: true,
-        data: points.map((point) => [point.timestamp * 1000, clampPercent(point.gpuUtilizations[gpu.uuid] ?? 0)]),
+        data: points.map((point) => [point.timestamp * 1000, clampPercent(isMemory ? point.gpuMemoryUtilizations?.[gpu.uuid] ?? gpuMemoryPercent(gpu) : point.gpuUtilizations[gpu.uuid] ?? 0)]),
+        tooltip: { valueFormatter: isMemory ? (value: number) => capacityTooltip(value, gpu.memoryTotalMb / 1024) : percentTooltip },
         lineStyle: { width: 2, color: colors[index % colors.length] },
         itemStyle: { color: colors[index % colors.length] },
       })
@@ -50,21 +92,26 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260 }: Tre
   return (
     <ReactEChartsCore
       echarts={echarts}
-      style={{ height }}
+      style={{ width: '100%', minWidth: 0, height }}
       option={{
-        animation: !reducedMotion,
-        animationDuration: reducedMotion ? 0 : 180,
+        animation: animate,
+        animationDuration: animate ? 180 : 0,
+        animationDurationUpdate: animate ? 180 : 0,
         animationEasing: 'cubicOut',
+        animationEasingUpdate: 'cubicOut',
         textStyle: { fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' },
         grid: { top: 36, right: 14, bottom: 28, left: 42 },
         legend: { top: 0, left: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 4, textStyle: { color: '#7b7f87', fontSize: 11 } },
-        tooltip: { trigger: 'axis', valueFormatter: (value: number) => `${Number(value).toFixed(1)}%` },
+        tooltip: { trigger: 'axis' },
         xAxis: {
           type: 'time',
           boundaryGap: false,
+          splitNumber: minuteTickSplitNumber(timestamps),
+          minInterval: MINUTE_MS,
+          maxInterval: MINUTE_MS,
           axisLine: { show: false },
           axisTick: { show: false },
-          axisLabel: { color: '#8e9198', fontSize: 10 },
+          axisLabel: { formatter: formatFiveMinuteTimeLabel, color: '#8e9198', fontSize: 10 },
           splitLine: { show: false },
         },
         yAxis: {
@@ -76,6 +123,7 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260 }: Tre
         },
         series,
       }}
+      replaceMerge="series"
       opts={{ renderer: 'canvas' }}
     />
   )

@@ -44,6 +44,7 @@ export interface ProcessMetric {
 }
 
 export interface SystemMetric {
+  cpuModel: string
   cpuUtilization: number
   currentUserCpuUtilization: number
   load1: number
@@ -75,7 +76,9 @@ export interface HistoryPoint {
   timestamp: number
   cpuUtilization: number
   memoryUtilization: number
+  swapUtilization: number
   gpuUtilizations: Record<string, number>
+  gpuMemoryUtilizations: Record<string, number>
 }
 
 export interface HostKeyInfo {

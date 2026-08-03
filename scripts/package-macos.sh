@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_PATH="$ROOT_DIR/src-tauri/target/release/bundle/macos/RackTop.app"
-DMG_PATH="$ROOT_DIR/src-tauri/target/release/bundle/dmg/RackTop_0.1.0_aarch64.dmg"
+DMG_PATH="$ROOT_DIR/src-tauri/target/release/bundle/dmg/RackTop_0.2.0_aarch64.dmg"
 STAGE_DIR="$(mktemp -d /private/tmp/racktop-dmg.XXXXXX)"
 
 cleanup() {

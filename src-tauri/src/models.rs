@@ -73,6 +73,8 @@ pub struct ProcessMetric {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemMetric {
+    #[serde(default)]
+    pub cpu_model: String,
     pub cpu_utilization: f64,
     pub current_user_cpu_utilization: f64,
     pub load1: f64,
@@ -109,7 +111,11 @@ pub struct HistoryPoint {
     pub timestamp: i64,
     pub cpu_utilization: f64,
     pub memory_utilization: f64,
+    #[serde(default)]
+    pub swap_utilization: f64,
     pub gpu_utilizations: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_memory_utilizations: HashMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

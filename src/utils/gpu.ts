@@ -1,4 +1,4 @@
-import type { GpuMetric } from '../types/models'
+import type { GpuMetric, ProcessMetric } from '../types/models'
 
 export type GpuLevel = 'idle' | 'active' | 'high' | 'critical'
 
@@ -38,4 +38,24 @@ export function gpuMemoryLevel(memoryPercent: number): GpuLevel {
 
 export function isGpuIdle(gpu: GpuMetric, utilizationThreshold: number): boolean {
   return gpu.utilization < utilizationThreshold && gpuMemoryPercent(gpu) < 1
+}
+
+export function hasEnoughFreeGpuMemory(gpu: GpuMetric, minimumFreeMemoryMb: number): boolean {
+  const freeMemoryMb = Math.max(0, gpu.memoryTotalMb - gpu.memoryUsedMb)
+  return freeMemoryMb >= Math.max(0, minimumFreeMemoryMb)
+}
+
+const SYSTEM_GPU_USERS = new Set(['gdm', 'lightdm', 'sddm', 'display', 'nvidia-persistenced'])
+const SYSTEM_GPU_COMMAND = /(?:^|\/)(?:Xorg|Xwayland|gnome-shell|kwin_wayland|kwin_x11|nvidia-persistenced|nvidia-powerd)(?:\s|$)/i
+
+export function isIgnoredSystemGpuProcess(process: ProcessMetric): boolean {
+  return SYSTEM_GPU_USERS.has(process.username.trim().toLowerCase()) || SYSTEM_GPU_COMMAND.test(process.command.trim())
+}
+
+export function hasOtherUserGpuWorkload(gpu: GpuMetric, processes: ProcessMetric[]): boolean {
+  if (gpu.memoryTotalMb <= 0) return false
+  const otherUserMemoryMb = processes
+    .filter((process) => process.gpuUuid === gpu.uuid && !process.isCurrentUser && !isIgnoredSystemGpuProcess(process))
+    .reduce((sum, process) => sum + Math.max(0, process.memoryUsedMb), 0)
+  return otherUserMemoryMb / gpu.memoryTotalMb * 100 > 3
 }
