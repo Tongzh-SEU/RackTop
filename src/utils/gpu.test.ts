@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GpuMetric, ProcessMetric } from '../types/models'
-import { clampPercent, displayedGpuMemoryPercent, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
+import { clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
 
 function gpu(memoryUsedMb: number, memoryTotalMb = 40_960, utilization = 0): GpuMetric {
   return {
@@ -55,6 +55,12 @@ describe('GPU memory display semantics', () => {
     expect(gpuMemoryLevel(50)).toBe('high')
     expect(gpuMemoryLevel(84.9)).toBe('high')
     expect(gpuMemoryLevel(85)).toBe('critical')
+  })
+
+  it('formats process memory above one GB using GB', () => {
+    expect(formatGpuProcessMemory(1024)).toBe('1024 MB')
+    expect(formatGpuProcessMemory(1536)).toBe('1.5 GB')
+    expect(formatGpuProcessMemory(37_682)).toBe('36.8 GB')
   })
 
   it('uses the visible free-memory condition without a hidden utilization condition', () => {

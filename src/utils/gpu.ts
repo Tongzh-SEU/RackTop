@@ -29,6 +29,11 @@ export function displayedGpuMemoryPercent(memoryPercent: number): number {
   return safePercent < 1 ? 0 : Math.round(safePercent)
 }
 
+export function formatGpuProcessMemory(memoryUsedMb: number): string {
+  const safeMemoryMb = Number.isFinite(memoryUsedMb) ? Math.max(0, memoryUsedMb) : 0
+  return safeMemoryMb > 1024 ? `${(safeMemoryMb / 1024).toFixed(1)} GB` : `${Math.round(safeMemoryMb)} MB`
+}
+
 export function gpuMemoryLevel(memoryPercent: number): GpuLevel {
   if (memoryPercent >= 85) return 'critical'
   if (memoryPercent >= 50) return 'high'
