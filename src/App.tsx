@@ -43,7 +43,8 @@ import { MetricBar } from './components/MetricBar'
 import { ServerForm } from './components/ServerForm'
 import { StatusPill } from './components/StatusPill'
 import { TrendChart } from './components/TrendChart'
-import { clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle } from './utils/gpu'
+import { clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, hasOtherUserGpuWorkload, isGpuIdle } from './utils/gpu'
+import { DEFAULT_IDLE_FILTERS, loadIdleFilters, rankIdleGpuItems, saveIdleFilters, type IdleFilters, type IdleGpuItem } from './utils/idleFilters'
 import { duplicateImportIndexes } from './utils/serverIdentity'
 
 const tabs: Array<{ value: DetailTab; label: string }> = [
@@ -152,6 +153,7 @@ function App() {
   const [mainView, setMainView] = useState<'server' | 'fleet' | 'idle'>('fleet')
   const [fleetSort, setFleetSort] = useState<'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount'>(() => (localStorage.getItem('racktop.fleetSort') as 'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount') || 'name')
   const [fleetDescending, setFleetDescending] = useState(() => localStorage.getItem('racktop.fleetDescending') === 'true')
+  const [idleFilters, setIdleFilters] = useState<IdleFilters>(loadIdleFilters)
   const [busy, setBusy] = useState<Set<string>>(new Set())
   const [manualRefreshingAll, setManualRefreshingAll] = useState(false)
   const [manualRefreshRevision, setManualRefreshRevision] = useState(0)
@@ -310,11 +312,16 @@ function App() {
     localStorage.setItem('racktop.fleetDescending', String(fleetDescending))
   }, [fleetSort, fleetDescending])
 
+  useEffect(() => { saveIdleFilters(idleFilters) }, [idleFilters])
+
   const visibleServers = useMemo(() => {
     const needle = search.trim().toLowerCase()
     if (!needle) return servers
     return servers.filter((server) => [server.name, server.host, server.username, ...server.tags].some((value) => value.toLowerCase().includes(needle)))
   }, [servers, search])
+
+  const idleGpuItems = useMemo(() => rankIdleGpuItems(servers, snapshots, history, idleFilters), [servers, snapshots, history, idleFilters])
+  const idleAvailableCount = idleGpuItems.filter((item) => item.available).length
 
   const totals = useMemo(() => {
     const values = Object.values(snapshots)
@@ -324,13 +331,13 @@ function App() {
       online,
       offline: servers.filter((server) => server.status === 'offline').length,
       gpus: gpus.length,
-      idle: values.reduce((sum, snapshot) => sum + snapshot.gpus.filter((gpu) => isGpuIdle(gpu, settings?.idleGpuThreshold ?? 10)).length, 0),
+      idle: idleAvailableCount,
       gpuAverage: gpus.length ? gpus.reduce((sum, gpu) => sum + clampPercent(gpu.utilization), 0) / gpus.length : 0,
       cpuAverage: values.length ? values.reduce((sum, snapshot) => sum + clampPercent(snapshot.system.cpuUtilization), 0) / values.length : 0,
       hot: gpus.filter((gpu) => gpu.temperatureCelsius > (settings?.temperatureThresholdCelsius ?? 85)).length,
       latestRefresh: values.length ? Math.max(...values.map((snapshot) => snapshot.timestamp)) : null,
     }
-  }, [snapshots, servers, settings])
+  }, [snapshots, servers, settings, idleAvailableCount])
 
   async function saveServer(draft: ServerDraft) {
     const server = await api.saveServer(draft)
@@ -447,7 +454,7 @@ function App() {
         {servers.length === 0 ? (
           <EmptyState onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
         ) : mainView === 'idle' ? (
-          <IdleGpuView servers={servers} snapshots={snapshots} history={history} sortRevision={manualRefreshRevision} onSelect={(serverId, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu'); setMainView('server') }} />
+          <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} onFiltersChange={setIdleFilters} sortRevision={manualRefreshRevision} onSelect={(serverId, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu'); setMainView('server') }} />
         ) : mainView === 'fleet' ? (
           <FleetOverview servers={servers} snapshots={snapshots} settings={settings} totals={totals} sort={fleetSort} descending={fleetDescending} onSort={setFleetSort} onToggleOrder={() => setFleetDescending((value) => !value)} onSelect={(serverId, tab, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid ?? null); setSelectedTab(tab); setMainView('server') }} />
         ) : selectedServer && selectedSnapshot ? (
@@ -775,45 +782,13 @@ function FleetOverview({ servers, snapshots, settings, totals, sort, descending,
   </div>
 }
 
-function IdleGpuView({ servers, snapshots, history, sortRevision, onSelect }: { servers: Server[]; snapshots: Record<string, Snapshot>; history: Record<string, HistoryPoint[]>; sortRevision: number; onSelect: (serverId: string, gpuUuid: string) => void }) {
-  const defaults = { gpuMemoryGb: 0, cpuMemoryGb: 0, duration: 0 }
-  const [gpuMemoryInput, setGpuMemoryInput] = useState(String(defaults.gpuMemoryGb))
-  const [cpuMemoryInput, setCpuMemoryInput] = useState(String(defaults.cpuMemoryGb))
-  const [otherUserProcess, setOtherUserProcess] = useState<'all' | 'without'>('without')
-  const [duration, setDuration] = useState(defaults.duration)
-  const [gpuModel, setGpuModel] = useState('all')
-  const [cpuModel, setCpuModel] = useState('all')
-  const [tag, setTag] = useState('all')
-  const gpuMemoryGb = gpuMemoryInput.trim() === '' ? defaults.gpuMemoryGb : Math.max(0, Number(gpuMemoryInput) || 0)
-  const cpuMemoryGb = cpuMemoryInput.trim() === '' ? defaults.cpuMemoryGb : Math.max(0, Number(cpuMemoryInput) || 0)
+function IdleGpuView({ servers, snapshots, items: rankedItems, filters, onFiltersChange, sortRevision, onSelect }: { servers: Server[]; snapshots: Record<string, Snapshot>; items: IdleGpuItem[]; filters: IdleFilters; onFiltersChange: (filters: IdleFilters) => void; sortRevision: number; onSelect: (serverId: string, gpuUuid: string) => void }) {
+  const [gpuMemoryInput, setGpuMemoryInput] = useState(String(filters.gpuMemoryGb))
+  const [cpuMemoryInput, setCpuMemoryInput] = useState(String(filters.cpuMemoryGb))
+  const { gpuMemoryGb, cpuMemoryGb, otherUserProcess, duration, gpuModel, cpuModel, tag } = filters
   const gpuModels = Array.from(new Set(Object.values(snapshots).flatMap((snapshot) => snapshot.gpus.map((gpu) => gpu.name)))).sort()
   const cpuModels = Array.from(new Set(Object.values(snapshots).map((snapshot) => snapshot.system.cpuModel || '未知 CPU'))).sort()
   const tags = Array.from(new Set(servers.flatMap((server) => server.tags))).sort()
-  const rankedItems = servers.flatMap((server) => (snapshots[server.id]?.gpus ?? []).map((gpu) => ({ server, gpu }))).filter(({ server, gpu }) => {
-    const snapshot = snapshots[server.id]
-    if (gpuModel !== 'all' && gpu.name !== gpuModel) return false
-    if (cpuModel !== 'all' && (snapshot?.system.cpuModel || '未知 CPU') !== cpuModel) return false
-    return tag === 'all' || server.tags.includes(tag)
-  }).map(({ server, gpu }) => {
-    const snapshot = snapshots[server.id]
-    const freeCpuMemoryMb = Math.max(0, ((snapshot?.system.memoryTotalBytes ?? 0) - (snapshot?.system.memoryUsedBytes ?? 0)) / 1024 ** 2)
-    const occupiedByOtherUser = hasOtherUserGpuWorkload(gpu, snapshot?.processes ?? [])
-    const meetsProcess = otherUserProcess === 'all' || !occupiedByOtherUser
-    const meetsSnapshot = hasEnoughFreeGpuMemory(gpu, gpuMemoryGb * 1024) && freeCpuMemoryMb >= cpuMemoryGb * 1024 && meetsProcess
-    if (duration <= 0) return { server, gpu, available: meetsSnapshot }
-    const snapshotTime = snapshot?.timestamp ?? Math.floor(Date.now() / 1000)
-    const cutoff = snapshotTime - duration * 60
-    const points = (history[server.id] ?? []).filter((point) => point.timestamp >= cutoff && point.timestamp <= snapshotTime)
-    const coversWindow = points.length >= 2 && points[0].timestamp <= cutoff + Math.max(60, server.samplingIntervalSeconds * 3)
-    const gpuTotalMb = Math.max(0, gpu.memoryTotalMb)
-    const cpuTotalMb = Math.max(0, (snapshot?.system.memoryTotalBytes ?? 0) / 1024 ** 2)
-    const meetsDuration = coversWindow && points.every((point) => {
-      const historicalGpuFreeMb = gpuTotalMb * (1 - clampPercent(point.gpuMemoryUtilizations?.[gpu.uuid] ?? gpuMemoryPercent(gpu)) / 100)
-      const historicalCpuFreeMb = cpuTotalMb * (1 - clampPercent(point.memoryUtilization) / 100)
-      return historicalGpuFreeMb >= gpuMemoryGb * 1024 && historicalCpuFreeMb >= cpuMemoryGb * 1024
-    })
-    return { server, gpu, available: meetsSnapshot && meetsDuration }
-  }).sort((left, right) => Number(right.available) - Number(left.available) || (right.gpu.memoryTotalMb - right.gpu.memoryUsedMb) - (left.gpu.memoryTotalMb - left.gpu.memoryUsedMb) || ((snapshots[right.server.id]?.system.memoryTotalBytes ?? 0) - (snapshots[right.server.id]?.system.memoryUsedBytes ?? 0)) - ((snapshots[left.server.id]?.system.memoryTotalBytes ?? 0) - (snapshots[left.server.id]?.system.memoryUsedBytes ?? 0)))
   const filterSignature = `${gpuMemoryGb}|${cpuMemoryGb}|${otherUserProcess}|${duration}|${gpuModel}|${cpuModel}|${tag}|${sortRevision}`
   const orderRef = useRef<{ signature: string; keys: string[] }>({ signature: '', keys: [] })
   const currentKeys = rankedItems.map(({ server, gpu }) => `${server.id}:${gpu.uuid}`)
@@ -828,19 +803,24 @@ function IdleGpuView({ servers, snapshots, history, sortRevision, onSelect }: { 
   const order = new Map(orderRef.current.keys.map((key, index) => [key, index]))
   const items = [...rankedItems].sort((left, right) => (order.get(`${left.server.id}:${left.gpu.uuid}`) ?? Number.MAX_SAFE_INTEGER) - (order.get(`${right.server.id}:${right.gpu.uuid}`) ?? Number.MAX_SAFE_INTEGER))
   const availableCount = items.filter((item) => item.available).length
-  const reset = () => { setGpuMemoryInput(String(defaults.gpuMemoryGb)); setCpuMemoryInput(String(defaults.cpuMemoryGb)); setOtherUserProcess('without'); setGpuModel('all'); setCpuModel('all'); setDuration(defaults.duration); setTag('all') }
+  const setFilters = (next: Partial<IdleFilters>) => onFiltersChange({ ...filters, ...next })
+  const setNumericFilter = (key: 'gpuMemoryGb' | 'cpuMemoryGb', input: string, setInput: (value: string) => void) => {
+    setInput(input)
+    setFilters({ [key]: input.trim() === '' ? 0 : Math.max(0, Number(input) || 0) })
+  }
+  const reset = () => { setGpuMemoryInput(String(DEFAULT_IDLE_FILTERS.gpuMemoryGb)); setCpuMemoryInput(String(DEFAULT_IDLE_FILTERS.cpuMemoryGb)); onFiltersChange({ ...DEFAULT_IDLE_FILTERS }) }
 
   return <div className="detail-page idle-page">
     <section className="idle-filters" aria-label="空闲算力筛选条件">
       <header><div><SlidersHorizontal size={17} /><div><strong>空闲条件</strong><small>仅检测其他用户；系统显示进程与不超过 GPU MEM 3% 的小占用不计入</small></div></div><button className="button button--secondary button--small" onClick={reset}><RotateCcw size={13} />重置</button></header>
       <div className="idle-filter-grid">
-        <label>GPU MEM 至少<div><input inputMode="decimal" type="number" min="0" step="1" value={gpuMemoryInput} onChange={(event) => setGpuMemoryInput(event.target.value)} onBlur={() => setGpuMemoryInput(String(gpuMemoryGb))} /><span>GB</span></div></label>
-        <label>CPU MEM 至少<div><input inputMode="decimal" type="number" min="0" step="1" value={cpuMemoryInput} onChange={(event) => setCpuMemoryInput(event.target.value)} onBlur={() => setCpuMemoryInput(String(cpuMemoryGb))} /><span>GB</span></div></label>
-        <label>进程占用<select value={otherUserProcess} onChange={(event) => setOtherUserProcess(event.target.value as 'all' | 'without')}><option value="without">无人占用</option><option value="all">不限</option></select></label>
-        <label>GPU 型号<select value={gpuModel} onChange={(event) => setGpuModel(event.target.value)}><option value="all">全部型号</option>{gpuModels.map((item) => <option value={item} key={item}>{item.replace('NVIDIA ', '')}</option>)}</select></label>
-        <label>CPU 型号<select value={cpuModel} onChange={(event) => setCpuModel(event.target.value)}><option value="all">全部型号</option>{cpuModels.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
-        <label>持续时间<select value={duration} onChange={(event) => setDuration(Number(event.target.value))}><option value="0">当前快照</option><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option></select></label>
-        <label>服务器标签<select value={tag} onChange={(event) => setTag(event.target.value)}><option value="all">全部标签</option>{tags.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
+        <label>GPU MEM 至少<div><input inputMode="decimal" type="number" min="0" step="1" value={gpuMemoryInput} onChange={(event) => setNumericFilter('gpuMemoryGb', event.target.value, setGpuMemoryInput)} onBlur={() => setGpuMemoryInput(String(gpuMemoryGb))} /><span>GB</span></div></label>
+        <label>CPU MEM 至少<div><input inputMode="decimal" type="number" min="0" step="1" value={cpuMemoryInput} onChange={(event) => setNumericFilter('cpuMemoryGb', event.target.value, setCpuMemoryInput)} onBlur={() => setCpuMemoryInput(String(cpuMemoryGb))} /><span>GB</span></div></label>
+        <label>进程占用<select value={otherUserProcess} onChange={(event) => setFilters({ otherUserProcess: event.target.value as IdleFilters['otherUserProcess'] })}><option value="without">无人占用</option><option value="all">不限</option></select></label>
+        <label>GPU 型号<select value={gpuModel} onChange={(event) => setFilters({ gpuModel: event.target.value })}><option value="all">全部型号</option>{gpuModels.map((item) => <option value={item} key={item}>{item.replace('NVIDIA ', '')}</option>)}</select></label>
+        <label>CPU 型号<select value={cpuModel} onChange={(event) => setFilters({ cpuModel: event.target.value })}><option value="all">全部型号</option>{cpuModels.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
+        <label>持续时间<select value={duration} onChange={(event) => setFilters({ duration: Number(event.target.value) })}><option value="0">当前快照</option><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option></select></label>
+        <label>服务器标签<select value={tag} onChange={(event) => setFilters({ tag: event.target.value })}><option value="all">全部标签</option>{tags.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
       </div>
       <footer><span>GPU MEM ≥ {gpuMemoryGb} GB</span><span>CPU MEM ≥ {cpuMemoryGb} GB</span><span>{otherUserProcess === 'all' ? '进程占用：不限' : '无人占用'}</span><span>{duration ? `MEM 持续 ${duration} 分钟` : '当前快照'}</span><strong>{availableCount} 张可用 · {items.length - availableCount} 张不可用</strong></footer>
     </section>
