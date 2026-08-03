@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
 import type { AppSettings, HistoryPoint, HostKeyInfo, Server, ServerDraft, Snapshot } from '../types/models'
-import { clampPercent } from '../utils/gpu'
+import { clampPercent, gpuMemoryPercent } from '../utils/gpu'
 
 const isTauri = '__TAURI_INTERNALS__' in window
 
@@ -60,6 +60,7 @@ const demoSnapshot: Snapshot = {
   timestamp: now,
   status: 'online',
   system: {
+    cpuModel: 'Intel Xeon Gold 6430',
     cpuUtilization: 13.8,
     currentUserCpuUtilization: 5.2,
     load1: 0.06,
@@ -88,6 +89,7 @@ const a100Snapshot: Snapshot = {
   timestamp: now,
   status: 'online',
   system: {
+    cpuModel: 'AMD EPYC 9654 96-Core Processor',
     cpuUtilization: 1.8,
     currentUserCpuUtilization: 2.9,
     load1: 2.27,
@@ -115,13 +117,16 @@ let browserServers = [...demoServers]
 let browserSettings = { ...defaultSettings }
 
 function rollingHistory(snapshot: Snapshot): HistoryPoint[] {
+  const historyNow = Math.floor(Date.now() / 1000)
   return Array.from({ length: 60 }, (_, index) => {
     const phase = index / 6
     return {
-      timestamp: now - (59 - index) * 30,
+      timestamp: historyNow - (59 - index) * 30,
       cpuUtilization: clampPercent(Math.max(2, snapshot.system.cpuUtilization + Math.sin(phase) * 8)),
       memoryUtilization: clampPercent((snapshot.system.memoryUsedBytes / snapshot.system.memoryTotalBytes) * 100),
+      swapUtilization: clampPercent(snapshot.system.swapTotalBytes ? (snapshot.system.swapUsedBytes / snapshot.system.swapTotalBytes) * 100 : 0),
       gpuUtilizations: Object.fromEntries(snapshot.gpus.map((gpu, gpuIndex) => [gpu.uuid, clampPercent(gpu.utilization + Math.sin(phase + gpuIndex) * 4)])),
+      gpuMemoryUtilizations: Object.fromEntries(snapshot.gpus.map((gpu) => [gpu.uuid, gpuMemoryPercent(gpu)])),
     }
   })
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { GpuMetric } from '../types/models'
-import { clampPercent, displayedGpuMemoryPercent, gpuMemoryLevel, gpuMemoryPercent, isGpuIdle } from './gpu'
+import type { GpuMetric, ProcessMetric } from '../types/models'
+import { clampPercent, displayedGpuMemoryPercent, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
 
 function gpu(memoryUsedMb: number, memoryTotalMb = 40_960, utilization = 0): GpuMetric {
   return {
@@ -14,6 +14,10 @@ function gpu(memoryUsedMb: number, memoryTotalMb = 40_960, utilization = 0): Gpu
     temperatureCelsius: 30,
     powerWatts: 20,
   }
+}
+
+function process(username: string, memoryUsedMb: number, command = 'python train.py', isCurrentUser = false): ProcessMetric {
+  return { gpuUuid: 'GPU-test', gpuIndex: 0, pid: 42, username, command, memoryUsedMb, cpuPercent: 0, elapsed: '00:10', isCurrentUser }
 }
 
 describe('GPU memory display semantics', () => {
@@ -51,5 +55,21 @@ describe('GPU memory display semantics', () => {
     expect(gpuMemoryLevel(50)).toBe('high')
     expect(gpuMemoryLevel(84.9)).toBe('high')
     expect(gpuMemoryLevel(85)).toBe('critical')
+  })
+
+  it('uses the visible free-memory condition without a hidden utilization condition', () => {
+    const partiallyOccupied = gpu(11_943, 40_960, 0)
+    expect(hasEnoughFreeGpuMemory(partiallyOccupied, 0)).toBe(true)
+    expect(hasEnoughFreeGpuMemory(partiallyOccupied, 30 * 1024)).toBe(false)
+    expect(hasEnoughFreeGpuMemory(gpu(0, 40_960, 100), 0)).toBe(true)
+  })
+
+  it('ignores display services and other-user allocations up to three percent', () => {
+    const metric = gpu(0)
+    expect(isIgnoredSystemGpuProcess(process('gdm', 10_000, '/usr/lib/xorg/Xorg'))).toBe(true)
+    expect(hasOtherUserGpuWorkload(metric, [process('gdm', 10_000, '/usr/lib/xorg/Xorg')])).toBe(false)
+    expect(hasOtherUserGpuWorkload(metric, [process('researcher', 40_960 * 0.03)])).toBe(false)
+    expect(hasOtherUserGpuWorkload(metric, [process('researcher', 40_960 * 0.031)])).toBe(true)
+    expect(hasOtherUserGpuWorkload(metric, [process('tongzh', 10_000, 'python train.py', true)])).toBe(false)
   })
 })

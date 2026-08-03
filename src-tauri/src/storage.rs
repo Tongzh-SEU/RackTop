@@ -1,6 +1,10 @@
 use crate::models::{AppSettings, HistoryPoint, Server, ServerDraft, Snapshot};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::{collections::HashMap, path::Path, sync::Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Mutex,
+};
 use uuid::Uuid;
 
 pub struct Database {
@@ -41,7 +45,9 @@ impl Database {
                     timestamp INTEGER NOT NULL,
                     cpu_utilization REAL NOT NULL,
                     memory_utilization REAL NOT NULL,
+                    swap_utilization REAL NOT NULL DEFAULT 0,
                     gpu_json TEXT NOT NULL,
+                    gpu_memory_json TEXT NOT NULL DEFAULT '{}',
                     payload_json TEXT NOT NULL,
                     FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
                  );
@@ -52,6 +58,17 @@ impl Database {
                  );",
             )
             .map_err(|error| error.to_string())?;
+        let snapshot_columns = {
+            let mut statement = connection.prepare("PRAGMA table_info(snapshots)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
+            columns.filter_map(Result::ok).collect::<HashSet<_>>()
+        };
+        if !snapshot_columns.contains("gpu_memory_json") {
+            connection.execute("ALTER TABLE snapshots ADD COLUMN gpu_memory_json TEXT NOT NULL DEFAULT '{}'", []).map_err(|error| error.to_string())?;
+        }
+        if !snapshot_columns.contains("swap_utilization") {
+            connection.execute("ALTER TABLE snapshots ADD COLUMN swap_utilization REAL NOT NULL DEFAULT 0", []).map_err(|error| error.to_string())?;
+        }
         Ok(Self { connection: Mutex::new(connection), session_passwords: Mutex::new(HashMap::new()) })
     }
 
@@ -145,11 +162,13 @@ impl Database {
         if !settings.history_enabled { return Ok(()); }
         let server = self.get_server(&snapshot.server_id)?;
         let memory_utilization = if snapshot.system.memory_total_bytes > 0 { snapshot.system.memory_used_bytes as f64 / snapshot.system.memory_total_bytes as f64 * 100.0 } else { 0.0 };
+        let swap_utilization = if snapshot.system.swap_total_bytes > 0 { snapshot.system.swap_used_bytes as f64 / snapshot.system.swap_total_bytes as f64 * 100.0 } else { 0.0 };
         let gpu_map: HashMap<&str, f64> = snapshot.gpus.iter().map(|gpu| (gpu.uuid.as_str(), gpu.utilization)).collect();
+        let gpu_memory_map: HashMap<&str, f64> = snapshot.gpus.iter().map(|gpu| (gpu.uuid.as_str(), if gpu.memory_total_mb > 0.0 { (gpu.memory_used_mb / gpu.memory_total_mb * 100.0).clamp(0.0, 100.0) } else { 0.0 })).collect();
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         connection.execute(
-            "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,gpu_json,payload_json) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![snapshot.server_id, snapshot.timestamp, snapshot.system.cpu_utilization, memory_utilization, serde_json::to_string(&gpu_map).unwrap_or_else(|_| "{}".into()), serde_json::to_string(snapshot).map_err(|error| error.to_string())?],
+            "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![snapshot.server_id, snapshot.timestamp, snapshot.system.cpu_utilization, memory_utilization, swap_utilization, serde_json::to_string(&gpu_map).unwrap_or_else(|_| "{}".into()), serde_json::to_string(&gpu_memory_map).unwrap_or_else(|_| "{}".into()), serde_json::to_string(snapshot).map_err(|error| error.to_string())?],
         ).map_err(|error| error.to_string())?;
         let cutoff = snapshot.timestamp - i64::from(server.history_retention_days) * 86_400;
         connection.execute("DELETE FROM snapshots WHERE server_id=?1 AND timestamp < ?2", params![snapshot.server_id, cutoff]).map_err(|error| error.to_string())?;
@@ -158,10 +177,11 @@ impl Database {
 
     pub fn get_history(&self, server_id: &str, from_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,gpu_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
         let rows = statement.query_map(params![server_id, from_timestamp], |row| {
-            let gpu_json: String = row.get(3)?;
-            Ok(HistoryPoint { timestamp: row.get(0)?, cpu_utilization: row.get(1)?, memory_utilization: row.get(2)?, gpu_utilizations: serde_json::from_str(&gpu_json).unwrap_or_default() })
+            let gpu_json: String = row.get(4)?;
+            let gpu_memory_json: String = row.get(5)?;
+            Ok(HistoryPoint { timestamp: row.get(0)?, cpu_utilization: row.get(1)?, memory_utilization: row.get(2)?, swap_utilization: row.get(3)?, gpu_utilizations: serde_json::from_str(&gpu_json).unwrap_or_default(), gpu_memory_utilizations: serde_json::from_str(&gpu_memory_json).unwrap_or_default() })
         }).map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
@@ -187,7 +207,7 @@ fn blank_to_none(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::SystemMetric;
+    use crate::models::{GpuMetric, SystemMetric};
 
     fn draft(name: &str, retention_days: u32) -> ServerDraft {
         ServerDraft {
@@ -217,7 +237,7 @@ mod tests {
             os_name: "Ubuntu".into(),
             timestamp,
             status: "online".into(),
-            system: SystemMetric { memory_total_bytes: 1024, ..Default::default() },
+            system: SystemMetric { cpu_model: "Test CPU".into(), memory_total_bytes: 1024, ..Default::default() },
             gpus: Vec::new(),
             processes: Vec::new(),
             processes_sampled: true,
@@ -261,5 +281,27 @@ mod tests {
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
         let saved = db.save_server(draft("GPU", 0)).unwrap();
         assert_eq!(saved.history_retention_days, 1);
+    }
+
+    #[test]
+    fn migrates_and_stores_capacity_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.sqlite");
+        let legacy = Connection::open(&path).unwrap();
+        legacy.execute_batch("CREATE TABLE snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id TEXT NOT NULL, timestamp INTEGER NOT NULL, cpu_utilization REAL NOT NULL, memory_utilization REAL NOT NULL, gpu_json TEXT NOT NULL, payload_json TEXT NOT NULL);").unwrap();
+        drop(legacy);
+
+        let db = Database::open(&path).unwrap();
+        let server = db.save_server(draft("GPU memory", 30)).unwrap();
+        let mut sample = snapshot(&server.id, 1_000_000);
+        sample.system.swap_used_bytes = 512;
+        sample.system.swap_total_bytes = 2048;
+        sample.gpus.push(GpuMetric { index: 0, name: "NVIDIA Test".into(), uuid: "GPU-memory".into(), utilization: 40.0, memory_utilization: 20.0, memory_used_mb: 10_240.0, memory_total_mb: 40_960.0, temperature_celsius: 40.0, power_watts: 80.0 });
+        db.save_snapshot(&sample).unwrap();
+
+        let history = db.get_history(&server.id, 0).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].swap_utilization, 25.0);
+        assert_eq!(history[0].gpu_memory_utilizations.get("GPU-memory"), Some(&25.0));
     }
 }

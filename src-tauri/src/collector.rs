@@ -6,6 +6,7 @@ const REMOTE_SCRIPT: &str = r#"export LANG=C LC_ALL=C;
 printf '__RACKTOP_USER__\n'; id -un;
 printf '__RACKTOP_HOST__\n'; hostname;
 printf '__RACKTOP_OS__\n'; if [ -r /etc/os-release ]; then . /etc/os-release; printf '%s|%s\n' "${ID:-unknown}" "${PRETTY_NAME:-Linux}"; else printf 'unknown|Linux\n'; fi;
+printf '__RACKTOP_CPUMODEL__\n'; if command -v lscpu >/dev/null 2>&1; then lscpu | awk -F: '/^Model name:/ {sub(/^[[:space:]]+/, "", $2); print $2; exit}'; else awk -F: '/^model name[[:space:]]*:/ {sub(/^[[:space:]]+/, "", $2); print $2; exit}' /proc/cpuinfo; fi;
 printf '__RACKTOP_CPU1__\n'; head -n 1 /proc/stat;
 sleep 0.25;
 printf '__RACKTOP_CPU2__\n'; head -n 1 /proc/stat;
@@ -127,12 +128,13 @@ pub fn parse_snapshot(server_id: &str, output: &str) -> Result<Snapshot, String>
     let hostname = first_line(&sections, "HOST").unwrap_or("unknown").to_string();
     let os = first_line(&sections, "OS").unwrap_or("unknown|Linux");
     let (os_id, os_name) = os.split_once('|').unwrap_or(("unknown", "Linux"));
+    let cpu_model = first_line(&sections, "CPUMODEL").unwrap_or("未知 CPU").to_string();
     let cpu1 = parse_cpu(first_line(&sections, "CPU1").ok_or("采集输出缺少 /proc/stat 首次样本")?)?;
     let cpu2 = parse_cpu(first_line(&sections, "CPU2").ok_or("采集输出缺少 /proc/stat 第二次样本")?)?;
     let cpu_delta = cpu2.0.saturating_sub(cpu1.0);
     let idle_delta = cpu2.1.saturating_sub(cpu1.1);
     let cpu_utilization = if cpu_delta > 0 { (1.0 - idle_delta as f64 / cpu_delta as f64) * 100.0 } else { 0.0 };
-    let mut system = SystemMetric { cpu_utilization: cpu_utilization.clamp(0.0, 100.0), ..Default::default() };
+    let mut system = SystemMetric { cpu_model, cpu_utilization: cpu_utilization.clamp(0.0, 100.0), ..Default::default() };
     if let Some(load) = first_line(&sections, "LOAD") {
         let values: Vec<f64> = load.split_whitespace().take(3).map(parse_number).collect();
         if values.len() == 3 { system.load1 = values[0]; system.load5 = values[1]; system.load15 = values[2]; }
@@ -233,13 +235,14 @@ fn parse_gpu_processes(lines: Option<&Vec<String>>, gpus: &[GpuMetric], ps: &Has
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = "__RACKTOP_USER__\ntongzh\n__RACKTOP_HOST__\ngpu-box\n__RACKTOP_OS__\nubuntu|Ubuntu 22.04 LTS\n__RACKTOP_CPU1__\ncpu 100 0 20 880 0 0 0\n__RACKTOP_CPU2__\ncpu 120 0 30 950 0 0 0\n__RACKTOP_LOAD__\n0.06 0.11 0.09 1/100 1\n__RACKTOP_MEM__\nMemTotal: 100000 kB\nMemAvailable: 75000 kB\nSwapTotal: 1000 kB\nSwapFree: 900 kB\n__RACKTOP_USERCPU__\n5.50\n__RACKTOP_NVIDIA__\navailable\n__RACKTOP_GPU__\n0, NVIDIA GeForce RTX 4090 D, GPU-abc, 25, 10, 2048, 24564, 48, 110.5\n__RACKTOP_GPUPROC__\nGPU-abc, 4242, python, 2048\n__RACKTOP_PS__\ntongzh 4242 12.5 01:20 python train.py\n__RACKTOP_END__\n";
+    const SAMPLE: &str = "__RACKTOP_USER__\ntongzh\n__RACKTOP_HOST__\ngpu-box\n__RACKTOP_OS__\nubuntu|Ubuntu 22.04 LTS\n__RACKTOP_CPUMODEL__\nAMD EPYC 9654 96-Core Processor\n__RACKTOP_CPU1__\ncpu 100 0 20 880 0 0 0\n__RACKTOP_CPU2__\ncpu 120 0 30 950 0 0 0\n__RACKTOP_LOAD__\n0.06 0.11 0.09 1/100 1\n__RACKTOP_MEM__\nMemTotal: 100000 kB\nMemAvailable: 75000 kB\nSwapTotal: 1000 kB\nSwapFree: 900 kB\n__RACKTOP_USERCPU__\n5.50\n__RACKTOP_NVIDIA__\navailable\n__RACKTOP_GPU__\n0, NVIDIA GeForce RTX 4090 D, GPU-abc, 25, 10, 2048, 24564, 48, 110.5\n__RACKTOP_GPUPROC__\nGPU-abc, 4242, python, 2048\n__RACKTOP_PS__\ntongzh 4242 12.5 01:20 python train.py\n__RACKTOP_END__\n";
 
     #[test]
     fn parses_realistic_snapshot() {
         let snapshot = parse_snapshot("server-1", SAMPLE).unwrap();
         assert_eq!(snapshot.hostname, "gpu-box");
         assert_eq!(snapshot.os_id, "ubuntu");
+        assert_eq!(snapshot.system.cpu_model, "AMD EPYC 9654 96-Core Processor");
         assert_eq!(snapshot.gpus.len(), 1);
         assert_eq!(snapshot.processes.len(), 1);
         assert!(snapshot.processes_sampled);
