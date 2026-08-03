@@ -99,6 +99,15 @@ export interface HistoryPoint {
   gpuMemoryUtilizations: Record<string, number>
 }
 
+export interface HistoryHeatmapPoint {
+  timestamp: number
+  sampleCount: number
+  cpuUtilization: number
+  memoryUtilization: number
+  gpuUtilizations: Record<string, number>
+  gpuMemoryUtilizations: Record<string, number>
+}
+
 export interface HostKeyInfo {
   serverId: string
   host: string

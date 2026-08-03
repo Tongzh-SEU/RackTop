@@ -4,7 +4,7 @@ mod host_key;
 mod ssh_config;
 mod storage;
 
-use models::{AppSettings, HistoryPoint, HostKeyInfo, IdleReservation, Server, ServerDraft, Snapshot};
+use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, Server, ServerDraft, Snapshot};
 use std::path::PathBuf;
 use storage::Database;
 use tauri::{image::Image, menu::{MenuBuilder, MenuItemBuilder}, tray::TrayIconBuilder, Emitter, Manager, State};
@@ -43,6 +43,11 @@ async fn collect_server(database: State<'_, Database>, server_id: String, includ
 #[tauri::command]
 fn get_history(database: State<'_, Database>, server_id: String, from_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
     database.get_history(&server_id, from_timestamp)
+}
+
+#[tauri::command]
+fn get_history_heatmap(database: State<'_, Database>, server_id: String, from_timestamp: i64, timezone_offset_seconds: i64, gpu_uuids: Vec<String>) -> Result<Vec<HistoryHeatmapPoint>, String> {
+    database.get_history_heatmap(&server_id, from_timestamp, timezone_offset_seconds, &gpu_uuids)
 }
 
 #[tauri::command]
@@ -160,7 +165,7 @@ pub fn run() {
                 .build(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, collect_server, get_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, collect_server, get_history, get_history_heatmap, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }

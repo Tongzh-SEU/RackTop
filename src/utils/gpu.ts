@@ -32,6 +32,10 @@ export function aggregateGpuMemoryPercent(gpus: GpuMetric[]): number {
   return totals.capacity > 0 ? clampPercent(totals.used / totals.capacity * 100) : 0
 }
 
+export function aggregateGpuSmUtilization(processes: ProcessMetric[]): number {
+  return clampPercent(processes.reduce((sum, process) => sum + clampPercent(process.smUtilization ?? 0), 0))
+}
+
 export function displayedGpuMemoryPercent(memoryPercent: number): number {
   const safePercent = clampPercent(memoryPercent)
   return safePercent < 1 ? 0 : Math.round(safePercent)

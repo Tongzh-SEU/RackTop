@@ -45,13 +45,14 @@ import {
   Zap,
 } from 'lucide-react'
 import { api } from './services/api'
-import type { AppSettings, DetailTab, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, Server, ServerDraft, Snapshot } from './types/models'
+import type { AppSettings, DetailTab, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, Server, ServerDraft, Snapshot } from './types/models'
+import { HistoryHeatmaps } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { ServerForm } from './components/ServerForm'
 import { StatusPill } from './components/StatusPill'
 import { TrendChart } from './components/TrendChart'
-import { aggregateGpuMemoryPercent, clampPercent, displayedGpuMemoryPercent, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, hasOtherUserGpuWorkload, isGpuIdle } from './utils/gpu'
+import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, displayedGpuMemoryPercent, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, hasOtherUserGpuWorkload, isGpuIdle } from './utils/gpu'
 import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, loadIdleFilters, rankIdleGpuItems, saveIdleFilters, type IdleFilters, type IdleGpuItem } from './utils/idleFilters'
 import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservationFiltersEqual, idleReservationGpuKey, idleReservationSummary } from './utils/idleReservations'
 import { FOREGROUND_STATUS_INTERVAL_MS, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
@@ -666,7 +667,7 @@ function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid
         {tab === 'gpu' && <GpuDetail snapshot={snapshot} points={points} selectedGpuUuid={selectedGpuUuid} onSelectGpu={onSelectGpu} animateChart={animateCharts} />}
         {tab === 'cpu' && <CpuDetail snapshot={snapshot} points={points} animateChart={animateCharts} />}
         {tab === 'processes' && <ProcessBlocks snapshot={snapshot} onRequestTerminate={onRequestTerminate} />}
-        {tab === 'history' && <HistoryView snapshot={snapshot} points={points} animateChart={animateCharts} />}
+        {tab === 'history' && <HistoryView server={server} snapshot={snapshot} />}
         {tab === 'logs' && <LogsView server={server} snapshot={snapshot} />}
         {tab === 'connection' && <ConnectionView server={server} onRefresh={onRefresh} onDelete={onDelete} onEdit={onEdit} isRefreshing={isRefreshing} />}
       </div>
@@ -725,7 +726,7 @@ function GpuCard({ gpu, processes, onOpen }: { gpu: Snapshot['gpus'][number]; pr
   const memoryLevel = gpuMemoryLevel(memoryPercent)
   const ownMemoryMb = processes.filter((process) => process.isCurrentUser).reduce((sum, process) => sum + process.memoryUsedMb, 0)
   const ownMemoryPercent = gpu.memoryTotalMb ? ownMemoryMb / gpu.memoryTotalMb * 100 : 0
-  const totalSmUtilization = clampPercent(processes.reduce((sum, process) => sum + clampPercent(process.smUtilization ?? 0), 0))
+  const totalSmUtilization = aggregateGpuSmUtilization(processes)
   return (
     <button className={`panel gpu-card gpu-card--${memoryLevel}`} onClick={onOpen}>
       <PanelHeader title={`GPU ${gpu.index}`} subtitle={gpu.name.replace('NVIDIA ', '')} action={<ChevronRight size={16} />} />
@@ -754,11 +755,12 @@ function GpuDetail({ snapshot, points, selectedGpuUuid, onSelectGpu, animateChar
     <section className="gpu-detail-list">{orderedGpus.map((gpu) => {
       const gpuProcesses = snapshot.processes.filter((process) => process.gpuUuid === gpu.uuid)
       const ownMemoryMb = gpuProcesses.filter((process) => process.isCurrentUser).reduce((sum, process) => sum + process.memoryUsedMb, 0)
+      const totalSmUtilization = aggregateGpuSmUtilization(gpuProcesses)
       const memory = gpuMemoryPercent(gpu)
       return <button type="button" className={`panel gpu-detail gpu-detail--${gpuMemoryLevel(memory)} ${gpu.uuid === selectedGpuUuid ? 'is-selected' : ''}`} aria-pressed={gpu.uuid === selectedGpuUuid} key={gpu.uuid} onClick={() => onSelectGpu(gpu.uuid)}>
         <div className="gpu-detail__title"><div><span>GPU {gpu.index}{gpu.uuid === selectedGpuUuid ? ' · 已选中' : ''}</span><h3>{gpu.name}</h3><small>{gpu.uuid}</small></div><strong>{displayedGpuMemoryPercent(memory)}%<small> MEM</small></strong></div>
         <div className="gpu-detail__meters"><MetricBar label="MEM" value={displayedGpuMemoryPercent(memory)} detail={`${(gpu.memoryUsedMb / 1024).toFixed(1)} / ${(gpu.memoryTotalMb / 1024).toFixed(1)} GB`} accent="purple" /><MetricBar label="UTL" value={gpu.utilization} accent={gpuLoadAccent(gpu.utilization)} /></div>
-        <div className="stat-row"><span><small>MBW</small><strong>{clampPercent(gpu.memoryUtilization).toFixed(0)}%</strong></span><span><small>温度</small><strong>{gpu.temperatureCelsius}°C</strong></span><span><small>功耗</small><strong>{gpu.powerWatts.toFixed(1)} W</strong></span><span><small>进程</small><strong>{gpuProcesses.length}</strong></span></div>
+        <div className="stat-row stat-row--gpu"><span><small>MBW</small><strong>{clampPercent(gpu.memoryUtilization).toFixed(0)}%</strong></span><span><small>温度</small><strong>{gpu.temperatureCelsius}°C</strong></span><span><small>功耗</small><strong>{gpu.powerWatts.toFixed(1)} W</strong></span><span><small>进程</small><strong>{gpuProcesses.length}</strong></span><span><small>SM</small><strong>{totalSmUtilization.toFixed(0)}%</strong></span></div>
         {gpu.uuid === selectedGpuUuid && gpuProcesses.length > 0 && <div className="gpu-detail__processes"><header><strong>进程 SM 活跃率</strong><small>单次 pmon 采样，不代表算法效率</small></header>{gpuProcesses.map((process) => <div key={process.pid}><code>PID {process.pid}</code><span title={process.command}>{process.command}</span><strong>SM {clampPercent(process.smUtilization ?? 0).toFixed(0)}%</strong></div>)}</div>}
         {ownMemoryMb > 0 && <div className="gpu-detail__own"><UserRound size={13} /><strong>你的任务</strong><span>占用 {(ownMemoryMb / 1024).toFixed(1)} GB 显存</span></div>}
       </button>
@@ -771,9 +773,30 @@ function CpuDetail({ snapshot, points, animateChart }: { snapshot: Snapshot; poi
   return <div className="content-stack"><section className="panel panel--chart"><PanelHeader icon={<Cpu />} title="CPU 利用率" subtitle={`当前用户 ${snapshot.system.currentUserCpuUtilization.toFixed(1)}%`} /><TrendChart points={points} snapshot={snapshot} mode="cpu" height={300} animate={animateChart} /></section><section className="panel system-resource-panel"><PanelHeader icon={<MemoryStick />} title="系统资源" /><div className="resource-bars"><MetricBar label="CPU" value={snapshot.system.cpuUtilization} currentUserValue={snapshot.system.currentUserCpuUtilization} /><MetricBar label="内存" value={memoryPercent} detail={`${formatBytes(snapshot.system.memoryUsedBytes)} / ${formatBytes(snapshot.system.memoryTotalBytes)}`} accent="purple" /></div><div className="stat-row stat-row--border"><span><small>1 分钟负载</small><strong>{snapshot.system.load1.toFixed(2)}</strong></span><span><small>5 分钟负载</small><strong>{snapshot.system.load5.toFixed(2)}</strong></span><span><small>15 分钟负载</small><strong>{snapshot.system.load15.toFixed(2)}</strong></span><span><small>Swap</small><strong>{formatBytes(snapshot.system.swapUsedBytes)}</strong></span></div></section></div>
 }
 
-function HistoryView({ snapshot, points, animateChart }: { snapshot: Snapshot; points: HistoryPoint[]; animateChart: boolean }) {
-  const rangeMinutes = points.length > 1 ? Math.max(1, Math.round((points[points.length - 1].timestamp - points[0].timestamp) / 60)) : 0
-  return <div className="content-stack"><section className="panel panel--chart"><PanelHeader icon={<History />} title="历史趋势" subtitle={rangeMinutes ? `当前载入 ${rangeMinutes} 分钟` : '等待历史样本'} /><TrendChart points={points} snapshot={snapshot} height={340} animate={animateChart} /></section><section className="panel data-retention"><Database size={20} /><div><strong>本地历史数据</strong><p>样本按设置的保存时间自动清理，敏感凭据不会写入 SQLite。</p></div></section></div>
+function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot }) {
+  const [heatmapPoints, setHeatmapPoints] = useState<HistoryHeatmapPoint[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const gpuUuidKey = snapshot.gpus.map((gpu) => gpu.uuid).join('\n')
+
+  useEffect(() => {
+    let cancelled = false
+    const firstDay = new Date(snapshot.timestamp * 1000)
+    firstDay.setHours(0, 0, 0, 0)
+    firstDay.setDate(firstDay.getDate() - Math.min(90, Math.max(1, server.historyRetentionDays)) + 1)
+    const timezoneOffsetSeconds = -new Date().getTimezoneOffset() * 60
+    setLoading(true)
+    setError(null)
+    const loadHeatmap = () => api.getHistoryHeatmap(server.id, Math.floor(firstDay.getTime() / 1000), timezoneOffsetSeconds, snapshot.gpus.map((gpu) => gpu.uuid))
+      .then((points) => { if (!cancelled) { setHeatmapPoints(points); setError(null) } })
+      .catch((historyError) => { if (!cancelled) setError(String(historyError)) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    void loadHeatmap()
+    const interval = window.setInterval(() => { void loadHeatmap() }, 60_000)
+    return () => { cancelled = true; window.clearInterval(interval) }
+  }, [gpuUuidKey, server.historyRetentionDays, server.id])
+
+  return <div className="history-page"><header className="history-page__header"><div><History size={18} /><span><h2>资源历史</h2><p>每列 1 天，每格汇总连续 3 小时的平均使用率</p></span></div><small>最近 {Math.min(90, Math.max(1, server.historyRetentionDays))} 天</small></header>{loading ? <div className="history-page__state"><RefreshCw className="spin" size={16} />正在聚合历史样本…</div> : error ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />历史数据读取失败：{error}</div> : <HistoryHeatmaps snapshot={snapshot} points={heatmapPoints} retentionDays={server.historyRetentionDays} />}<section className="data-retention"><Database size={18} /><div><strong>本地历史数据</strong><p>样本在 SQLite 中按 3 小时聚合后显示，保存期到期自动清理；敏感凭据不会写入历史。</p></div></section></div>
 }
 
 function LogsView({ server, snapshot }: { server: Server; snapshot: Snapshot }) {

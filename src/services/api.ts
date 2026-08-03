@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import type { AppSettings, HistoryPoint, HostKeyInfo, IdleReservation, Server, ServerDraft, Snapshot } from '../types/models'
+import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, Server, ServerDraft, Snapshot } from '../types/models'
 import { clampPercent, gpuMemoryPercent } from '../utils/gpu'
 
 const isTauri = '__TAURI_INTERNALS__' in window
@@ -170,6 +170,24 @@ export const api = {
     if (isTauri) return invoke('get_history', { serverId, fromTimestamp })
     const source = serverId === 'demo-132' ? a100Snapshot : demoSnapshot
     return rollingHistory({ ...source, serverId })
+  },
+  async getHistoryHeatmap(serverId: string, fromTimestamp: number, timezoneOffsetSeconds: number, gpuUuids: string[]): Promise<HistoryHeatmapPoint[]> {
+    if (isTauri) return invoke('get_history_heatmap', { serverId, fromTimestamp, timezoneOffsetSeconds, gpuUuids })
+    const source = serverId === 'demo-132' ? a100Snapshot : demoSnapshot
+    const firstBucket = Math.floor((fromTimestamp + timezoneOffsetSeconds) / 10_800) * 10_800 - timezoneOffsetSeconds
+    const lastBucket = Math.floor((Math.floor(Date.now() / 1000) + timezoneOffsetSeconds) / 10_800) * 10_800 - timezoneOffsetSeconds
+    return Array.from({ length: Math.max(0, Math.floor((lastBucket - firstBucket) / 10_800) + 1) }, (_, index) => {
+      const timestamp = firstBucket + index * 10_800
+      const phase = index / 3
+      return {
+        timestamp,
+        sampleCount: 180,
+        cpuUtilization: clampPercent(source.system.cpuUtilization + Math.sin(phase) * 14),
+        memoryUtilization: clampPercent(source.system.memoryTotalBytes ? source.system.memoryUsedBytes / source.system.memoryTotalBytes * 100 + Math.sin(phase / 2) * 3 : 0),
+        gpuUtilizations: Object.fromEntries(gpuUuids.map((uuid, gpuIndex) => [uuid, clampPercent((source.gpus.find((gpu) => gpu.uuid === uuid)?.utilization ?? 0) + Math.sin(phase + gpuIndex) * 24)])),
+        gpuMemoryUtilizations: Object.fromEntries(gpuUuids.map((uuid, gpuIndex) => [uuid, clampPercent(gpuMemoryPercent(source.gpus.find((gpu) => gpu.uuid === uuid) ?? source.gpus[gpuIndex]) + Math.sin(phase / 3 + gpuIndex) * 5)])),
+      }
+    })
   },
   async listIdleReservations(): Promise<IdleReservation[]> {
     return isTauri ? invoke('list_idle_reservations') : browserReservations

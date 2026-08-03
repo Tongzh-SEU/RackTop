@@ -1,4 +1,4 @@
-use crate::models::{AppSettings, HistoryPoint, IdleReservation, Server, ServerDraft, Snapshot};
+use crate::models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Server, ServerDraft, Snapshot};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::{HashMap, HashSet},
@@ -213,6 +213,54 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
 
+    pub fn get_history_heatmap(&self, server_id: &str, from_timestamp: i64, timezone_offset_seconds: i64, gpu_uuids: &[String]) -> Result<Vec<HistoryHeatmapPoint>, String> {
+        const BUCKET_SECONDS: i64 = 3 * 60 * 60;
+        let offset = timezone_offset_seconds.clamp(-86_400, 86_400);
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare(
+            "SELECT ((timestamp + ?3) / ?4) * ?4 - ?3 AS bucket,
+                    COUNT(*), AVG(cpu_utilization), AVG(memory_utilization)
+             FROM snapshots
+             WHERE server_id=?1 AND timestamp>=?2
+             GROUP BY bucket ORDER BY bucket"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement.query_map(params![server_id, from_timestamp, offset, BUCKET_SECONDS], |row| {
+            Ok(HistoryHeatmapPoint {
+                timestamp: row.get(0)?,
+                sample_count: row.get(1)?,
+                cpu_utilization: row.get(2)?,
+                memory_utilization: row.get(3)?,
+                gpu_utilizations: HashMap::new(),
+                gpu_memory_utilizations: HashMap::new(),
+            })
+        }).map_err(|error| error.to_string())?;
+        let mut buckets = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+        let bucket_indexes: HashMap<i64, usize> = buckets.iter().enumerate().map(|(index, point)| (point.timestamp, index)).collect();
+
+        for gpu_uuid in gpu_uuids {
+            let json_path = format!("$.{}", serde_json::to_string(gpu_uuid).map_err(|error| error.to_string())?);
+            let mut gpu_statement = connection.prepare(
+                "SELECT ((timestamp + ?3) / ?4) * ?4 - ?3 AS bucket,
+                        AVG(CAST(json_extract(gpu_json, ?5) AS REAL)),
+                        AVG(CAST(json_extract(gpu_memory_json, ?5) AS REAL))
+                 FROM snapshots
+                 WHERE server_id=?1 AND timestamp>=?2
+                 GROUP BY bucket ORDER BY bucket"
+            ).map_err(|error| error.to_string())?;
+            let gpu_rows = gpu_statement.query_map(params![server_id, from_timestamp, offset, BUCKET_SECONDS, json_path], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<f64>>(1)?, row.get::<_, Option<f64>>(2)?))
+            }).map_err(|error| error.to_string())?;
+            for row in gpu_rows {
+                let (timestamp, utilization, memory_utilization) = row.map_err(|error| error.to_string())?;
+                let Some(index) = bucket_indexes.get(&timestamp).copied() else { continue };
+                if let Some(value) = utilization { buckets[index].gpu_utilizations.insert(gpu_uuid.clone(), value.clamp(0.0, 100.0)); }
+                if let Some(value) = memory_utilization { buckets[index].gpu_memory_utilizations.insert(gpu_uuid.clone(), value.clamp(0.0, 100.0)); }
+            }
+        }
+
+        Ok(buckets)
+    }
+
     pub fn get_settings(&self) -> Result<AppSettings, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let json: Option<String> = connection.query_row("SELECT value_json FROM settings WHERE key='app'", [], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
@@ -361,6 +409,32 @@ mod tests {
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
         let saved = db.save_server(draft("GPU", 0)).unwrap();
         assert_eq!(saved.history_retention_days, 1);
+    }
+
+    #[test]
+    fn aggregates_cpu_and_gpu_history_into_local_three_hour_buckets() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let server = db.save_server(draft("Heatmap", 30)).unwrap();
+        let mut first = snapshot(&server.id, 21_600 + 300);
+        first.system.cpu_utilization = 20.0;
+        first.system.memory_used_bytes = 256;
+        first.gpus.push(GpuMetric { index: 0, name: "NVIDIA Test".into(), uuid: "GPU-heatmap".into(), utilization: 40.0, memory_utilization: 0.0, memory_used_mb: 10_240.0, memory_total_mb: 40_960.0, temperature_celsius: 40.0, power_watts: 80.0 });
+        let mut second = snapshot(&server.id, 21_600 + 7_200);
+        second.system.cpu_utilization = 60.0;
+        second.system.memory_used_bytes = 768;
+        second.gpus.push(GpuMetric { index: 0, name: "NVIDIA Test".into(), uuid: "GPU-heatmap".into(), utilization: 80.0, memory_utilization: 0.0, memory_used_mb: 30_720.0, memory_total_mb: 40_960.0, temperature_celsius: 40.0, power_watts: 80.0 });
+        db.save_snapshot(&first).unwrap();
+        db.save_snapshot(&second).unwrap();
+
+        let buckets = db.get_history_heatmap(&server.id, 0, 0, &["GPU-heatmap".into()]).unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].timestamp, 21_600);
+        assert_eq!(buckets[0].sample_count, 2);
+        assert_eq!(buckets[0].cpu_utilization, 40.0);
+        assert_eq!(buckets[0].memory_utilization, 50.0);
+        assert_eq!(buckets[0].gpu_utilizations.get("GPU-heatmap"), Some(&60.0));
+        assert_eq!(buckets[0].gpu_memory_utilizations.get("GPU-heatmap"), Some(&50.0));
     }
 
     #[test]

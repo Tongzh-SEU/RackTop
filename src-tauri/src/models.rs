@@ -142,6 +142,17 @@ pub struct HistoryPoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct HistoryHeatmapPoint {
+    pub timestamp: i64,
+    pub sample_count: i64,
+    pub cpu_utilization: f64,
+    pub memory_utilization: f64,
+    pub gpu_utilizations: HashMap<String, f64>,
+    pub gpu_memory_utilizations: HashMap<String, f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IdleReservation {
     pub id: String,
     pub name: String,

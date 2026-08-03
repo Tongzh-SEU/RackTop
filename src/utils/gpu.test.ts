@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GpuMetric, ProcessMetric } from '../types/models'
-import { aggregateGpuMemoryPercent, clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
+import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
 
 function gpu(memoryUsedMb: number, memoryTotalMb = 40_960, utilization = 0): GpuMetric {
   return {
@@ -55,6 +55,14 @@ describe('GPU memory display semantics', () => {
     const largerGpu = gpu(20_480, 81_920)
     expect(aggregateGpuMemoryPercent([smallerGpu, largerGpu])).toBe(30)
     expect(aggregateGpuMemoryPercent([])).toBe(0)
+  })
+
+  it('sums sampled process SM utilization and falls back to zero', () => {
+    const first = { ...process('researcher', 1024), smUtilization: 34 }
+    const second = { ...process('researcher', 2048), pid: 43, smUtilization: 27 }
+    expect(aggregateGpuSmUtilization([first, second])).toBe(61)
+    expect(aggregateGpuSmUtilization([process('researcher', 1024)])).toBe(0)
+    expect(aggregateGpuSmUtilization([{ ...first, smUtilization: 80 }, { ...second, smUtilization: 70 }])).toBe(100)
   })
 
   it('uses orange and red memory thresholds', () => {
