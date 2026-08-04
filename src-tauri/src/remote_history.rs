@@ -1,6 +1,6 @@
 use crate::{
     collector::{classify_ssh_error, configured_ssh_command},
-    models::{HistoryPoint, Server},
+    models::{HistoryPoint, Server, UsagePoint},
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::process::Stdio;
@@ -26,6 +26,14 @@ pub async fn fetch(server: &Server, password: Option<&str>, since_timestamp: i64
     );
     let output = run_remote_command(server, password, &script, Duration::from_secs(20)).await?;
     parse_history(&output)
+}
+
+pub async fn fetch_usage(server: &Server, password: Option<&str>, since_timestamp: i64) -> Result<Vec<UsagePoint>, String> {
+    if !server.remote_history_enabled { return Ok(Vec::new()); }
+    let since = since_timestamp.max(0);
+    let script = format!("usage={REMOTE_DIRECTORY}/.usage-v1.tsv; if [ -r \"$usage\" ]; then awk -F '|' -v since={since} '$1 == \"v1\" && $2 >= since' \"$usage\"; fi");
+    let output = run_remote_command(server, password, &script, Duration::from_secs(20)).await?;
+    output.lines().filter(|line| !line.trim().is_empty()).map(parse_usage_line).collect()
 }
 
 async fn install(server: &Server, password: Option<&str>) -> Result<(), String> {
@@ -120,6 +128,21 @@ fn parse_percent(value: &str) -> Result<f64, String> {
     Ok(number.clamp(0.0, 100.0))
 }
 
+fn parse_usage_line(line: &str) -> Result<UsagePoint, String> {
+    let fields: Vec<&str> = line.split('|').collect();
+    if fields.len() != 7 || fields[0] != "v1" || fields[2].is_empty() || fields[3].is_empty() { return Err("远端使用分布包含无法识别的记录".into()); }
+    let point = UsagePoint {
+        timestamp: fields[1].parse().map_err(|_| "远端使用分布时间戳无效".to_string())?,
+        gpu_uuid: fields[2].to_string(),
+        username: fields[3].to_string(),
+        active_seconds: fields[4].parse().map_err(|_| "远端活跃时间无效".to_string())?,
+        memory_mb_seconds: fields[5].parse().map_err(|_| "远端显存积分无效".to_string())?,
+        coverage_seconds: fields[6].parse().map_err(|_| "远端采样覆盖量无效".to_string())?,
+    };
+    if point.active_seconds < 0 || point.coverage_seconds <= 0 || !point.memory_mb_seconds.is_finite() || point.memory_mb_seconds < 0.0 { return Err("远端使用分布数值无效".into()); }
+    Ok(point)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,7 +165,16 @@ mod tests {
         assert!(REMOTE_DAEMON_SCRIPT.contains(".daemon.pid"));
         assert!(REMOTE_DAEMON_SCRIPT.contains("sleep 60"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used,memory.total"));
-        assert!(!REMOTE_COLLECTOR_SCRIPT.contains("--query-compute-apps"));
-        assert!(!REMOTE_COLLECTOR_SCRIPT.contains("ps -"));
+        assert!(REMOTE_COLLECTOR_SCRIPT.contains("--query-compute-apps=gpu_uuid,pid,used_memory"));
+        assert!(REMOTE_COLLECTOR_SCRIPT.contains(".usage-v1.tsv"));
+        assert!(!REMOTE_COLLECTOR_SCRIPT.contains("command="));
+        assert!(!REMOTE_COLLECTOR_SCRIPT.contains("args="));
+    }
+
+    #[test]
+    fn parses_privacy_scoped_usage_rows() {
+        let point = parse_usage_line("v1|1722700800|GPU-a|alice|60|245760.00|60").unwrap();
+        assert_eq!(point.username, "alice");
+        assert_eq!(point.active_seconds, 60);
     }
 }

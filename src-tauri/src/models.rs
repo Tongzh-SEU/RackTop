@@ -20,6 +20,8 @@ pub struct Server {
     pub remote_history_enabled: bool,
     #[serde(default)]
     pub remote_history_last_sync_at: Option<i64>,
+    #[serde(default)]
+    pub sort_order: i64,
     pub auth_method: String,
     pub status: String,
     pub last_error: Option<String>,
@@ -166,6 +168,34 @@ pub struct RemoteHistorySyncResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UsagePoint {
+    pub timestamp: i64,
+    pub gpu_uuid: String,
+    pub username: String,
+    pub active_seconds: i64,
+    pub memory_mb_seconds: f64,
+    pub coverage_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageUserAggregate {
+    pub username: String,
+    pub active_seconds: i64,
+    pub memory_mb_seconds: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageDistribution {
+    pub users: Vec<UsageUserAggregate>,
+    pub covered_days: i64,
+    pub requested_days: i64,
+    pub coverage_gpu_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IdleReservation {
     pub id: String,
     pub name: String,
@@ -176,6 +206,10 @@ pub struct IdleReservation {
     pub status: String,
     #[serde(default)]
     pub matched_gpu_keys: Vec<String>,
+    #[serde(default)]
+    pub current_available_gpu_keys: Vec<String>,
+    #[serde(default)]
+    pub pending_confirmation_gpu_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,7 +239,11 @@ pub struct AppSettings {
     pub current_user_accent: String,
     pub theme: String,
     pub reduce_motion: bool,
+    #[serde(default = "default_true")]
+    pub show_add_server_guide: bool,
 }
+
+fn default_true() -> bool { true }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -223,6 +261,7 @@ impl Default for AppSettings {
             current_user_accent: "#0a84ff".into(),
             theme: "system".into(),
             reduce_motion: false,
+            show_add_server_guide: true,
         }
     }
 }

@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { AlertTriangle, Check, Copy, Database, KeyRound, ShieldCheck, X } from 'lucide-react'
+import { AlertTriangle, Check, Copy, Database, KeyRound, MapPin, ShieldCheck, UserRound, X } from 'lucide-react'
 import type { ServerDraft } from '../types/models'
 import { unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
 
@@ -7,11 +7,14 @@ interface ServerFormProps {
   initial?: Partial<ServerDraft>
   defaultSamplingInterval?: number
   defaultHistoryRetentionDays?: number
+  defaultRemoteHistoryEnabled?: boolean
+  showGuide?: boolean
+  onGuideDismiss?: () => void
   onClose: () => void
   onSave: (draft: ServerDraft) => Promise<void>
 }
 
-export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistoryRetentionDays = 30, onClose, onSave }: ServerFormProps) {
+export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistoryRetentionDays = 30, defaultRemoteHistoryEnabled = true, showGuide = true, onGuideDismiss, onClose, onSave }: ServerFormProps) {
   const [draft, setDraft] = useState<ServerDraft>({
     id: initial?.id,
     name: initial?.name ?? '',
@@ -25,13 +28,14 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
     tags: initial?.tags ?? [],
     samplingIntervalSeconds: initial?.samplingIntervalSeconds ?? defaultSamplingInterval,
     historyRetentionDays: initial?.historyRetentionDays ?? defaultHistoryRetentionDays,
-    remoteHistoryEnabled: initial?.remoteHistoryEnabled ?? false,
+    remoteHistoryEnabled: initial?.remoteHistoryEnabled ?? defaultRemoteHistoryEnabled,
     authMethod: initial?.authMethod ?? 'sshAgent',
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [passwordAcknowledged, setPasswordAcknowledged] = useState(false)
   const [setupCopied, setSetupCopied] = useState(false)
+  const [dismissGuide, setDismissGuide] = useState(false)
 
   const set = <K extends keyof ServerDraft>(key: K, value: ServerDraft[K]) => setDraft((current) => ({ ...current, [key]: value }))
   const setupPlatform = /Windows/i.test(navigator.userAgent) ? 'windows' : 'unix'
@@ -55,6 +59,7 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
     setError(null)
     try {
       await onSave({ ...draft, name: draft.name || draft.sshAlias || draft.host })
+      if (!initial?.id && dismissGuide) onGuideDismiss?.()
     } catch (reason) {
       setError(String(reason))
     } finally {
@@ -74,6 +79,7 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
         </header>
         <form onSubmit={submit} className="server-form">
           <div className="server-form__body">
+            {!initial?.id && showGuide && <aside className="server-onboarding" aria-label="添加服务器说明"><header><div><KeyRound size={17} /><span><strong>第一次连接</strong><small>按现有 SSH 配置填写即可</small></span></div><em>SSH Agent 推荐</em></header><div><span><MapPin size={14} /><p><strong>地址</strong>服务器 IP 或域名；位置用于现场重启时查找机器。</p></span><span><UserRound size={14} /><p><strong>用户名与认证</strong>SSH Agent 可安全复用系统凭据，也支持持久终端。</p></span><span><ShieldCheck size={14} /><p><strong>Host Key</strong>首次连接会要求核对指纹，RackTop 不会自动信任未知主机。</p></span><span><Database size={14} /><p><strong>远端历史</strong>关闭 App 后继续采样 30 天，打开后增量同步到本机。</p></span></div><label><input type="checkbox" checked={dismissGuide} onChange={(event) => setDismissGuide(event.target.checked)} />保存成功后不再提醒</label></aside>}
             <div className="form-grid form-grid--2">
               <label>显示名称<input value={draft.name} onChange={(event) => set('name', event.target.value)} placeholder="训练服务器 A" /></label>
               <label>服务器位置<input value={draft.location ?? ''} onChange={(event) => set('location', event.target.value)} placeholder="例如：实验室 301 / R2 机架 / U18" /></label>

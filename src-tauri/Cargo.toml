@@ -1,6 +1,6 @@
 [package]
 name = "racktop"
-version = "1.5.0"
+version = "1.7.0"
 description = "Live GPU & CPU monitoring for every server"
 authors = ["RackTop"]
 edition = "2024"
@@ -35,6 +35,7 @@ thiserror = "2"
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 base64 = "0.22"
 sha2 = "0.10"
+portable-pty = "0.9.0"
 
 [dev-dependencies]
 tempfile = "3"

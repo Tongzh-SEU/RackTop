@@ -1,4 +1,4 @@
-use crate::models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Server, ServerDraft, Snapshot};
+use crate::models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Server, ServerDraft, Snapshot, UsageDistribution, UsagePoint, UsageUserAggregate};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::{HashMap, HashSet},
@@ -37,6 +37,7 @@ impl Database {
                     history_retention_days INTEGER NOT NULL DEFAULT 30,
                     remote_history_enabled INTEGER NOT NULL DEFAULT 0,
                     remote_history_last_sync_at INTEGER,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
                     auth_method TEXT NOT NULL DEFAULT 'sshAgent',
                     status TEXT NOT NULL DEFAULT 'unknown',
                     last_error TEXT,
@@ -68,7 +69,19 @@ impl Database {
                     notify_mode TEXT NOT NULL,
                     status TEXT NOT NULL,
                     matched_gpu_keys_json TEXT NOT NULL DEFAULT '[]'
-                 );",
+                 );
+                 CREATE TABLE IF NOT EXISTS usage_buckets (
+                    server_id TEXT NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    gpu_uuid TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    active_seconds INTEGER NOT NULL,
+                    memory_mb_seconds REAL NOT NULL,
+                    coverage_seconds INTEGER NOT NULL,
+                    PRIMARY KEY(server_id,timestamp,gpu_uuid,username),
+                    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_usage_lookup ON usage_buckets(server_id,timestamp);",
             )
             .map_err(|error| error.to_string())?;
         let snapshot_columns = {
@@ -96,6 +109,20 @@ impl Database {
         if !server_columns.contains("remote_history_last_sync_at") {
             connection.execute("ALTER TABLE servers ADD COLUMN remote_history_last_sync_at INTEGER", []).map_err(|error| error.to_string())?;
         }
+        if !server_columns.contains("sort_order") {
+            connection.execute("ALTER TABLE servers ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0", []).map_err(|error| error.to_string())?;
+        }
+        let reservation_columns = {
+            let mut statement = connection.prepare("PRAGMA table_info(idle_reservations)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
+            columns.filter_map(Result::ok).collect::<HashSet<_>>()
+        };
+        if !reservation_columns.contains("current_available_gpu_keys_json") {
+            connection.execute("ALTER TABLE idle_reservations ADD COLUMN current_available_gpu_keys_json TEXT NOT NULL DEFAULT '[]'", []).map_err(|error| error.to_string())?;
+        }
+        if !reservation_columns.contains("pending_confirmation_gpu_keys_json") {
+            connection.execute("ALTER TABLE idle_reservations ADD COLUMN pending_confirmation_gpu_keys_json TEXT NOT NULL DEFAULT '[]'", []).map_err(|error| error.to_string())?;
+        }
         connection.execute(
             "DELETE FROM snapshots WHERE id NOT IN (SELECT MAX(id) FROM snapshots GROUP BY server_id,timestamp)",
             [],
@@ -107,7 +134,7 @@ impl Database {
     pub fn list_servers(&self) -> Result<Vec<Server>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection
-            .prepare("SELECT id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,remote_history_last_sync_at,auth_method,status,last_error,last_seen_at FROM servers ORDER BY name COLLATE NOCASE")
+            .prepare("SELECT id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,remote_history_last_sync_at,auth_method,status,last_error,last_seen_at,sort_order FROM servers ORDER BY sort_order,name COLLATE NOCASE")
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], |row| {
@@ -117,7 +144,7 @@ impl Database {
                     ssh_alias: row.get(6)?, identity_file: row.get(7)?, proxy_jump: row.get(8)?,
                     tags: serde_json::from_str(&tags).unwrap_or_default(), sampling_interval_seconds: row.get(10)?,
                     history_retention_days: row.get(11)?, remote_history_enabled: row.get(12)?, remote_history_last_sync_at: row.get(13)?,
-                    auth_method: row.get(14)?, status: row.get(15)?, last_error: row.get(16)?, last_seen_at: row.get(17)?,
+                    auth_method: row.get(14)?, status: row.get(15)?, last_error: row.get(16)?, last_seen_at: row.get(17)?, sort_order: row.get(18)?,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -151,8 +178,8 @@ impl Database {
             return Err(format!("服务器已存在：{existing_name}（{}@{}:{}）", draft.username.trim(), draft.host.trim(), draft.port));
         }
         connection.execute(
-            "INSERT INTO servers (id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,auth_method,status)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'unknown')
+            "INSERT INTO servers (id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,auth_method,status,sort_order)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'unknown',COALESCE((SELECT MAX(sort_order)+1 FROM servers),0))
              ON CONFLICT(id) DO UPDATE SET name=excluded.name,location=excluded.location,host=excluded.host,port=excluded.port,username=excluded.username,ssh_alias=excluded.ssh_alias,identity_file=excluded.identity_file,proxy_jump=excluded.proxy_jump,tags_json=excluded.tags_json,sampling_interval_seconds=excluded.sampling_interval_seconds,history_retention_days=excluded.history_retention_days,remote_history_enabled=excluded.remote_history_enabled,auth_method=excluded.auth_method",
             params![id, name, blank_to_none(draft.location), draft.host.trim(), draft.port, draft.username.trim(), blank_to_none(draft.ssh_alias), blank_to_none(draft.identity_file), blank_to_none(draft.proxy_jump), tags, draft.sampling_interval_seconds.max(2), draft.history_retention_days.max(1), draft.remote_history_enabled, draft.auth_method],
         ).map_err(|error| error.to_string())?;
@@ -168,6 +195,15 @@ impl Database {
             }
         }
         self.get_server(&id)
+    }
+
+    pub fn reorder_servers(&self, server_ids: &[String]) -> Result<(), String> {
+        let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        for (index, id) in server_ids.iter().enumerate() {
+            transaction.execute("UPDATE servers SET sort_order=?2 WHERE id=?1", params![id, index as i64]).map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())
     }
 
     pub fn delete_server(&self, id: &str) -> Result<(), String> {
@@ -257,6 +293,45 @@ impl Database {
         Ok(imported)
     }
 
+    pub fn import_remote_usage(&self, server_id: &str, points: &[UsagePoint], now: i64) -> Result<usize, String> {
+        if points.is_empty() { return Ok(0); }
+        let cutoff = now - 90 * 86_400;
+        let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let mut imported = 0usize;
+        {
+            let mut statement = transaction.prepare(
+                "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(server_id,timestamp,gpu_uuid,username) DO UPDATE SET active_seconds=excluded.active_seconds,memory_mb_seconds=excluded.memory_mb_seconds,coverage_seconds=excluded.coverage_seconds"
+            ).map_err(|error| error.to_string())?;
+            for point in points.iter().filter(|point| point.timestamp >= cutoff && point.timestamp <= now + 300) {
+                imported += statement.execute(params![server_id, point.timestamp, point.gpu_uuid, point.username, point.active_seconds, point.memory_mb_seconds, point.coverage_seconds]).map_err(|error| error.to_string())?;
+            }
+        }
+        transaction.execute("DELETE FROM usage_buckets WHERE server_id=?1 AND timestamp < ?2", params![server_id, cutoff]).map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(imported)
+    }
+
+    pub fn get_usage_distribution(&self, server_id: &str, from_timestamp: i64, requested_days: i64) -> Result<UsageDistribution, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare(
+            "SELECT username,SUM(active_seconds),SUM(memory_mb_seconds) FROM usage_buckets WHERE server_id=?1 AND timestamp>=?2 GROUP BY username ORDER BY SUM(active_seconds) DESC"
+        ).map_err(|error| error.to_string())?;
+        let users = statement.query_map(params![server_id, from_timestamp], |row| Ok(UsageUserAggregate { username: row.get(0)?, active_seconds: row.get(1)?, memory_mb_seconds: row.get(2)? }))
+            .map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+        let covered_days = connection.query_row(
+            "SELECT COUNT(DISTINCT date(timestamp,'unixepoch')) FROM usage_buckets WHERE server_id=?1 AND timestamp>=?2",
+            params![server_id, from_timestamp], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        let coverage_gpu_seconds = connection.query_row(
+            "SELECT COALESCE(SUM(coverage),0) FROM (SELECT timestamp,gpu_uuid,MAX(coverage_seconds) AS coverage FROM usage_buckets WHERE server_id=?1 AND timestamp>=?2 GROUP BY timestamp,gpu_uuid)",
+            params![server_id, from_timestamp], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        Ok(UsageDistribution { users, covered_days, requested_days, coverage_gpu_seconds })
+    }
+
     pub fn get_history(&self, server_id: &str, from_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
@@ -332,11 +407,13 @@ impl Database {
     pub fn list_idle_reservations(&self) -> Result<Vec<IdleReservation>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection.prepare(
-            "SELECT id,name,filters_json,created_at,expires_at,notify_mode,status,matched_gpu_keys_json FROM idle_reservations ORDER BY created_at DESC",
+            "SELECT id,name,filters_json,created_at,expires_at,notify_mode,status,matched_gpu_keys_json,current_available_gpu_keys_json,pending_confirmation_gpu_keys_json FROM idle_reservations ORDER BY created_at DESC",
         ).map_err(|error| error.to_string())?;
         let rows = statement.query_map([], |row| {
             let filters_json: String = row.get(2)?;
             let matched_json: String = row.get(7)?;
+            let current_json: String = row.get(8)?;
+            let pending_json: String = row.get(9)?;
             Ok(IdleReservation {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -346,6 +423,8 @@ impl Database {
                 notify_mode: row.get(5)?,
                 status: row.get(6)?,
                 matched_gpu_keys: serde_json::from_str(&matched_json).unwrap_or_default(),
+                current_available_gpu_keys: serde_json::from_str(&current_json).unwrap_or_default(),
+                pending_confirmation_gpu_keys: serde_json::from_str(&pending_json).unwrap_or_default(),
             })
         }).map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
@@ -363,12 +442,14 @@ impl Database {
         }
         let filters_json = serde_json::to_string(&reservation.filters).map_err(|error| error.to_string())?;
         let matched_json = serde_json::to_string(&reservation.matched_gpu_keys).map_err(|error| error.to_string())?;
+        let current_json = serde_json::to_string(&reservation.current_available_gpu_keys).map_err(|error| error.to_string())?;
+        let pending_json = serde_json::to_string(&reservation.pending_confirmation_gpu_keys).map_err(|error| error.to_string())?;
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         connection.execute(
-            "INSERT INTO idle_reservations(id,name,filters_json,created_at,expires_at,notify_mode,status,matched_gpu_keys_json)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name,filters_json=excluded.filters_json,expires_at=excluded.expires_at,notify_mode=excluded.notify_mode,status=excluded.status,matched_gpu_keys_json=excluded.matched_gpu_keys_json",
-            params![reservation.id, reservation.name.trim(), filters_json, reservation.created_at, reservation.expires_at, reservation.notify_mode, reservation.status, matched_json],
+            "INSERT INTO idle_reservations(id,name,filters_json,created_at,expires_at,notify_mode,status,matched_gpu_keys_json,current_available_gpu_keys_json,pending_confirmation_gpu_keys_json)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name,filters_json=excluded.filters_json,expires_at=excluded.expires_at,notify_mode=excluded.notify_mode,status=excluded.status,matched_gpu_keys_json=excluded.matched_gpu_keys_json,current_available_gpu_keys_json=excluded.current_available_gpu_keys_json,pending_confirmation_gpu_keys_json=excluded.pending_confirmation_gpu_keys_json",
+            params![reservation.id, reservation.name.trim(), filters_json, reservation.created_at, reservation.expires_at, reservation.notify_mode, reservation.status, matched_json, current_json, pending_json],
         ).map_err(|error| error.to_string())?;
         Ok(IdleReservation { name: reservation.name.trim().to_string(), ..reservation })
     }
@@ -437,6 +518,19 @@ mod tests {
         assert_eq!(saved.sampling_interval_seconds, 2);
         assert_eq!(saved.location.as_deref(), Some("Lab 301 / Rack R2"));
         assert_eq!(db.list_servers().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn server_order_can_be_rearranged_and_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let first = db.save_server(draft("first", 30)).unwrap();
+        let second = db.save_server(ServerDraft { port: 2222, ..draft("second", 30) }).unwrap();
+        db.reorder_servers(&[second.id.clone(), first.id.clone()]).unwrap();
+        let ordered = db.list_servers().unwrap();
+        assert_eq!(ordered.iter().map(|server| server.id.as_str()).collect::<Vec<_>>(), vec![second.id, first.id]);
+        assert_eq!(ordered[0].sort_order, 0);
+        assert_eq!(ordered[1].sort_order, 1);
     }
 
     #[test]
@@ -527,6 +621,8 @@ mod tests {
             notify_mode: "continuous".into(),
             status: "active".into(),
             matched_gpu_keys: vec!["server-1:gpu-0".into()],
+            current_available_gpu_keys: vec![],
+            pending_confirmation_gpu_keys: vec![],
         }).unwrap();
         assert_eq!(saved.name, "A100 预约");
 
@@ -596,6 +692,7 @@ mod tests {
         let existing = db.get_server("legacy").unwrap();
         assert_eq!(existing.name, "Legacy GPU");
         assert_eq!(existing.location, None);
+        assert_eq!(existing.sort_order, 0);
 
         let updated = db.save_server(ServerDraft {
             id: Some(existing.id),

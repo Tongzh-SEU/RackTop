@@ -14,9 +14,12 @@ export function idleReservationFiltersEqual(left: IdleReservationFilters, right:
     && left.cpuModel === right.cpuModel
     && left.duration === right.duration
     && left.tag === right.tag
+    && left.targetServerId === right.targetServerId
+    && left.targetGpuUuid === right.targetGpuUuid
 }
 
 export function idleReservationSummary(filters: IdleReservationFilters): string {
+  if (filters.targetServerId && filters.targetGpuUuid) return `指定 GPU · ${filters.targetGpuUuid}`
   const parts = [`GPU MEM ≥ ${filters.gpuMemoryGb} GB`, `CPU MEM ≥ ${filters.cpuMemoryGb} GB`]
   parts.push(filters.otherUserProcess === 'all' ? '进程不限' : '无人占用')
   if (filters.gpuModel !== 'all') parts.push(filters.gpuModel.replace('NVIDIA ', ''))
@@ -60,6 +63,7 @@ export function evaluateIdleReservation(
   }
 
   const notificationGpuKeys: string[] = []
+  const pendingConfirmation = new Set(reservation.pendingConfirmationGpuKeys ?? [])
   const stableSeconds = reservation.filters.duration > 0 ? 0 : CURRENT_SNAPSHOT_STABLE_SECONDS
   let status: IdleReservation['status'] = reservation.status
   for (const key of matchingGpuKeys) {
@@ -67,6 +71,7 @@ export function evaluateIdleReservation(
     nextPending[key] ??= nowSeconds
     if (nowSeconds - nextPending[key] < stableSeconds) continue
     notificationGpuKeys.push(key)
+    pendingConfirmation.add(key)
     latched.add(key)
     delete nextPending[key]
     changed = true
@@ -78,8 +83,10 @@ export function evaluateIdleReservation(
 
   const matchedGpuKeys = [...latched].sort()
   if (!changed && matchedGpuKeys.join('\0') !== [...reservation.matchedGpuKeys].sort().join('\0')) changed = true
+  const currentAvailableGpuKeys = [...matchingGpuKeys].sort()
+  if ((reservation.currentAvailableGpuKeys ?? []).join('\0') !== currentAvailableGpuKeys.join('\0')) changed = true
   return {
-    reservation: changed ? { ...reservation, status, matchedGpuKeys } : reservation,
+    reservation: changed ? { ...reservation, status, matchedGpuKeys, currentAvailableGpuKeys, pendingConfirmationGpuKeys: [...pendingConfirmation].sort() } : reservation,
     pendingSince: nextPending,
     notificationGpuKeys,
     changed,
