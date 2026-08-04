@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { AlertTriangle, Check, Copy, KeyRound, ShieldCheck, X } from 'lucide-react'
+import { AlertTriangle, Check, Copy, Database, KeyRound, ShieldCheck, X } from 'lucide-react'
 import type { ServerDraft } from '../types/models'
 import { unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
 
@@ -25,6 +25,7 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
     tags: initial?.tags ?? [],
     samplingIntervalSeconds: initial?.samplingIntervalSeconds ?? defaultSamplingInterval,
     historyRetentionDays: initial?.historyRetentionDays ?? defaultHistoryRetentionDays,
+    remoteHistoryEnabled: initial?.remoteHistoryEnabled ?? false,
     authMethod: initial?.authMethod ?? 'sshAgent',
   })
   const [saving, setSaving] = useState(false)
@@ -129,6 +130,7 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
               <label>此服务器采样间隔<select value={draft.samplingIntervalSeconds} onChange={(event) => set('samplingIntervalSeconds', Number(event.target.value))}><option value="2">2 秒</option><option value="5">5 秒</option><option value="10">10 秒</option><option value="15">15 秒</option><option value="30">30 秒</option></select><small>前台使用；后台会自动采用更低频率。</small></label>
               <label>此服务器历史保存<select value={draft.historyRetentionDays} onChange={(event) => set('historyRetentionDays', Number(event.target.value))}><option value="1">1 天</option><option value="7">7 天</option><option value="30">30 天</option><option value="90">90 天</option></select><small>独立覆盖全局默认保存时间。</small></label>
             </div>
+            <label className="switch-row remote-history-row"><Database size={18} /><span><strong>远端持续保存 30 天</strong><small>启动用户级隐藏常驻采集进程；RackTop 关闭期间继续记录，重新打开后自动同步。不保存进程和命令。</small></span><input type="checkbox" checked={draft.remoteHistoryEnabled} onChange={(event) => set('remoteHistoryEnabled', event.target.checked)} /></label>
             <details className="key-guide">
               <summary><KeyRound size={17} />SSH 密钥快速配置</summary>
               <div className="key-guide__toolbar">

@@ -16,7 +16,7 @@ pub fn parse(content: &str) -> Vec<ServerDraft> {
     fn finish(block: HostBlock, output: &mut Vec<ServerDraft>) {
         for alias in block.aliases.into_iter().filter(|value| !value.contains('*') && !value.contains('?') && !value.starts_with('!')) {
             let hostname = block.hostname.clone().unwrap_or_else(|| alias.clone());
-            output.push(ServerDraft { id: None, name: alias.clone(), location: None, host: hostname, port: block.port.unwrap_or(22), username: block.user.clone().unwrap_or_else(default_username), ssh_alias: Some(alias), identity_file: block.identity_file.clone(), proxy_jump: block.proxy_jump.clone(), tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 30, auth_method: "sshConfig".into(), password: None, save_password: false });
+            output.push(ServerDraft { id: None, name: alias.clone(), location: None, host: hostname, port: block.port.unwrap_or(22), username: block.user.clone().unwrap_or_else(default_username), ssh_alias: Some(alias), identity_file: block.identity_file.clone(), proxy_jump: block.proxy_jump.clone(), tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 30, remote_history_enabled: false, auth_method: "sshConfig".into(), password: None, save_password: false });
         }
     }
     let mut output = Vec::new();

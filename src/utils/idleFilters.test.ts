@@ -4,7 +4,7 @@ import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, normalizeIdleFilters, pars
 
 const server: Server = {
   id: 'server-1', name: 'server-1', host: '10.0.0.1', port: 22, username: 'tongzh', tags: ['lab'],
-  samplingIntervalSeconds: 2, historyRetentionDays: 30, authMethod: 'sshAgent', status: 'online',
+  samplingIntervalSeconds: 2, historyRetentionDays: 30, remoteHistoryEnabled: false, authMethod: 'sshAgent', status: 'online',
 }
 
 const snapshot: Snapshot = {

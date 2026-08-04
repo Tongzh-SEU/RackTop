@@ -10,6 +10,7 @@ const draft = (host: string, username = 'tongzh', port = 22): ServerDraft => ({
   tags: [],
   samplingIntervalSeconds: 2,
   historyRetentionDays: 30,
+  remoteHistoryEnabled: false,
   authMethod: 'sshConfig',
 })
 

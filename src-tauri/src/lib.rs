@@ -1,11 +1,13 @@
 pub mod collector;
 pub mod models;
+mod remote_history;
 mod host_key;
 mod ssh_config;
 mod storage;
 
-use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, Server, ServerDraft, Snapshot};
+use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, RemoteHistorySyncResult, Server, ServerDraft, Snapshot};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use storage::Database;
 use tauri::{image::Image, menu::{MenuBuilder, MenuItemBuilder}, tray::TrayIconBuilder, Emitter, Manager, State};
 
@@ -48,6 +50,35 @@ fn get_history(database: State<'_, Database>, server_id: String, from_timestamp:
 #[tauri::command]
 fn get_history_heatmap(database: State<'_, Database>, server_id: String, from_timestamp: i64, timezone_offset_seconds: i64, gpu_uuids: Vec<String>) -> Result<Vec<HistoryHeatmapPoint>, String> {
     database.get_history_heatmap(&server_id, from_timestamp, timezone_offset_seconds, &gpu_uuids)
+}
+
+#[tauri::command]
+async fn configure_remote_history(database: State<'_, Database>, server_id: String) -> Result<(), String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
+    remote_history::configure(&server, password.as_deref()).await
+}
+
+#[tauri::command]
+async fn sync_remote_history(database: State<'_, Database>, server_id: String) -> Result<RemoteHistorySyncResult, String> {
+    let server = database.get_server(&server_id)?;
+    if !server.remote_history_enabled {
+        return Ok(RemoteHistorySyncResult { imported_count: 0, latest_timestamp: server.remote_history_last_sync_at });
+    }
+    if !database.get_settings()?.history_enabled {
+        return Ok(RemoteHistorySyncResult { imported_count: 0, latest_timestamp: server.remote_history_last_sync_at });
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
+    let since = database.remote_history_cursor(&server_id, now)?;
+    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
+    let fetched_points = remote_history::fetch(&server, password.as_deref(), since).await?;
+    let points: Vec<_> = fetched_points.iter().filter(|point| point.timestamp >= now - 31 * 86_400 && point.timestamp <= now + 300).cloned().collect();
+    if !fetched_points.is_empty() && points.is_empty() {
+        return Err("远端历史时间戳超出有效范围，请检查服务器系统时间和时区".into());
+    }
+    let latest_timestamp = points.iter().map(|point| point.timestamp).max().or(server.remote_history_last_sync_at);
+    let imported_count = database.import_remote_history(&server_id, &points)?;
+    Ok(RemoteHistorySyncResult { imported_count, latest_timestamp })
 }
 
 #[tauri::command]
@@ -165,7 +196,7 @@ pub fn run() {
                 .build(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, collect_server, get_history, get_history_heatmap, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, collect_server, get_history, get_history_heatmap, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }

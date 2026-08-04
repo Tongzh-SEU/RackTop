@@ -16,6 +16,10 @@ pub struct Server {
     pub tags: Vec<String>,
     pub sampling_interval_seconds: u64,
     pub history_retention_days: u32,
+    #[serde(default)]
+    pub remote_history_enabled: bool,
+    #[serde(default)]
+    pub remote_history_last_sync_at: Option<i64>,
     pub auth_method: String,
     pub status: String,
     pub last_error: Option<String>,
@@ -38,6 +42,8 @@ pub struct ServerDraft {
     pub tags: Vec<String>,
     pub sampling_interval_seconds: u64,
     pub history_retention_days: u32,
+    #[serde(default)]
+    pub remote_history_enabled: bool,
     pub auth_method: String,
     pub password: Option<String>,
     #[serde(default)]
@@ -149,6 +155,13 @@ pub struct HistoryHeatmapPoint {
     pub memory_utilization: f64,
     pub gpu_utilizations: HashMap<String, f64>,
     pub gpu_memory_utilizations: HashMap<String, f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteHistorySyncResult {
+    pub imported_count: usize,
+    pub latest_timestamp: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

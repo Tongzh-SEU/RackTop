@@ -45,7 +45,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { api } from './services/api'
-import type { AppSettings, DetailTab, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, Server, ServerDraft, Snapshot } from './types/models'
+import type { AppSettings, DetailTab, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
 import { HistoryHeatmaps } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
@@ -103,6 +103,7 @@ function serverToDraft(server: Server): Partial<ServerDraft> {
     tags: server.tags,
     samplingIntervalSeconds: server.samplingIntervalSeconds,
     historyRetentionDays: server.historyRetentionDays,
+    remoteHistoryEnabled: server.remoteHistoryEnabled,
     authMethod: server.authMethod,
   }
 }
@@ -190,6 +191,8 @@ function App() {
   const lastAttemptAt = useRef<Record<string, number>>({})
   const lastProcessAttemptAt = useRef<Record<string, number>>({})
   const lastHistoryRecordedAt = useRef<Record<string, number>>({})
+  const remoteHistoryServersRef = useRef<Server[]>([])
+  const remoteSyncInFlight = useRef(new Set<string>())
   const nextRetryAt = useRef<Record<string, number>>({})
   const inFlightServers = useRef(new Set<string>())
   const deletedServerIds = useRef(new Set<string>())
@@ -200,6 +203,9 @@ function App() {
 
   const selectedServer = servers.find((server) => server.id === selectedServerId)
   const selectedSnapshot = selectedServerId ? snapshots[selectedServerId] : undefined
+  const remoteHistoryServerKey = servers.filter((server) => server.remoteHistoryEnabled).map((server) => server.id).sort().join('\n')
+
+  useEffect(() => { remoteHistoryServersRef.current = servers }, [servers])
 
   const refreshServer = useCallback(async (serverId: string, quiet = false) => {
     if (inFlightServers.current.has(serverId)) return
@@ -315,6 +321,32 @@ function App() {
     const interval = window.setInterval(() => void refreshAll(true), FOREGROUND_STATUS_INTERVAL_MS)
     return () => window.clearInterval(interval)
   }, [settings, servers.length, refreshAll, paused])
+
+  useEffect(() => {
+    if (!api.isDesktop || !remoteHistoryServerKey) return
+    let cancelled = false
+    const syncAllRemoteHistory = async () => {
+      await Promise.allSettled(remoteHistoryServersRef.current.filter((server) => server.remoteHistoryEnabled).map(async (server) => {
+        if (remoteSyncInFlight.current.has(server.id)) return
+        remoteSyncInFlight.current.add(server.id)
+        try {
+          try {
+            const result = await api.syncRemoteHistory(server.id)
+            if (!cancelled && result.latestTimestamp) {
+              setServers((current) => current.map((item) => item.id === server.id && item.remoteHistoryLastSyncAt !== result.latestTimestamp ? { ...item, remoteHistoryLastSyncAt: result.latestTimestamp } : item))
+            }
+          } finally {
+            await api.configureRemoteHistory(server.id)
+          }
+        } finally {
+          remoteSyncInFlight.current.delete(server.id)
+        }
+      }))
+    }
+    void syncAllRemoteHistory()
+    const interval = window.setInterval(() => { void syncAllRemoteHistory() }, 5 * 60_000)
+    return () => { cancelled = true; window.clearInterval(interval) }
+  }, [remoteHistoryServerKey])
 
   useEffect(() => {
     if (!api.isDesktop) return
@@ -457,13 +489,25 @@ function App() {
   }
 
   async function saveServer(draft: ServerDraft) {
-    const server = await api.saveServer(draft)
-    deletedServerIds.current.delete(server.id)
-    setServers((current) => [...current.filter((item) => item.id !== server.id), server])
-    setSelectedServerId(server.id)
+    const previous = draft.id ? servers.find((item) => item.id === draft.id) : undefined
+    const saved = await api.saveServer(draft)
+    let sync: RemoteHistorySyncResult | null = null
+    if (saved.remoteHistoryEnabled) {
+      try {
+        sync = await api.syncRemoteHistory(saved.id)
+      } finally {
+        await api.configureRemoteHistory(saved.id)
+      }
+    } else if (previous?.remoteHistoryEnabled) {
+      await api.configureRemoteHistory(saved.id)
+    }
+    const server = sync?.latestTimestamp ? { ...saved, remoteHistoryLastSyncAt: sync.latestTimestamp } : saved
+    deletedServerIds.current.delete(saved.id)
+    setServers((current) => [...current.filter((item) => item.id !== saved.id), server])
+    setSelectedServerId(saved.id)
     setShowServerForm(false)
     setEditingServer(null)
-    await refreshServer(server.id)
+    await refreshServer(saved.id)
   }
 
   async function removeServer(server: Server) {
@@ -796,7 +840,7 @@ function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot 
     return () => { cancelled = true; window.clearInterval(interval) }
   }, [gpuUuidKey, server.historyRetentionDays, server.id])
 
-  return <div className="history-page"><header className="history-page__header"><div><History size={18} /><span><h2>资源历史</h2><p>每列 1 天，每格汇总连续 3 小时的平均使用率</p></span></div><small>最近 {Math.min(90, Math.max(1, server.historyRetentionDays))} 天</small></header>{loading ? <div className="history-page__state"><RefreshCw className="spin" size={16} />正在聚合历史样本…</div> : error ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />历史数据读取失败：{error}</div> : <HistoryHeatmaps snapshot={snapshot} points={heatmapPoints} retentionDays={server.historyRetentionDays} />}<section className="data-retention"><Database size={18} /><div><strong>本地历史数据</strong><p>样本在 SQLite 中按 3 小时聚合后显示，保存期到期自动清理；敏感凭据不会写入历史。</p></div></section></div>
+  return <div className="history-page"><header className="history-page__header"><div><History size={18} /><span><h2>资源历史</h2><p>每列 1 天，每格汇总连续 3 小时的平均使用率</p></span></div><small>最近 {Math.min(90, Math.max(1, server.historyRetentionDays))} 天</small></header>{loading ? <div className="history-page__state"><RefreshCw className="spin" size={16} />正在聚合历史样本…</div> : error ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />历史数据读取失败：{error}</div> : <HistoryHeatmaps snapshot={snapshot} points={heatmapPoints} retentionDays={server.historyRetentionDays} />}<section className="data-retention"><Database size={18} /><div><strong>{server.remoteHistoryEnabled ? '本地与远端历史' : '本地历史数据'}</strong><p>{server.remoteHistoryEnabled ? '服务器上的隐藏常驻进程每分钟保留一份轻量资源样本并滚动保存 30 天；RackTop 打开后先增量同步，再检查采集进程。' : '样本仅在 RackTop 运行时写入本机 SQLite，保存期到期自动清理。'}敏感凭据、进程和命令不会写入历史。</p></div></section></div>
 }
 
 function LogsView({ server, snapshot }: { server: Server; snapshot: Snapshot }) {
@@ -805,7 +849,7 @@ function LogsView({ server, snapshot }: { server: Server; snapshot: Snapshot }) 
 }
 
 function ConnectionView({ server, onRefresh, onDelete, onEdit, isRefreshing }: { server: Server; onRefresh: () => void; onDelete: () => void; onEdit: () => void; isRefreshing: boolean }) {
-  return <div className="content-stack"><section className="panel connection-panel"><PanelHeader icon={<KeyRound />} title="SSH 连接" subtitle="认证信息仅在本机使用" /><dl className="definition-list"><div><dt>物理位置</dt><dd>{server.location || '未填写'}</dd></div><div><dt>连接地址</dt><dd className="mono">{server.username}@{server.host}:{server.port}</dd></div><div><dt>认证</dt><dd>{server.authMethod === 'sshAgent' ? 'SSH Agent / 默认密钥' : server.authMethod}</dd></div><div><dt>SSH Config</dt><dd>{server.sshAlias || '未使用别名'}</dd></div><div><dt>私钥</dt><dd className="mono">{server.identityFile || '由 OpenSSH 自动选择'}</dd></div><div><dt>ProxyJump</dt><dd className="mono">{server.proxyJump || '无'}</dd></div></dl><div className="panel__actions"><button className="button button--primary" onClick={onRefresh} disabled={isRefreshing}><RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />测试并重新连接</button><button className="button button--secondary" onClick={onEdit}><Settings size={16} />编辑配置</button></div></section><section className="panel danger-zone"><div><strong>删除服务器</strong><p>同时移除该服务器在本机保存的历史数据。</p></div><button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除</button></section></div>
+  return <div className="content-stack"><section className="panel connection-panel"><PanelHeader icon={<KeyRound />} title="SSH 连接" subtitle="认证信息仅在本机使用" /><dl className="definition-list"><div><dt>物理位置</dt><dd>{server.location || '未填写'}</dd></div><div><dt>连接地址</dt><dd className="mono">{server.username}@{server.host}:{server.port}</dd></div><div><dt>认证</dt><dd>{server.authMethod === 'sshAgent' ? 'SSH Agent / 默认密钥' : server.authMethod}</dd></div><div><dt>SSH Config</dt><dd>{server.sshAlias || '未使用别名'}</dd></div><div><dt>私钥</dt><dd className="mono">{server.identityFile || '由 OpenSSH 自动选择'}</dd></div><div><dt>ProxyJump</dt><dd className="mono">{server.proxyJump || '无'}</dd></div><div><dt>远端历史</dt><dd>{server.remoteHistoryEnabled ? `已启用 · ${server.remoteHistoryLastSyncAt ? `同步于 ${relativeTime(server.remoteHistoryLastSyncAt)}` : '等待首次同步'}` : '未启用'}</dd></div></dl><div className="panel__actions"><button className="button button--primary" onClick={onRefresh} disabled={isRefreshing}><RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />测试并重新连接</button><button className="button button--secondary" onClick={onEdit}><Settings size={16} />编辑配置</button></div></section><section className="panel danger-zone"><div><strong>删除服务器</strong><p>同时移除该服务器在本机保存的历史数据；远端采集任务和文件保持不变。</p></div><button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除</button></section></div>
 }
 
 function NvidiaWarning({ snapshot, onRefresh }: { snapshot: Snapshot; onRefresh: () => void }) {

@@ -14,6 +14,8 @@ export interface Server {
   tags: string[]
   samplingIntervalSeconds: number
   historyRetentionDays: number
+  remoteHistoryEnabled: boolean
+  remoteHistoryLastSyncAt?: number | null
   authMethod: AuthMethod
   status: ServerStatus
   lastError?: string | null
@@ -108,6 +110,11 @@ export interface HistoryHeatmapPoint {
   gpuMemoryUtilizations: Record<string, number>
 }
 
+export interface RemoteHistorySyncResult {
+  importedCount: number
+  latestTimestamp?: number | null
+}
+
 export interface HostKeyInfo {
   serverId: string
   host: string
@@ -171,6 +178,7 @@ export interface ServerDraft {
   tags: string[]
   samplingIntervalSeconds: number
   historyRetentionDays: number
+  remoteHistoryEnabled: boolean
   authMethod: AuthMethod
   password?: string
   savePassword?: boolean

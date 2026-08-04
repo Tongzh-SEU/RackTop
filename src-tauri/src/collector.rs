@@ -52,7 +52,7 @@ pub async fn collect_with_password(server: &Server, password: Option<&str>, incl
     parse_snapshot(&server.id, &String::from_utf8_lossy(&output.stdout))
 }
 
-fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<(Command, String), String> {
+pub(crate) fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<(Command, String), String> {
     let mut command = Command::new("ssh");
     command.args(["-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=yes"]);
     if server.auth_method == "password" {
@@ -109,7 +109,7 @@ pub async fn install_nvidia_driver(server: &Server, password: Option<&str>) -> R
     Ok("安装命令执行完成。驱动通常需要重启服务器后生效；请重启后点击“重新检测”。".into())
 }
 
-fn classify_ssh_error(stderr: &str) -> String {
+pub(crate) fn classify_ssh_error(stderr: &str) -> String {
     let lower = stderr.to_lowercase();
     if lower.contains("host key verification failed") || lower.contains("no host key is known") {
         "主机指纹尚未信任或已发生变化。为防止中间人攻击，RackTop 已阻止连接；请先用系统 ssh 核对并接受指纹。".into()

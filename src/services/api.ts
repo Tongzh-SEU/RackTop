@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, Server, ServerDraft, Snapshot } from '../types/models'
+import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from '../types/models'
 import { clampPercent, gpuMemoryPercent } from '../utils/gpu'
 
 const isTauri = '__TAURI_INTERNALS__' in window
@@ -17,6 +17,7 @@ const demoServers: Server[] = [
     tags: ['lab', '4090D'],
     samplingIntervalSeconds: 2,
     historyRetentionDays: 30,
+    remoteHistoryEnabled: false,
     authMethod: 'sshAgent',
     status: 'online',
     lastSeenAt: now,
@@ -31,6 +32,7 @@ const demoServers: Server[] = [
     tags: ['lab', 'A100'],
     samplingIntervalSeconds: 2,
     historyRetentionDays: 30,
+    remoteHistoryEnabled: false,
     authMethod: 'sshAgent',
     status: 'online',
     lastSeenAt: now,
@@ -188,6 +190,13 @@ export const api = {
         gpuMemoryUtilizations: Object.fromEntries(gpuUuids.map((uuid, gpuIndex) => [uuid, clampPercent(gpuMemoryPercent(source.gpus.find((gpu) => gpu.uuid === uuid) ?? source.gpus[gpuIndex]) + Math.sin(phase / 3 + gpuIndex) * 5)])),
       }
     })
+  },
+  async configureRemoteHistory(serverId: string): Promise<void> {
+    if (isTauri) return invoke('configure_remote_history', { serverId })
+  },
+  async syncRemoteHistory(serverId: string): Promise<RemoteHistorySyncResult> {
+    if (isTauri) return invoke('sync_remote_history', { serverId })
+    return { importedCount: 0, latestTimestamp: null }
   },
   async listIdleReservations(): Promise<IdleReservation[]> {
     return isTauri ? invoke('list_idle_reservations') : browserReservations
