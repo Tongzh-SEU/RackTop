@@ -1,11 +1,13 @@
 pub mod collector;
 pub mod models;
+mod remote_history;
 mod host_key;
 mod ssh_config;
 mod storage;
 
-use models::{AppSettings, HistoryPoint, HostKeyInfo, Server, ServerDraft, Snapshot};
+use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, RemoteHistorySyncResult, Server, ServerDraft, Snapshot};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use storage::Database;
 use tauri::{image::Image, menu::{MenuBuilder, MenuItemBuilder}, tray::TrayIconBuilder, Emitter, Manager, State};
 
@@ -25,13 +27,15 @@ fn delete_server(database: State<'_, Database>, server_id: String) -> Result<(),
 }
 
 #[tauri::command]
-async fn collect_server(database: State<'_, Database>, server_id: String, include_processes: bool) -> Result<Snapshot, String> {
+async fn collect_server(database: State<'_, Database>, server_id: String, include_processes: bool, record_history: bool) -> Result<Snapshot, String> {
     let server = database.get_server(&server_id)?;
     let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
     match collector::collect_with_password(&server, password.as_deref(), include_processes).await {
         Ok(snapshot) => {
             database.update_status(&server_id, &snapshot.status, snapshot.nvidia_message.as_deref(), Some(snapshot.timestamp))?;
-            database.save_snapshot(&snapshot)?;
+            if record_history {
+                database.save_snapshot(&snapshot)?;
+            }
             Ok(snapshot)
         }
         Err(error) => Err(error),
@@ -41,6 +45,55 @@ async fn collect_server(database: State<'_, Database>, server_id: String, includ
 #[tauri::command]
 fn get_history(database: State<'_, Database>, server_id: String, from_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
     database.get_history(&server_id, from_timestamp)
+}
+
+#[tauri::command]
+fn get_history_heatmap(database: State<'_, Database>, server_id: String, from_timestamp: i64, timezone_offset_seconds: i64, gpu_uuids: Vec<String>) -> Result<Vec<HistoryHeatmapPoint>, String> {
+    database.get_history_heatmap(&server_id, from_timestamp, timezone_offset_seconds, &gpu_uuids)
+}
+
+#[tauri::command]
+async fn configure_remote_history(database: State<'_, Database>, server_id: String) -> Result<(), String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
+    remote_history::configure(&server, password.as_deref()).await
+}
+
+#[tauri::command]
+async fn sync_remote_history(database: State<'_, Database>, server_id: String) -> Result<RemoteHistorySyncResult, String> {
+    let server = database.get_server(&server_id)?;
+    if !server.remote_history_enabled {
+        return Ok(RemoteHistorySyncResult { imported_count: 0, latest_timestamp: server.remote_history_last_sync_at });
+    }
+    if !database.get_settings()?.history_enabled {
+        return Ok(RemoteHistorySyncResult { imported_count: 0, latest_timestamp: server.remote_history_last_sync_at });
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
+    let since = database.remote_history_cursor(&server_id, now)?;
+    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
+    let fetched_points = remote_history::fetch(&server, password.as_deref(), since).await?;
+    let points: Vec<_> = fetched_points.iter().filter(|point| point.timestamp >= now - 31 * 86_400 && point.timestamp <= now + 300).cloned().collect();
+    if !fetched_points.is_empty() && points.is_empty() {
+        return Err("远端历史时间戳超出有效范围，请检查服务器系统时间和时区".into());
+    }
+    let latest_timestamp = points.iter().map(|point| point.timestamp).max().or(server.remote_history_last_sync_at);
+    let imported_count = database.import_remote_history(&server_id, &points)?;
+    Ok(RemoteHistorySyncResult { imported_count, latest_timestamp })
+}
+
+#[tauri::command]
+fn list_idle_reservations(database: State<'_, Database>) -> Result<Vec<IdleReservation>, String> {
+    database.list_idle_reservations()
+}
+
+#[tauri::command]
+fn save_idle_reservation(database: State<'_, Database>, reservation: IdleReservation) -> Result<IdleReservation, String> {
+    database.save_idle_reservation(reservation)
+}
+
+#[tauri::command]
+fn delete_idle_reservation(database: State<'_, Database>, reservation_id: String) -> Result<(), String> {
+    database.delete_idle_reservation(&reservation_id)
 }
 
 #[tauri::command]
@@ -89,6 +142,14 @@ async fn install_nvidia_driver(database: State<'_, Database>, server_id: String,
     collector::install_nvidia_driver(&server, password.as_deref()).await
 }
 
+#[tauri::command]
+async fn terminate_process(database: State<'_, Database>, server_id: String, pid: u32, confirmed: bool) -> Result<String, String> {
+    if !confirmed { return Err("必须在界面完成二次确认后才能结束进程".into()); }
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
+    collector::terminate_process_group(&server, password.as_deref(), pid).await
+}
+
 fn tray_image() -> Image<'static> {
     let width = 18usize;
     let height = 18usize;
@@ -135,7 +196,7 @@ pub fn run() {
                 .build(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, collect_server, get_history, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, collect_server, get_history, get_history_heatmap, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }

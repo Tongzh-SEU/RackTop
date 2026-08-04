@@ -1,0 +1,33 @@
+import { renderToStaticMarkup } from 'react-dom/server'
+import { describe, expect, it } from 'vitest'
+import type { HistoryHeatmapPoint, Snapshot } from '../types/models'
+import { HistoryHeatmaps } from './HistoryHeatmap'
+
+const timestamp = new Date(2026, 7, 4, 6).getTime() / 1000
+const snapshot: Snapshot = {
+  serverId: 'server-1', hostname: 'gpu-box', username: 'tongzh', osId: 'ubuntu', osName: 'Ubuntu', timestamp, status: 'online', processesSampled: true, nvidiaSmi: 'available',
+  system: { cpuModel: 'Test CPU', cpuUtilization: 25, currentUserCpuUtilization: 10, load1: 0, load5: 0, load15: 0, memoryUsedBytes: 40, memoryTotalBytes: 100, swapUsedBytes: 0, swapTotalBytes: 0 },
+  gpus: [
+    { index: 0, uuid: 'GPU-0', name: 'NVIDIA A100', utilization: 55, memoryUtilization: 70, memoryUsedMb: 70, memoryTotalMb: 100, temperatureCelsius: 40, powerWatts: 100 },
+    { index: 1, uuid: 'GPU-1', name: 'NVIDIA A100', utilization: 10, memoryUtilization: 20, memoryUsedMb: 20, memoryTotalMb: 100, temperatureCelsius: 38, powerWatts: 90 },
+  ],
+  processes: [], cpuProcesses: [],
+}
+const points: HistoryHeatmapPoint[] = [{ timestamp, sampleCount: 12, cpuUtilization: 25, memoryUtilization: 40, gpuUtilizations: { 'GPU-0': 55, 'GPU-1': 10 }, gpuMemoryUtilizations: { 'GPU-0': 70, 'GPU-1': 20 } }]
+
+describe('HistoryHeatmaps', () => {
+  it('renders one CPU block and one block per GPU', () => {
+    const markup = renderToStaticMarkup(<HistoryHeatmaps snapshot={snapshot} points={points} retentionDays={2} />)
+    expect(markup.match(/<section class="panel history-heatmap/g)).toHaveLength(3)
+    expect(markup).toContain('CPU')
+    expect(markup).toContain('GPU 0')
+    expect(markup).toContain('GPU 1')
+  })
+
+  it('defaults CPU to UTL and every GPU to MEM', () => {
+    const markup = renderToStaticMarkup(<HistoryHeatmaps snapshot={snapshot} points={points} retentionDays={2} />)
+    expect(markup).toContain('CPU UTL 每 3 小时平均值热力图')
+    expect(markup).toContain('GPU 0 MEM 每 3 小时平均值热力图')
+    expect(markup).toContain('GPU 1 MEM 每 3 小时平均值热力图')
+  })
+})

@@ -2,8 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+APP_VERSION="$(node -p "require('$ROOT_DIR/package.json').version")"
 APP_PATH="$ROOT_DIR/src-tauri/target/release/bundle/macos/RackTop.app"
-DMG_PATH="$ROOT_DIR/src-tauri/target/release/bundle/dmg/RackTop_0.2.0_aarch64.dmg"
+DMG_PATH="$ROOT_DIR/src-tauri/target/release/bundle/dmg/RackTop_${APP_VERSION}_aarch64.dmg"
 STAGE_DIR="$(mktemp -d /private/tmp/racktop-dmg.XXXXXX)"
 
 cleanup() {
@@ -18,6 +19,7 @@ npm run tauri build -- --bundles app
 
 # An unsigned local build only carries the linker signature, which does not seal
 # the app resources. Re-sign the complete bundle so on-disk verification is useful.
+xattr -cr "$APP_PATH"
 codesign --force --deep --sign - "$APP_PATH"
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GpuMetric, ProcessMetric } from '../types/models'
-import { aggregateGpuMemoryPercent, clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
+import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
 
 function gpu(memoryUsedMb: number, memoryTotalMb = 40_960, utilization = 0): GpuMetric {
   return {
@@ -17,7 +17,7 @@ function gpu(memoryUsedMb: number, memoryTotalMb = 40_960, utilization = 0): Gpu
 }
 
 function process(username: string, memoryUsedMb: number, command = 'python train.py', isCurrentUser = false): ProcessMetric {
-  return { gpuUuid: 'GPU-test', gpuIndex: 0, pid: 42, username, command, memoryUsedMb, cpuPercent: 0, elapsed: '00:10', isCurrentUser }
+  return { gpuUuid: 'GPU-test', gpuIndex: 0, pid: 42, parentPid: 1, username, command, memoryUsedMb, smUtilization: null, cpuPercent: 0, elapsed: '00:10', isCurrentUser, isGroupLeader: true }
 }
 
 describe('GPU memory display semantics', () => {
@@ -57,6 +57,14 @@ describe('GPU memory display semantics', () => {
     expect(aggregateGpuMemoryPercent([])).toBe(0)
   })
 
+  it('sums sampled process SM utilization and falls back to zero', () => {
+    const first = { ...process('researcher', 1024), smUtilization: 34 }
+    const second = { ...process('researcher', 2048), pid: 43, smUtilization: 27 }
+    expect(aggregateGpuSmUtilization([first, second])).toBe(61)
+    expect(aggregateGpuSmUtilization([process('researcher', 1024)])).toBe(0)
+    expect(aggregateGpuSmUtilization([{ ...first, smUtilization: 80 }, { ...second, smUtilization: 70 }])).toBe(100)
+  })
+
   it('uses orange and red memory thresholds', () => {
     expect(gpuMemoryLevel(49.9)).toBe('active')
     expect(gpuMemoryLevel(50)).toBe('high')
@@ -85,4 +93,5 @@ describe('GPU memory display semantics', () => {
     expect(hasOtherUserGpuWorkload(metric, [process('researcher', 40_960 * 0.031)])).toBe(true)
     expect(hasOtherUserGpuWorkload(metric, [process('tongzh', 10_000, 'python train.py', true)])).toBe(false)
   })
+
 })

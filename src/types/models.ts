@@ -14,6 +14,8 @@ export interface Server {
   tags: string[]
   samplingIntervalSeconds: number
   historyRetentionDays: number
+  remoteHistoryEnabled: boolean
+  remoteHistoryLastSyncAt?: number | null
   authMethod: AuthMethod
   status: ServerStatus
   lastError?: string | null
@@ -36,12 +38,28 @@ export interface ProcessMetric {
   gpuUuid: string
   gpuIndex: number
   pid: number
+  parentPid: number
   username: string
   command: string
   memoryUsedMb: number
+  smUtilization: number | null
   cpuPercent: number
   elapsed: string
   isCurrentUser: boolean
+  isGroupLeader: boolean
+}
+
+export interface CpuProcessMetric {
+  pid: number
+  parentPid: number
+  username: string
+  command: string
+  cpuPercent: number
+  memoryPercent: number
+  memoryUsedBytes: number
+  elapsed: string
+  isCurrentUser: boolean
+  isGroupLeader: boolean
 }
 
 export interface SystemMetric {
@@ -68,6 +86,7 @@ export interface Snapshot {
   system: SystemMetric
   gpus: GpuMetric[]
   processes: ProcessMetric[]
+  cpuProcesses: CpuProcessMetric[]
   processesSampled: boolean
   nvidiaSmi: 'available' | 'missing' | 'permissionDenied' | 'failed'
   nvidiaMessage?: string | null
@@ -80,6 +99,20 @@ export interface HistoryPoint {
   swapUtilization: number
   gpuUtilizations: Record<string, number>
   gpuMemoryUtilizations: Record<string, number>
+}
+
+export interface HistoryHeatmapPoint {
+  timestamp: number
+  sampleCount: number
+  cpuUtilization: number
+  memoryUtilization: number
+  gpuUtilizations: Record<string, number>
+  gpuMemoryUtilizations: Record<string, number>
+}
+
+export interface RemoteHistorySyncResult {
+  importedCount: number
+  latestTimestamp?: number | null
 }
 
 export interface HostKeyInfo {
@@ -107,6 +140,29 @@ export interface AppSettings {
   reduceMotion: boolean
 }
 
+export interface IdleReservationFilters {
+  gpuMemoryGb: number
+  cpuMemoryGb: number
+  otherUserProcess: 'all' | 'without'
+  gpuModel: string
+  cpuModel: string
+  duration: number
+  tag: string
+}
+
+export type IdleReservationStatus = 'active' | 'paused' | 'completed' | 'expired'
+
+export interface IdleReservation {
+  id: string
+  name: string
+  filters: IdleReservationFilters
+  createdAt: number
+  expiresAt: number | null
+  notifyMode: 'once' | 'continuous'
+  status: IdleReservationStatus
+  matchedGpuKeys: string[]
+}
+
 export type DetailTab = 'overview' | 'gpu' | 'cpu' | 'processes' | 'history' | 'logs' | 'connection'
 
 export interface ServerDraft {
@@ -122,6 +178,7 @@ export interface ServerDraft {
   tags: string[]
   samplingIntervalSeconds: number
   historyRetentionDays: number
+  remoteHistoryEnabled: boolean
   authMethod: AuthMethod
   password?: string
   savePassword?: boolean

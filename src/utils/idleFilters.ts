@@ -1,15 +1,7 @@
-import type { HistoryPoint, Server, Snapshot } from '../types/models'
-import { clampPercent, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload } from './gpu'
+import type { HistoryPoint, IdleReservationFilters, Server, Snapshot } from '../types/models'
+import { clampPercent, gpuMemoryPercent, hasOtherUserGpuWorkload } from './gpu'
 
-export type IdleFilters = {
-  gpuMemoryGb: number
-  cpuMemoryGb: number
-  otherUserProcess: 'all' | 'without'
-  gpuModel: string
-  cpuModel: string
-  duration: number
-  tag: string
-}
+export type IdleFilters = IdleReservationFilters
 
 export const IDLE_FILTERS_STORAGE_KEY = 'racktop.idleFilters.v1'
 export const DEFAULT_IDLE_FILTERS: IdleFilters = {
@@ -63,6 +55,11 @@ export type IdleGpuItem = {
   available: boolean
 }
 
+export function displayedFreeMemoryGb(memoryMb: number): number {
+  const safeMemoryMb = Number.isFinite(memoryMb) ? Math.max(0, memoryMb) : 0
+  return Math.round(safeMemoryMb / 1024 * 10) / 10
+}
+
 export function rankIdleGpuItems(servers: Server[], snapshots: Record<string, Snapshot>, history: Record<string, HistoryPoint[]>, filters: IdleFilters): IdleGpuItem[] {
   return servers.flatMap((server) => (snapshots[server.id]?.gpus ?? []).map((gpu) => ({ server, gpu }))).filter(({ server, gpu }) => {
     const snapshot = snapshots[server.id]
@@ -74,7 +71,9 @@ export function rankIdleGpuItems(servers: Server[], snapshots: Record<string, Sn
     const freeCpuMemoryMb = Math.max(0, ((snapshot?.system.memoryTotalBytes ?? 0) - (snapshot?.system.memoryUsedBytes ?? 0)) / 1024 ** 2)
     const occupiedByOtherUser = hasOtherUserGpuWorkload(gpu, snapshot?.processes ?? [])
     const meetsProcess = filters.otherUserProcess === 'all' || !occupiedByOtherUser
-    const meetsSnapshot = hasEnoughFreeGpuMemory(gpu, filters.gpuMemoryGb * 1024) && freeCpuMemoryMb >= filters.cpuMemoryGb * 1024 && meetsProcess
+    const freeGpuMemoryGb = displayedFreeMemoryGb(gpu.memoryTotalMb - gpu.memoryUsedMb)
+    const freeCpuMemoryGb = displayedFreeMemoryGb(freeCpuMemoryMb)
+    const meetsSnapshot = freeGpuMemoryGb >= filters.gpuMemoryGb && freeCpuMemoryGb >= filters.cpuMemoryGb && meetsProcess
     if (filters.duration <= 0) return { server, gpu, available: meetsSnapshot }
     const snapshotTime = snapshot?.timestamp ?? Math.floor(Date.now() / 1000)
     const cutoff = snapshotTime - filters.duration * 60
@@ -85,7 +84,7 @@ export function rankIdleGpuItems(servers: Server[], snapshots: Record<string, Sn
     const meetsDuration = coversWindow && points.every((point) => {
       const historicalGpuFreeMb = gpuTotalMb * (1 - clampPercent(point.gpuMemoryUtilizations?.[gpu.uuid] ?? gpuMemoryPercent(gpu)) / 100)
       const historicalCpuFreeMb = cpuTotalMb * (1 - clampPercent(point.memoryUtilization) / 100)
-      return historicalGpuFreeMb >= filters.gpuMemoryGb * 1024 && historicalCpuFreeMb >= filters.cpuMemoryGb * 1024
+      return displayedFreeMemoryGb(historicalGpuFreeMb) >= filters.gpuMemoryGb && displayedFreeMemoryGb(historicalCpuFreeMb) >= filters.cpuMemoryGb
     })
     return { server, gpu, available: meetsSnapshot && meetsDuration }
   }).sort((left, right) => Number(right.available) - Number(left.available)

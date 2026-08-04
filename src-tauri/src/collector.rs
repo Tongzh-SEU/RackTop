@@ -1,9 +1,11 @@
-use crate::models::{GpuMetric, ProcessMetric, Server, Snapshot, SystemMetric};
-use std::{collections::HashMap, process::Stdio, time::{SystemTime, UNIX_EPOCH}};
+use crate::models::{CpuProcessMetric, GpuMetric, ProcessMetric, Server, Snapshot, SystemMetric};
+use std::{collections::{HashMap, HashSet}, process::Stdio, time::{SystemTime, UNIX_EPOCH}};
 use tokio::{process::Command, time::{timeout, Duration}};
 
 const REMOTE_SCRIPT: &str = r#"export LANG=C LC_ALL=C;
 printf '__RACKTOP_USER__\n'; id -un;
+uid_min="$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null)"; uid_min="${uid_min:-1000}";
+printf '__RACKTOP_UIDMIN__\n%s\n' "$uid_min";
 printf '__RACKTOP_HOST__\n'; hostname;
 printf '__RACKTOP_OS__\n'; if [ -r /etc/os-release ]; then . /etc/os-release; printf '%s|%s\n' "${ID:-unknown}" "${PRETTY_NAME:-Linux}"; else printf 'unknown|Linux\n'; fi;
 printf '__RACKTOP_CPUMODEL__\n'; if command -v lscpu >/dev/null 2>&1; then lscpu | awk -F: '/^Model name:/ {sub(/^[[:space:]]+/, "", $2); print $2; exit}'; else awk -F: '/^model name[[:space:]]*:/ {sub(/^[[:space:]]+/, "", $2); print $2; exit}' /proc/cpuinfo; fi;
@@ -22,14 +24,16 @@ else
   printf 'available\n';
   printf '__RACKTOP_GPU__\n';
   nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits;
-  if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = "1" ]; then
-    printf '__RACKTOP_GPUPROC__\n';
-    gpu_proc="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits 2>/dev/null || true)";
-    printf '%s\n' "$gpu_proc";
-    printf '__RACKTOP_PS__\n';
-    pids="$(printf '%s\n' "$gpu_proc" | cut -d, -f2 | tr -d ' ' | paste -sd, -)";
-    if [ -n "$pids" ]; then ps -o user= -o pid= -o pcpu= -o etime= -o args= -p "$pids" 2>/dev/null || true; fi;
-  fi;
+fi;
+if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = "1" ]; then
+  printf '__RACKTOP_GPUPROC__\n';
+  gpu_proc="";
+  if command -v nvidia-smi >/dev/null 2>&1; then gpu_proc="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits 2>/dev/null || true)"; printf '%s\n' "$gpu_proc"; fi;
+  printf '__RACKTOP_GPUPMON__\n';
+  if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi pmon -c 1 -s um 2>/dev/null || true; fi;
+  printf '__RACKTOP_PS__\n';
+  gpu_pids="$(printf '%s\n' "$gpu_proc" | cut -d, -f2 | tr -d ' ' | paste -sd, -)";
+  ps -eo user=,uid=,pid=,ppid=,pgid=,pcpu=,pmem=,rss=,etime=,args= --sort=-pcpu 2>/dev/null | awk -v gpu_pids="$gpu_pids" -v uid_min="$uid_min" 'BEGIN { n=split(gpu_pids, ids, ","); for (i=1; i<=n; i++) if (ids[i] != "") gpu[ids[i]]=1 } { is_gpu=($3 in gpu); is_child=($4 in gpu); is_user=($2 >= uid_min); is_main=($3 == $5 && $6 > 0); has_memory=($8 > 1048576); if (is_gpu || (is_user && has_memory && (is_child || (is_main && main_count < 64)))) { print; if (!is_gpu && is_main && !is_child) main_count++ } }' || true;
 fi;
 printf '__RACKTOP_END__\n';"#;
 
@@ -48,7 +52,7 @@ pub async fn collect_with_password(server: &Server, password: Option<&str>, incl
     parse_snapshot(&server.id, &String::from_utf8_lossy(&output.stdout))
 }
 
-fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<(Command, String), String> {
+pub(crate) fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<(Command, String), String> {
     let mut command = Command::new("ssh");
     command.args(["-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=yes"]);
     if server.auth_method == "password" {
@@ -105,7 +109,7 @@ pub async fn install_nvidia_driver(server: &Server, password: Option<&str>) -> R
     Ok("安装命令执行完成。驱动通常需要重启服务器后生效；请重启后点击“重新检测”。".into())
 }
 
-fn classify_ssh_error(stderr: &str) -> String {
+pub(crate) fn classify_ssh_error(stderr: &str) -> String {
     let lower = stderr.to_lowercase();
     if lower.contains("host key verification failed") || lower.contains("no host key is known") {
         "主机指纹尚未信任或已发生变化。为防止中间人攻击，RackTop 已阻止连接；请先用系统 ssh 核对并接受指纹。".into()
@@ -125,6 +129,7 @@ fn classify_ssh_error(stderr: &str) -> String {
 pub fn parse_snapshot(server_id: &str, output: &str) -> Result<Snapshot, String> {
     let sections = split_sections(output);
     let username = first_line(&sections, "USER").unwrap_or("unknown").to_string();
+    let uid_min = first_line(&sections, "UIDMIN").and_then(|value| value.parse::<u32>().ok()).unwrap_or(1000);
     let hostname = first_line(&sections, "HOST").unwrap_or("unknown").to_string();
     let os = first_line(&sections, "OS").unwrap_or("unknown|Linux");
     let (os_id, os_name) = os.split_once('|').unwrap_or(("unknown", "Linux"));
@@ -153,11 +158,13 @@ pub fn parse_snapshot(server_id: &str, output: &str) -> Result<Snapshot, String>
         .get("GPU")
         .map(|lines| lines.iter().filter_map(|line| parse_gpu(line).ok()).collect::<Vec<_>>())
         .unwrap_or_default();
-    let ps = parse_ps(sections.get("PS"), &username);
-    let processes = parse_gpu_processes(sections.get("GPUPROC"), &gpus, &ps, &username);
+    let ps = parse_ps(sections.get("PS"));
+    let pmon = parse_pmon(sections.get("GPUPMON"));
+    let processes = parse_gpu_processes(sections.get("GPUPROC"), &gpus, &ps, &pmon, &username);
+    let cpu_processes = parse_cpu_processes(&ps, &processes, &username, uid_min);
     let processes_sampled = sections.contains_key("GPUPROC");
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
-    Ok(Snapshot { server_id: server_id.into(), hostname, username, os_id: os_id.into(), os_name: os_name.into(), timestamp, status: if nvidia_smi == "available" { "online".into() } else { "warning".into() }, system, gpus, processes, processes_sampled, nvidia_smi, nvidia_message })
+    Ok(Snapshot { server_id: server_id.into(), hostname, username, os_id: os_id.into(), os_name: os_name.into(), timestamp, status: if nvidia_smi == "available" { "online".into() } else { "warning".into() }, system, gpus, processes, cpu_processes, processes_sampled, nvidia_smi, nvidia_message })
 }
 
 fn split_sections(output: &str) -> HashMap<String, Vec<String>> {
@@ -205,37 +212,145 @@ fn parse_gpu(line: &str) -> Result<GpuMetric, String> {
 }
 
 #[derive(Default)]
-struct PsInfo { username: String, cpu: f64, elapsed: String, command: String }
+struct PsInfo {
+    uid: u32,
+    parent_pid: u32,
+    process_group_id: u32,
+    username: String,
+    cpu: f64,
+    memory_percent: f64,
+    rss_kb: u64,
+    elapsed: String,
+    command: String,
+}
 
-fn parse_ps(lines: Option<&Vec<String>>, current_user: &str) -> HashMap<u32, PsInfo> {
+fn parse_ps(lines: Option<&Vec<String>>) -> HashMap<u32, PsInfo> {
     let mut result = HashMap::new();
     for line in lines.into_iter().flatten() {
         let mut parts = line.split_whitespace();
-        let Some(username) = parts.next() else { continue }; let Some(pid_text) = parts.next() else { continue };
-        let Some(cpu_text) = parts.next() else { continue }; let Some(elapsed) = parts.next() else { continue };
+        let Some(username) = parts.next() else { continue }; let Some(uid_text) = parts.next() else { continue };
+        let Some(pid_text) = parts.next() else { continue }; let Some(parent_pid_text) = parts.next() else { continue };
+        let Some(process_group_text) = parts.next() else { continue }; let Some(cpu_text) = parts.next() else { continue };
+        let Some(memory_text) = parts.next() else { continue }; let Some(rss_text) = parts.next() else { continue };
+        let Some(elapsed) = parts.next() else { continue };
         let Ok(pid) = pid_text.parse::<u32>() else { continue };
-        result.insert(pid, PsInfo { username: username.into(), cpu: parse_number(cpu_text), elapsed: elapsed.into(), command: parts.collect::<Vec<_>>().join(" ") });
+        result.insert(pid, PsInfo { uid: uid_text.parse().unwrap_or(0), parent_pid: parent_pid_text.parse().unwrap_or(0), process_group_id: process_group_text.parse().unwrap_or(0), username: username.into(), cpu: parse_number(cpu_text), memory_percent: parse_number(memory_text), rss_kb: rss_text.parse().unwrap_or(0), elapsed: elapsed.into(), command: parts.collect::<Vec<_>>().join(" ") });
     }
-    let _ = current_user;
     result
 }
 
-fn parse_gpu_processes(lines: Option<&Vec<String>>, gpus: &[GpuMetric], ps: &HashMap<u32, PsInfo>, current_user: &str) -> Vec<ProcessMetric> {
+fn parse_pmon(lines: Option<&Vec<String>>) -> HashMap<(u32, u32), Option<f64>> {
+    let mut result = HashMap::new();
+    for line in lines.into_iter().flatten().filter(|line| !line.starts_with('#')) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 5 || fields[1] == "-" { continue; }
+        let (Ok(gpu_index), Ok(pid)) = (fields[0].parse::<u32>(), fields[1].parse::<u32>()) else { continue };
+        let sm_utilization = fields[3].parse::<f64>().ok().map(|value| value.clamp(0.0, 100.0));
+        result.insert((gpu_index, pid), sm_utilization);
+    }
+    result
+}
+
+fn parse_gpu_processes(lines: Option<&Vec<String>>, gpus: &[GpuMetric], ps: &HashMap<u32, PsInfo>, pmon: &HashMap<(u32, u32), Option<f64>>, current_user: &str) -> Vec<ProcessMetric> {
     lines.into_iter().flatten().filter_map(|line| {
         let fields: Vec<&str> = line.split(',').map(str::trim).collect();
         if fields.len() < 4 { return None; }
         let pid = fields[1].parse().ok()?;
         let info = ps.get(&pid);
         let username = info.map(|value| value.username.clone()).unwrap_or_else(|| "unknown".into());
-        Some(ProcessMetric { gpu_uuid: fields[0].into(), gpu_index: gpus.iter().find(|gpu| gpu.uuid == fields[0]).map(|gpu| gpu.index).unwrap_or(0), pid, username: username.clone(), command: info.filter(|value| !value.command.is_empty()).map(|value| value.command.clone()).unwrap_or_else(|| fields[2].into()), memory_used_mb: parse_number(fields[3]), cpu_percent: info.map(|value| value.cpu).unwrap_or(0.0), elapsed: info.map(|value| value.elapsed.clone()).unwrap_or_else(|| "—".into()), is_current_user: username == current_user })
+        let gpu_index = gpus.iter().find(|gpu| gpu.uuid == fields[0]).map(|gpu| gpu.index).unwrap_or(0);
+        Some(ProcessMetric { gpu_uuid: fields[0].into(), gpu_index, pid, parent_pid: info.map(|value| value.parent_pid).unwrap_or(0), username: username.clone(), command: info.filter(|value| !value.command.is_empty()).map(|value| value.command.clone()).unwrap_or_else(|| fields[2].into()), memory_used_mb: parse_number(fields[3]), sm_utilization: pmon.get(&(gpu_index, pid)).copied().flatten(), cpu_percent: info.map(|value| value.cpu).unwrap_or(0.0), elapsed: info.map(|value| value.elapsed.clone()).unwrap_or_else(|| "—".into()), is_current_user: username == current_user, is_group_leader: info.is_some_and(|value| value.process_group_id == pid) })
     }).collect()
+}
+
+fn is_system_cpu_process(info: &PsInfo) -> bool {
+    let command = info.command.to_ascii_lowercase();
+    let executable = command.split_whitespace().next().unwrap_or_default().rsplit('/').next().unwrap_or_default();
+    const EXCLUDED_EXECUTABLES: &[&str] = &[
+        "systemd", "wireplumber", "pipewire", "pipewire-pulse", "dbus-daemon", "gnome-shell", "xorg", "xwayland", "pulseaudio",
+        "nvitop", "nvtop", "htop", "btop", "glances", "node_exporter",
+        "tailscale", "tailscaled", "zerotier-one", "openvpn", "openconnect", "wg-quick", "wireguard", "clash", "mihomo", "sing-box", "v2ray", "xray", "cloudflared", "charon", "strongswan", "globalprotect", "forticlient", "vpnagentd",
+    ];
+    const EXCLUDED_COMMAND_PATTERNS: &[&str] = &[
+        "nvitop", ".vscode-server", "code-server", ".cursor-server", "cursor-server", "codex", "claude", "pycharm_helpers", "remote-dev-server", "jetbrains",
+    ];
+    EXCLUDED_EXECUTABLES.contains(&executable) || EXCLUDED_COMMAND_PATTERNS.iter().any(|pattern| command.contains(pattern))
+}
+
+fn parse_cpu_processes(ps: &HashMap<u32, PsInfo>, gpu_processes: &[ProcessMetric], current_user: &str, uid_min: u32) -> Vec<CpuProcessMetric> {
+    let gpu_pids: HashSet<u32> = gpu_processes.iter().map(|process| process.pid).collect();
+    let child_pids: HashSet<u32> = ps.iter().filter(|(_, info)| gpu_pids.contains(&info.parent_pid)).map(|(pid, _)| *pid).collect();
+    let mut entries: Vec<_> = ps.iter().filter(|(pid, info)| {
+        let is_gpu_child = child_pids.contains(*pid);
+        let is_active_main = **pid == info.process_group_id && info.cpu > 0.0;
+        !gpu_pids.contains(*pid) && info.uid >= uid_min && info.rss_kb > 1024 * 1024 && !is_system_cpu_process(info) && (is_gpu_child || is_active_main)
+    }).collect();
+    entries.sort_by(|(left_pid, left), (right_pid, right)| right.cpu.total_cmp(&left.cpu).then_with(|| left_pid.cmp(right_pid)));
+
+    let mut main_count = 0;
+    entries.into_iter().filter(|(pid, _)| {
+        if child_pids.contains(*pid) { true } else if main_count < 12 { main_count += 1; true } else { false }
+    }).map(|(pid, info)| CpuProcessMetric {
+        pid: *pid,
+        parent_pid: info.parent_pid,
+        username: info.username.clone(),
+        command: info.command.clone(),
+        cpu_percent: info.cpu,
+        memory_percent: info.memory_percent,
+        memory_used_bytes: info.rss_kb.saturating_mul(1024),
+        elapsed: info.elapsed.clone(),
+        is_current_user: info.username == current_user,
+        is_group_leader: info.process_group_id == *pid,
+    }).collect()
+}
+
+fn termination_script(pid: u32) -> Result<String, String> {
+    if pid <= 1 { return Err("不能结束 PID 0 或 PID 1".into()); }
+    Ok(format!(r#"pid={pid}
+current_user="$(id -un)"
+process_user="$(ps -o user= -p "$pid" 2>/dev/null | awk '{{print $1; exit}}')"
+process_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+if [ -z "$process_user" ] || [ -z "$process_pgid" ]; then printf '__RACKTOP_TERMINATE_NOT_FOUND__\n'; exit 44; fi
+if [ "$process_user" != "$current_user" ]; then printf '__RACKTOP_TERMINATE_OWNER_MISMATCH__\n'; exit 45; fi
+if [ "$process_pgid" != "$pid" ]; then printf '__RACKTOP_TERMINATE_NOT_LEADER__\n'; exit 46; fi
+child_pids="$(pgrep -P "$pid" 2>/dev/null || true)"
+kill -TERM -- "-$process_pgid" 2>/dev/null || true
+sleep 3
+remaining_user="$(ps -o user= -p "$pid" 2>/dev/null | awk '{{print $1; exit}}')"
+remaining_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+if [ "$remaining_user" = "$current_user" ] && [ "$remaining_pgid" = "$process_pgid" ]; then kill -KILL -- "-$process_pgid" 2>/dev/null || true; fi
+pkill -TERM -P "$pid" 2>/dev/null || true
+for child_pid in $child_pids; do kill -TERM "$child_pid" 2>/dev/null || true; done
+sleep 2
+pkill -KILL -P "$pid" 2>/dev/null || true
+for child_pid in $child_pids; do
+  child_user="$(ps -o user= -p "$child_pid" 2>/dev/null | awk '{{print $1; exit}}')"
+  if [ "$child_user" = "$current_user" ]; then kill -KILL "$child_pid" 2>/dev/null || true; fi
+done
+printf '__RACKTOP_TERMINATE_OK__\n'"#))
+}
+
+pub async fn terminate_process_group(server: &Server, password: Option<&str>, pid: u32) -> Result<String, String> {
+    let script = termination_script(pid)?;
+    let (mut command, target) = configured_ssh_command(server, password)?;
+    command.arg(target).arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = timeout(Duration::from_secs(12), command.output()).await.map_err(|_| format!("结束 PID {pid} 超时（12 秒）"))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if output.status.success() && stdout.contains("__RACKTOP_TERMINATE_OK__") {
+        return Ok(format!("已结束 PID {pid} 的进程组及残留子进程"));
+    }
+    if stdout.contains("__RACKTOP_TERMINATE_NOT_FOUND__") { return Err(format!("PID {pid} 已不存在，请刷新后重试")); }
+    if stdout.contains("__RACKTOP_TERMINATE_OWNER_MISMATCH__") { return Err(format!("PID {pid} 不属于当前 SSH 用户，操作已阻止")); }
+    if stdout.contains("__RACKTOP_TERMINATE_NOT_LEADER__") { return Err(format!("PID {pid} 不是进程组主进程，操作已阻止")); }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if stderr.is_empty() { format!("无法结束 PID {pid}") } else { classify_ssh_error(&stderr) })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = "__RACKTOP_USER__\ntongzh\n__RACKTOP_HOST__\ngpu-box\n__RACKTOP_OS__\nubuntu|Ubuntu 22.04 LTS\n__RACKTOP_CPUMODEL__\nAMD EPYC 9654 96-Core Processor\n__RACKTOP_CPU1__\ncpu 100 0 20 880 0 0 0\n__RACKTOP_CPU2__\ncpu 120 0 30 950 0 0 0\n__RACKTOP_LOAD__\n0.06 0.11 0.09 1/100 1\n__RACKTOP_MEM__\nMemTotal: 100000 kB\nMemAvailable: 75000 kB\nSwapTotal: 1000 kB\nSwapFree: 900 kB\n__RACKTOP_USERCPU__\n5.50\n__RACKTOP_NVIDIA__\navailable\n__RACKTOP_GPU__\n0, NVIDIA GeForce RTX 4090 D, GPU-abc, 25, 10, 2048, 24564, 48, 110.5\n__RACKTOP_GPUPROC__\nGPU-abc, 4242, python, 2048\n__RACKTOP_PS__\ntongzh 4242 12.5 01:20 python train.py\n__RACKTOP_END__\n";
+    const SAMPLE: &str = "__RACKTOP_USER__\ntongzh\n__RACKTOP_UIDMIN__\n1000\n__RACKTOP_HOST__\ngpu-box\n__RACKTOP_OS__\nubuntu|Ubuntu 22.04 LTS\n__RACKTOP_CPUMODEL__\nAMD EPYC 9654 96-Core Processor\n__RACKTOP_CPU1__\ncpu 100 0 20 880 0 0 0\n__RACKTOP_CPU2__\ncpu 120 0 30 950 0 0 0\n__RACKTOP_LOAD__\n0.06 0.11 0.09 1/100 1\n__RACKTOP_MEM__\nMemTotal: 100000 kB\nMemAvailable: 75000 kB\nSwapTotal: 1000 kB\nSwapFree: 900 kB\n__RACKTOP_USERCPU__\n5.50\n__RACKTOP_NVIDIA__\navailable\n__RACKTOP_GPU__\n0, NVIDIA GeForce RTX 4090 D, GPU-abc, 25, 10, 2048, 24564, 48, 110.5\n__RACKTOP_GPUPROC__\nGPU-abc, 4242, python, 2048\n__RACKTOP_GPUPMON__\n# gpu pid type sm mem\n0 4242 C 73 41 - - - - 2048 0 python\n__RACKTOP_PS__\ntongzh 1000 4242 1 4242 12.5 2.0 204800 01:20 python train.py\ntongzh 1000 4343 4242 4242 1.5 1.5 2097152 00:10 python data-loader.py\ntongzh 1000 5000 1 5000 0.8 1.2 1572864 00:30 python cpu-task.py\ntongzh 1000 5500 1 5500 0.9 0.5 1048576 00:20 python small-task.py\ntongzh 1000 5800 1 5800 1.2 1.4 1468006 00:20 /usr/bin/python3 /usr/bin/nvitop\ntongzh 1000 5900 1 5900 1.1 1.5 1572864 00:20 /home/tongzh/.vscode-server/bin/node server-main.js\ntongzh 1000 6000 1 6000 0.7 1.1 1153434 10:00 /usr/lib/systemd/systemd --user\nroot 0 99 1 99 0.2 1.2 1258291 10:00 systemd-worker\n__RACKTOP_END__\n";
 
     #[test]
     fn parses_realistic_snapshot() {
@@ -247,6 +362,19 @@ mod tests {
         assert_eq!(snapshot.processes.len(), 1);
         assert!(snapshot.processes_sampled);
         assert!(snapshot.processes[0].is_current_user);
+        assert!(snapshot.processes[0].is_group_leader);
+        assert_eq!(snapshot.processes[0].sm_utilization, Some(73.0));
+        assert_eq!(snapshot.processes[0].parent_pid, 1);
+        assert_eq!(snapshot.cpu_processes.len(), 2);
+        assert_eq!(snapshot.cpu_processes[0].pid, 4343);
+        assert_eq!(snapshot.cpu_processes[0].parent_pid, 4242);
+        assert!(!snapshot.cpu_processes[0].is_group_leader);
+        assert!(snapshot.cpu_processes.iter().any(|process| process.pid == 5000));
+        assert!(!snapshot.cpu_processes.iter().any(|process| process.pid == 6000));
+        assert!(!snapshot.cpu_processes.iter().any(|process| process.pid == 99));
+        assert!(!snapshot.cpu_processes.iter().any(|process| process.pid == 5500));
+        assert!(!snapshot.cpu_processes.iter().any(|process| process.pid == 5800));
+        assert!(!snapshot.cpu_processes.iter().any(|process| process.pid == 5900));
         assert_eq!(snapshot.system.memory_used_bytes, 25_000 * 1024);
         assert!((snapshot.system.cpu_utilization - 30.0).abs() < 0.01);
     }
@@ -266,10 +394,40 @@ mod tests {
     }
 
     #[test]
+    fn excludes_development_and_monitoring_services_from_cpu_tasks() {
+        for command in [
+            "/usr/bin/python3 /usr/bin/nvitop",
+            "/home/test/.vscode-server/bin/node server-main.js",
+            "/home/test/.codex/bin/codex app-server",
+            "/home/test/.local/bin/claude",
+            "/usr/bin/mihomo -d /etc/mihomo",
+            "/usr/sbin/openvpn --config client.conf",
+        ] {
+            assert!(is_system_cpu_process(&PsInfo { command: command.into(), ..Default::default() }));
+        }
+        assert!(!is_system_cpu_process(&PsInfo { command: "python train.py".into(), ..Default::default() }));
+    }
+
+    #[test]
     fn preserves_process_sampling_signal_when_process_query_is_skipped() {
-        let output = SAMPLE.replace("__RACKTOP_GPUPROC__\nGPU-abc, 4242, python, 2048\n__RACKTOP_PS__\ntongzh 4242 12.5 01:20 python train.py\n", "");
+        let process_start = SAMPLE.find("__RACKTOP_GPUPROC__").unwrap();
+        let end = SAMPLE.find("__RACKTOP_END__").unwrap();
+        let output = format!("{}{}", &SAMPLE[..process_start], &SAMPLE[end..]);
         let snapshot = parse_snapshot("server-1", &output).unwrap();
         assert!(!snapshot.processes_sampled);
         assert!(snapshot.processes.is_empty());
+        assert!(snapshot.cpu_processes.is_empty());
+    }
+
+    #[test]
+    fn termination_only_accepts_safe_process_ids() {
+        assert!(termination_script(1).is_err());
+        let script = termination_script(4242).unwrap();
+        assert!(script.contains("process_user"));
+        assert!(script.contains("process_pgid"));
+        assert!(script.contains("[ \"$process_pgid\" != \"$pid\" ]"));
+        assert!(script.contains("kill -TERM -- \"-$process_pgid\""));
+        assert!(script.contains("child_pids=\"$(pgrep -P \"$pid\""));
+        assert!(script.contains("pkill -KILL -P \"$pid\""));
     }
 }

@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn refuses_to_overwrite_a_changed_host_key() {
-        let server = Server { id: "id".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22, username: "user".into(), ssh_alias: None, identity_file: None, proxy_jump: None, tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 30, auth_method: "sshAgent".into(), status: "unknown".into(), last_error: None, last_seen_at: None };
+        let server = Server { id: "id".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22, username: "user".into(), ssh_alias: None, identity_file: None, proxy_jump: None, tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 30, remote_history_enabled: false, remote_history_last_sync_at: None, auth_method: "sshAgent".into(), status: "unknown".into(), last_error: None, last_seen_at: None };
         let mut info = parse_line("id", "example.com", "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEr7NxQ0wNIrsiOqW1FrpSGbP/2Y8cDrn2NQHQkM8p4Y").unwrap();
         info.changed = true;
         assert!(trust(&server, &info).unwrap_err().contains("不会覆盖"));
