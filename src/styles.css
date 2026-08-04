@@ -109,10 +109,18 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .workspace__scroll::-webkit-scrollbar-track { background: transparent; }
 .workspace__scroll::-webkit-scrollbar-thumb { min-height: 44px; border: 3px solid transparent; border-radius: 999px; background: color-mix(in srgb, var(--text-tertiary) 20%, transparent); background-clip: padding-box; }
 .topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; min-height: 78px; padding: 14px 26px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); background: var(--bg); }
+.topbar__title { flex: 1; min-width: 0; }
 .topbar__title, .topbar__title *, .refresh-label, .refresh-label * { pointer-events: none; }
+.topbar__title h1, .topbar__title .eyebrow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .eyebrow { margin: 0 0 3px; color: var(--text-tertiary); font-size: 10px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
 .topbar h1, .sheet h2 { margin: 0; font-size: 21px; line-height: 1.2; letter-spacing: -.025em; }
-.topbar__actions { display: flex; align-items: center; gap: 8px; }
+.topbar__actions { display: flex; flex-shrink: 0; align-items: center; gap: 8px; }
+.remote-sync-slot { display: grid; place-items: center end; width: 202px; min-height: 28px; }
+.remote-sync-status { display: inline-flex; align-items: center; justify-content: center; gap: 6px; max-width: 202px; min-height: 26px; margin: 0; padding: 4px 8px; overflow: hidden; border: 1px solid transparent; border-radius: 7px; color: var(--text-tertiary); background: transparent; font: inherit; font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; transition: opacity 160ms var(--ease-out), color 140ms ease, background-color 140ms ease, border-color 140ms ease; }
+.remote-sync-status--syncing { color: var(--text-secondary); background: var(--surface-subtle); }
+.remote-sync-status--success { color: var(--green); background: color-mix(in srgb, var(--green) 7%, transparent); }
+button.remote-sync-status--error { color: var(--orange); background: color-mix(in srgb, var(--orange) 7%, transparent); cursor: default; }
+button.remote-sync-status--error:focus-visible { border-color: var(--orange); outline: none; }
 .refresh-label { display: inline-flex; align-items: center; gap: 5px; margin-right: 4px; color: var(--text-tertiary); font-size: 11px; }
 .refresh-label.is-paused { color: var(--orange); font-weight: 650; }
 .button, .icon-button { border: 1px solid var(--border); background: var(--surface); box-shadow: 0 1px 2px rgba(0,0,0,.04); cursor: default; transition: transform 120ms var(--ease-out), background-color 140ms ease, border-color 140ms ease; }

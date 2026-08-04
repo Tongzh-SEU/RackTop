@@ -49,6 +49,7 @@ import type { AppSettings, DetailTab, HistoryHeatmapPoint, HistoryPoint, HostKey
 import { HistoryHeatmaps } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
+import { RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
 import { ServerForm } from './components/ServerForm'
 import { StatusPill } from './components/StatusPill'
 import { TrendChart } from './components/TrendChart'
@@ -182,6 +183,7 @@ function App() {
   const [manualRefreshingServers, setManualRefreshingServers] = useState<Set<string>>(new Set())
   const [paused, setPaused] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
+  const [remoteSyncStatus, setRemoteSyncStatus] = useState<RemoteSyncStatusState | null>(null)
   const [pendingHostKey, setPendingHostKey] = useState<HostKeyInfo | null>(null)
   const [serverPendingDelete, setServerPendingDelete] = useState<Server | null>(null)
   const [processPendingTermination, setProcessPendingTermination] = useState<(ProcessTerminationTarget & { serverId: string; serverName: string }) | null>(null)
@@ -323,29 +325,71 @@ function App() {
   }, [settings, servers.length, refreshAll, paused])
 
   useEffect(() => {
-    if (!api.isDesktop || !remoteHistoryServerKey) return
+    if (!api.isDesktop || !remoteHistoryServerKey) {
+      setRemoteSyncStatus(null)
+      return
+    }
     let cancelled = false
-    const syncAllRemoteHistory = async () => {
-      await Promise.allSettled(remoteHistoryServersRef.current.filter((server) => server.remoteHistoryEnabled).map(async (server) => {
+    let feedbackTimer: number | null = null
+    let successTimer: number | null = null
+    const syncAllRemoteHistory = async (initial: boolean) => {
+      const enabledServers = remoteHistoryServersRef.current.filter((server) => server.remoteHistoryEnabled && !remoteSyncInFlight.current.has(server.id))
+      if (enabledServers.length === 0) return
+      let completed = 0
+      let importedCount = 0
+      const failedServerIds: string[] = []
+      let visible = initial && shouldShowRemoteSyncImmediately(enabledServers, Math.floor(Date.now() / 1000))
+      const syncingState = (): RemoteSyncStatusState => ({ phase: 'syncing', completed, total: enabledServers.length, importedCount, failedServerIds: [] })
+      if (visible && !cancelled) setRemoteSyncStatus(syncingState())
+      else if (initial) {
+        feedbackTimer = window.setTimeout(() => {
+          visible = true
+          if (!cancelled) setRemoteSyncStatus(syncingState())
+        }, REMOTE_SYNC_FEEDBACK_DELAY_MS)
+      }
+      await Promise.all(enabledServers.map(async (server) => {
         if (remoteSyncInFlight.current.has(server.id)) return
         remoteSyncInFlight.current.add(server.id)
         try {
           try {
             const result = await api.syncRemoteHistory(server.id)
+            importedCount += result.importedCount
             if (!cancelled && result.latestTimestamp) {
               setServers((current) => current.map((item) => item.id === server.id && item.remoteHistoryLastSyncAt !== result.latestTimestamp ? { ...item, remoteHistoryLastSyncAt: result.latestTimestamp } : item))
             }
           } finally {
             await api.configureRemoteHistory(server.id)
           }
+        } catch {
+          failedServerIds.push(server.id)
         } finally {
+          completed += 1
           remoteSyncInFlight.current.delete(server.id)
+          if (visible && !cancelled) setRemoteSyncStatus(syncingState())
         }
       }))
+      if (feedbackTimer !== null) {
+        window.clearTimeout(feedbackTimer)
+        feedbackTimer = null
+      }
+      if (cancelled) return
+      if (failedServerIds.length > 0) {
+        setRemoteSyncStatus({ phase: 'error', completed, total: enabledServers.length, importedCount, failedServerIds })
+      } else if (initial && visible) {
+        setRemoteSyncStatus({ phase: 'success', completed, total: enabledServers.length, importedCount, failedServerIds: [] })
+        successTimer = window.setTimeout(() => setRemoteSyncStatus(null), REMOTE_SYNC_SUCCESS_DURATION_MS)
+      } else {
+        setRemoteSyncStatus((current) => current?.phase === 'error' ? null : current)
+      }
     }
-    void syncAllRemoteHistory()
-    const interval = window.setInterval(() => { void syncAllRemoteHistory() }, 5 * 60_000)
-    return () => { cancelled = true; window.clearInterval(interval) }
+    void syncAllRemoteHistory(true)
+    const interval = window.setInterval(() => { void syncAllRemoteHistory(false) }, 5 * 60_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+      if (feedbackTimer !== null) window.clearTimeout(feedbackTimer)
+      if (successTimer !== null) window.clearTimeout(successTimer)
+    }
   }, [remoteHistoryServerKey])
 
   useEffect(() => {
@@ -607,6 +651,14 @@ function App() {
             <h1>{mainView === 'idle' ? '寻找空闲算力' : mainView === 'fleet' ? '算力总览' : selectedServer?.name ?? 'RackTop 总览'}</h1>
           </div>
           <div className="topbar__actions">
+            {remoteHistoryServerKey && <span className="remote-sync-slot">{remoteSyncStatus && <RemoteSyncStatus status={remoteSyncStatus} onOpenFailure={() => {
+              const serverId = remoteSyncStatus.failedServerIds[0]
+              if (!serverId) return
+              setSelectedServerId(serverId)
+              setSelectedGpuUuid(null)
+              setSelectedTab('connection')
+              setMainView('server')
+            }} />}</span>}
             <span className={`refresh-label ${paused ? 'is-paused' : ''}`}><Clock3 size={14} />{paused ? '采集已暂停' : mainView === 'server' && selectedServer ? relativeTime(selectedServer.lastSeenAt) : totals.latestRefresh ? relativeTime(totals.latestRefresh) : `${settings?.defaultSamplingIntervalSeconds ?? 2} 秒采样`}</span>
             <button className="button button--secondary" onClick={() => void runManualRefreshAll()} disabled={manualRefreshingAll}><RefreshCw size={16} className={manualRefreshingAll ? 'spin' : ''} />刷新全部</button>
             <button className="icon-button" aria-label="预约与通知" onClick={() => setShowReservationCenter(true)}><Bell size={18} />{(totals.hot > 0 || activeIdleReservationCount > 0) && <span className="notification-dot" />}</button>
