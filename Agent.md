@@ -1,3 +1,12 @@
+## 0 固定工作区与工具路径
+
+RackTop 开发 Agent 必须优先使用以下固定路径，不得仅依赖当前 shell 的 `PATH` 或工作目录推断工具是否存在：
+
+- RackTop 仓库根目录：`/Users/tong_zh/Library/Mobile Documents/com~apple~CloudDocs/ZHT桐桐/RackTop`；执行项目命令、读取版本信息、检查 Git 状态和生成安装包时，应显式将该目录作为工作目录。
+- GitHub CLI：`/Users/tong_zh/.local/bin/gh`；该用户级安装会跨终端和 Codex 会话保留。
+- 当前 shell 的 `PATH` 可能不包含 `~/.local/bin`。`command -v gh` 没有输出时，必须继续检查 `/Users/tong_zh/.local/bin/gh` 是否为可执行文件；文件存在时直接使用绝对路径，不得误报未安装或重复安装。
+- GitHub CLI 二进制与登录状态相互独立。使用前通过 `/Users/tong_zh/.local/bin/gh auth status` 检查系统钥匙串中的认证；认证失效时只重新登录，不重复安装二进制。
+
 ## 1 UI、动画与交互设计技能
 
 RackTop 的网页界面以及 Tauri WebView 中的桌面界面，在进行页面设计、组件实现、动画设计和交互体验优化时，统一优先使用 [`emilkowalski/skills`](https://github.com/emilkowalski/skills) 作为设计工程技能集。
