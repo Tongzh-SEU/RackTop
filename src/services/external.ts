@@ -5,6 +5,5 @@ export async function openExternalUrl(url: string): Promise<void> {
     return
   }
 
-  const opened = window.open(url, '_blank', 'noopener,noreferrer')
-  if (!opened) throw new Error('浏览器阻止了新窗口')
+  window.open(url, '_blank', 'noopener,noreferrer')
 }

@@ -43,7 +43,7 @@
 
 ### 验证记录
 
-- `vitest run --pool=forks --maxWorkers=1 --minWorkers=1 --no-file-parallelism`：17 个测试文件、61 项通过，包含外部浏览器回退与阻止弹窗错误路径。
+- `vitest run --pool=forks --maxWorkers=1 --minWorkers=1 --no-file-parallelism`：17 个测试文件、61 项通过，包含外部浏览器回退与 `noopener` 返回值语义。
 - `tsc --noEmit --pretty false`：通过。
 - `cargo test --manifest-path src-tauri/Cargo.toml`：26 项通过，覆盖在线分钟桶、系统服务过滤、90 天清理、本地优先和远端脚本兼容。
 - `cargo check --manifest-path src-tauri/Cargo.toml`：通过。

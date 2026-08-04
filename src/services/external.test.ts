@@ -15,9 +15,9 @@ describe('openExternalUrl', () => {
     expect(open).toHaveBeenCalledWith('https://github.com/Tongzh-SEU/RackTop', '_blank', 'noopener,noreferrer')
   })
 
-  it('reports when the browser blocks the new window', async () => {
+  it('does not treat a null noopener return value as an open failure', async () => {
     vi.stubGlobal('window', { open: vi.fn(() => null) })
 
-    await expect(openExternalUrl('https://github.com/Tongzh-SEU')).rejects.toThrow('浏览器阻止了新窗口')
+    await expect(openExternalUrl('https://github.com/Tongzh-SEU')).resolves.toBeUndefined()
   })
 })
