@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { HistoryHeatmapPoint, Snapshot } from '../types/models'
-import { HistoryHeatmaps } from './HistoryHeatmap'
+import { HistoryHeatmaps, historyHeatmapTone } from './HistoryHeatmap'
 
 const timestamp = new Date(2026, 7, 4, 6).getTime() / 1000
 const snapshot: Snapshot = {
@@ -29,5 +29,12 @@ describe('HistoryHeatmaps', () => {
     expect(markup).toContain('CPU UTL 每 3 小时平均值热力图')
     expect(markup).toContain('GPU 0 MEM 每 3 小时平均值热力图')
     expect(markup).toContain('GPU 1 MEM 每 3 小时平均值热力图')
+  })
+
+  it('swaps UTL and MEM colors for CPU and GPU heatmaps', () => {
+    expect(historyHeatmapTone('utilization', 'blue')).toBe('purple')
+    expect(historyHeatmapTone('memory', 'blue')).toBe('blue')
+    expect(historyHeatmapTone('utilization', 'green')).toBe('purple')
+    expect(historyHeatmapTone('memory', 'green')).toBe('green')
   })
 })
