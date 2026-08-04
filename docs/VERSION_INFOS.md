@@ -4,7 +4,7 @@
 
 ## 1.7.1 — 修复历史采集与进程信息布局
 
-- 修改时间：2026-08-05 02:17:03 +08:00
+- 修改时间：2026-08-05 02:40:06 +08:00
 - 发布日期：2026-08-05
 - 发布阶段：Bugfix / 内部预览
 - 桌面平台：macOS、Windows
@@ -50,12 +50,12 @@
 - `sh -n`：远端采集器和守护脚本语法检查通过。
 - Vite 生产构建：通过；因 iCloud 工作区文件 I/O 阻塞，在 `/tmp` 本地副本使用同一源码和依赖完成，保留单个 bundle 超过 500 kB 的既有提示。
 - macOS Tauri Release App：构建通过，产物为 `src-tauri/target/release/bundle/macos/RackTop.app`；完整 App ad-hoc 重签后 `codesign --verify --deep --strict` 通过。
-- in-app Browser 会话绑定异常，未将本版本视觉检查记录为通过。
+- 最终 macOS App 实机交互验证：About 显示 `RackTop 1.7.1`；“第三方许可”从 `collapsed` 切换为 `expanded` 后箭头转为向下；点击“GitHub 仓库”会离开 RackTop，并在系统默认的 Google Chrome 新标签页打开 `github.com/Tongzh-SEU/RackTop`。
 
 ### 已知事项
 
 - 当前 iCloud 工作区会让 Vite 在模块转换期间陷入零 CPU 的文件 I/O 等待；本版本已用本地临时副本完成等价生产构建，但该环境问题仍需后续排查。
-- 浏览器自动化未能接管本地预览标签页；界面改动目前由组件测试、类型检查、生产构建和代码审查覆盖。
+- 当前未发现新增产品行为问题；单个前端 bundle 超过 500 kB 的既有构建提示仍待后续拆包优化。
 
 ### 升级说明
 
