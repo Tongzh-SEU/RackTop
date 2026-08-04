@@ -16,12 +16,16 @@ import {
   Copy,
   Database,
   Download,
+  ExternalLink,
   Gauge,
+  Github,
+  GripVertical,
   HardDrive,
   History,
   KeyRound,
   LayoutDashboard,
   ListFilter,
+  ScrollText,
   MemoryStick,
   MoreHorizontal,
   Network,
@@ -50,22 +54,27 @@ import { HistoryHeatmaps } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
+import { ResourceTrend } from './components/ResourceTrend'
 import { ServerForm } from './components/ServerForm'
+import { SshTerminal } from './components/SshTerminal'
 import { StatusPill } from './components/StatusPill'
 import { TrendChart } from './components/TrendChart'
-import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, displayedGpuMemoryPercent, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, hasOtherUserGpuWorkload, isGpuIdle } from './utils/gpu'
+import { UsageDistribution } from './components/UsageDistribution'
+import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, countOtherUserGpuWorkloads, displayedGpuMemoryPercent, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, isGpuIdle } from './utils/gpu'
 import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, loadIdleFilters, rankIdleGpuItems, saveIdleFilters, type IdleFilters, type IdleGpuItem } from './utils/idleFilters'
 import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservationFiltersEqual, idleReservationGpuKey, idleReservationSummary } from './utils/idleReservations'
 import { FOREGROUND_STATUS_INTERVAL_MS, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
 import { duplicateImportIndexes } from './utils/serverIdentity'
+import authorAvatar from './assets/tongzh-seu.png'
+import packageInfo from '../package.json'
 
 const tabs: Array<{ value: DetailTab; label: string }> = [
   { value: 'overview', label: '概览' },
+  { value: 'processes', label: '进程' },
+  { value: 'terminal', label: navigator.userAgent.includes('Windows') ? '命令行' : '终端' },
   { value: 'gpu', label: 'GPU' },
   { value: 'cpu', label: 'CPU' },
-  { value: 'processes', label: '进程' },
   { value: 'history', label: '历史' },
-  { value: 'logs', label: '日志' },
   { value: 'connection', label: '连接' },
 ]
 
@@ -88,6 +97,14 @@ function startWindowDrag(event: MouseEvent<HTMLElement>) {
   if (!api.isDesktop || event.button !== 0 || event.detail !== 1) return
   if ((event.target as HTMLElement).closest('button, input, select, textarea, a, [role="button"]')) return
   void getCurrentWindow().startDragging()
+}
+
+async function toggleWindowMaximize(event: MouseEvent<HTMLElement>) {
+  if (!api.isDesktop || event.button !== 0) return
+  if ((event.target as HTMLElement).closest('button, input, select, textarea, a, [role="button"]')) return
+  const window = getCurrentWindow()
+  if (await window.isMaximized()) await window.unmaximize()
+  else await window.maximize()
 }
 
 function serverToDraft(server: Server): Partial<ServerDraft> {
@@ -166,9 +183,12 @@ function App() {
   const [selectedTab, setSelectedTab] = useState<DetailTab>('overview')
   const [selectedGpuUuid, setSelectedGpuUuid] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [draggedServerId, setDraggedServerId] = useState<string | null>(null)
   const [showServerForm, setShowServerForm] = useState(false)
   const [editingServer, setEditingServer] = useState<Server | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [showAbout, setShowAbout] = useState(false)
+  const [importingConfig, setImportingConfig] = useState(false)
   const [importDrafts, setImportDrafts] = useState<ServerDraft[] | null>(null)
   const [mainView, setMainView] = useState<'server' | 'fleet' | 'idle'>('fleet')
   const [fleetSort, setFleetSort] = useState<'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount'>(() => (localStorage.getItem('racktop.fleetSort') as 'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount') || 'name')
@@ -177,6 +197,7 @@ function App() {
   const [idleReservations, setIdleReservations] = useState<IdleReservation[]>([])
   const [showReservationCenter, setShowReservationCenter] = useState(false)
   const [reservationEditor, setReservationEditor] = useState<{ filters: IdleReservationFilters; reservation?: IdleReservation } | null>(null)
+  const [quickTerminal, setQuickTerminal] = useState<{ server: Server; gpu: Snapshot['gpus'][number] } | null>(null)
   const [busy, setBusy] = useState<Set<string>>(new Set())
   const [manualRefreshingAll, setManualRefreshingAll] = useState(false)
   const [manualRefreshRevision, setManualRefreshRevision] = useState(0)
@@ -225,7 +246,8 @@ function App() {
     if (!snapshotsRef.current[serverId]) setServers((current) => current.map((server) => server.id === serverId ? { ...server, status: 'connecting', lastError: null } : server))
     try {
       const previous = snapshotsRef.current[serverId]
-      const includeProcesses = !quiet || !previous || nowMs - (lastProcessAttemptAt.current[serverId] ?? 0) >= (settings?.processIntervalSeconds ?? 5) * 1000
+      const fastStatusView = !document.hidden && (mainView === 'fleet' || (mainView === 'server' && selectedTab === 'overview' && selectedServerId === serverId))
+      const includeProcesses = !quiet || !previous || fastStatusView || nowMs - (lastProcessAttemptAt.current[serverId] ?? 0) >= (settings?.processIntervalSeconds ?? 5) * 1000
       const recordHistory = !serverConfig || shouldRecordHistory(lastHistoryRecordedAt.current[serverId], nowMs, serverConfig.samplingIntervalSeconds)
       const collected = await api.collectServer(serverId, includeProcesses, recordHistory)
       if (deletedServerIds.current.has(serverId)) return
@@ -395,9 +417,7 @@ function App() {
   useEffect(() => {
     if (!api.isDesktop) return
     const unlisten = listen<string>('tray-action', ({ payload }) => {
-      if (payload === 'idle') setMainView('idle')
-      if (payload === 'connect') void refreshAll()
-      if (payload === 'pause') setPaused((value) => !value)
+      if (payload === 'reservations') setShowReservationCenter(true)
     })
     return () => { void unlisten.then((dispose) => dispose()) }
   }, [refreshAll])
@@ -477,6 +497,13 @@ function App() {
     }
   }, [history, servers, snapshots])
 
+  useEffect(() => {
+    const waiting = idleReservations.filter((reservation) => reservation.status === 'active' && !(reservation.currentAvailableGpuKeys?.length) && !(reservation.pendingConfirmationGpuKeys?.length)).length
+    const current = idleReservations.reduce((sum, reservation) => sum + (reservation.currentAvailableGpuKeys?.length ?? 0), 0)
+    const pending = new Set(idleReservations.flatMap((reservation) => reservation.pendingConfirmationGpuKeys ?? [])).size
+    void api.updateTraySummary(waiting, current, pending)
+  }, [idleReservations])
+
   const visibleServers = useMemo(() => {
     const needle = search.trim().toLowerCase()
     if (!needle) return servers
@@ -532,6 +559,14 @@ function App() {
     delete reservationPendingSince.current[reservationId]
   }
 
+  async function clearReservationPending(reservation: IdleReservation) {
+    const saved = await api.saveIdleReservation({ ...reservation, pendingConfirmationGpuKeys: [] })
+    const next = idleReservationsRef.current.map((item) => item.id === saved.id ? saved : item)
+    idleReservationsRef.current = next
+    setIdleReservations(next)
+    setToast('待确认提示已清除')
+  }
+
   async function saveServer(draft: ServerDraft) {
     const previous = draft.id ? servers.find((item) => item.id === draft.id) : undefined
     const saved = await api.saveServer(draft)
@@ -547,10 +582,11 @@ function App() {
     }
     const server = sync?.latestTimestamp ? { ...saved, remoteHistoryLastSyncAt: sync.latestTimestamp } : saved
     deletedServerIds.current.delete(saved.id)
-    setServers((current) => [...current.filter((item) => item.id !== saved.id), server])
+    setServers((current) => previous ? current.map((item) => item.id === saved.id ? server : item) : [...current, server])
     setSelectedServerId(saved.id)
     setShowServerForm(false)
     setEditingServer(null)
+    if (!previous) localStorage.setItem('racktop.defaultRemoteHistoryEnabled', String(saved.remoteHistoryEnabled))
     await refreshServer(saved.id)
   }
 
@@ -588,27 +624,49 @@ function App() {
   }
 
   async function importConfig() {
+    if (importingConfig) return
+    setImportingConfig(true)
     try {
       const drafts = await api.importSshConfig()
       if (drafts.length === 0) {
-        setToast('未在 OpenSSH Config 中找到可导入的主机')
+        setToast('已读取 ~/.ssh/config，但没有找到可导入的 Host；通配符 Host 会被忽略')
         return
       }
       setImportDrafts(drafts)
     } catch (error) {
-      setToast(String(error))
+      setToast(`SSH Config 导入失败：${String(error)}`)
+    } finally {
+      setImportingConfig(false)
+    }
+  }
+
+  async function moveServerBefore(targetId: string) {
+    if (!draggedServerId || draggedServerId === targetId || search) return
+    const previousOrder = servers
+    const next = servers.filter((server) => server.id !== draggedServerId)
+    const moved = servers.find((server) => server.id === draggedServerId)
+    if (!moved) return
+    next.splice(next.findIndex((server) => server.id === targetId), 0, moved)
+    const ordered = next.map((server, index) => ({ ...server, sortOrder: index }))
+    setServers(ordered)
+    setDraggedServerId(null)
+    try {
+      await api.reorderServers(ordered.map((server) => server.id))
+    } catch (error) {
+      setServers(previousOrder)
+      setToast(`服务器顺序保存失败：${String(error)}`)
     }
   }
 
   return (
     <div className="app-shell">
       <aside className={`sidebar ${api.isDesktop ? 'sidebar--desktop' : ''}`}>
-        <div className="sidebar__titlebar" onMouseDown={startWindowDrag}>
+        <div className="sidebar__titlebar" onMouseDown={startWindowDrag} onDoubleClick={(event) => void toggleWindowMaximize(event)}>
           <div className="traffic-spacer" aria-hidden="true" />
-          <div className="brand">
+          <button className="brand" onClick={() => setShowAbout(true)} aria-label="关于 RackTop">
             <span className="brand__mark"><Activity size={18} strokeWidth={2.4} /></span>
             <div><strong>RackTop</strong><small>算力监控</small></div>
-          </div>
+          </button>
         </div>
         <nav className="primary-nav" aria-label="主导航">
           <button className={mainView === 'fleet' ? 'is-active' : ''} onClick={() => setMainView('fleet')}><LayoutDashboard size={17} />总览 <span className="nav-count">{totals.gpus}</span></button>
@@ -623,8 +681,14 @@ function App() {
               <button
                 className={`server-row ${selectedServerId === server.id && mainView === 'server' ? 'is-selected' : ''}`}
                 key={server.id}
+                draggable={!search}
+                onDragStart={(event) => { setDraggedServerId(server.id); event.dataTransfer.effectAllowed = 'move' }}
+                onDragOver={(event) => { if (draggedServerId && !search) { event.preventDefault(); event.dataTransfer.dropEffect = 'move' } }}
+                onDrop={(event) => { event.preventDefault(); void moveServerBefore(server.id) }}
+                onDragEnd={() => setDraggedServerId(null)}
                 onClick={() => { setSelectedServerId(server.id); setSelectedGpuUuid(null); setMainView('server') }}
               >
+                <GripVertical size={13} className="server-row__drag" aria-hidden="true" />
                 <span className={`server-row__status server-row__status--${server.status}`} />
                 <span className="server-row__content">
                   <span className="server-row__title">{server.name}</span>
@@ -639,13 +703,13 @@ function App() {
         </div>
         <div className="sidebar__footer">
           <button onClick={() => { setEditingServer(null); setShowServerForm(true) }}><Plus size={16} />添加服务器</button>
-          <button onClick={importConfig}><Download size={16} />导入 SSH Config</button>
+          <button onClick={importConfig} disabled={importingConfig}><Download size={16} />{importingConfig ? '正在读取 SSH Config…' : '导入 SSH Config'}</button>
           <button onClick={() => setShowSettings(true)}><Settings size={16} />设置</button>
         </div>
       </aside>
 
       <main className="workspace">
-        <header className="topbar" onMouseDown={startWindowDrag}>
+        <header className="topbar" onMouseDown={startWindowDrag} onDoubleClick={(event) => void toggleWindowMaximize(event)}>
           <div className="topbar__title">
             <p className="eyebrow">{mainView === 'idle' ? '资源发现' : mainView === 'fleet' ? `${totals.online} / ${servers.length} 台在线` : selectedServer ? selectedServer.host : '所有服务器'}</p>
             <h1>{mainView === 'idle' ? '寻找空闲算力' : mainView === 'fleet' ? '算力总览' : selectedServer?.name ?? 'RackTop 总览'}</h1>
@@ -669,7 +733,7 @@ function App() {
           {servers.length === 0 ? (
             <EmptyState onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
           ) : mainView === 'idle' ? (
-            <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} currentReservation={currentIdleReservation} onFiltersChange={setIdleFilters} onReserve={() => setReservationEditor({ filters: { ...idleFilters }, reservation: currentIdleReservation })} sortRevision={manualRefreshRevision} onSelect={(serverId, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu'); setMainView('server') }} />
+            <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} currentReservation={currentIdleReservation} onFiltersChange={setIdleFilters} onReserve={() => setReservationEditor({ filters: { ...idleFilters }, reservation: currentIdleReservation })} sortRevision={manualRefreshRevision} onSelect={(serverId, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu'); setMainView('server') }} onQuickTerminal={(server, gpu) => setQuickTerminal({ server, gpu })} onReserveGpu={(server, gpu) => setReservationEditor({ filters: { ...idleFilters, duration: 0, targetServerId: server.id, targetGpuUuid: gpu.uuid } })} />
           ) : mainView === 'fleet' ? (
             <FleetOverview servers={servers} snapshots={snapshots} settings={settings} totals={totals} sort={fleetSort} descending={fleetDescending} onSort={setFleetSort} onToggleOrder={() => setFleetDescending((value) => !value)} onSelect={(serverId, tab, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid ?? null); setSelectedTab(tab); setMainView('server') }} />
           ) : selectedServer && selectedSnapshot ? (
@@ -695,14 +759,16 @@ function App() {
         </div>
       </main>
 
-      {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultSamplingInterval={settings?.defaultSamplingIntervalSeconds} defaultHistoryRetentionDays={settings?.historyRetentionDays} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
+      {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultSamplingInterval={settings?.defaultSamplingIntervalSeconds} defaultHistoryRetentionDays={settings?.historyRetentionDays} defaultRemoteHistoryEnabled={localStorage.getItem('racktop.defaultRemoteHistoryEnabled') !== 'false'} showGuide={settings?.showAddServerGuide ?? true} onGuideDismiss={() => { if (settings) void api.saveSettings({ ...settings, showAddServerGuide: false }).then(setSettings) }} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
       {showSettings && settings && <SettingsSheet settings={settings} onClose={() => setShowSettings(false)} onSave={async (value) => { setSettings(await api.saveSettings(value)); setShowSettings(false); setToast('设置已保存') }} />}
+      {showAbout && <AboutSheet onClose={() => setShowAbout(false)} />}
       {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setImportDrafts(null); setToast(`已导入 ${selected.length} 台服务器`) }} />}
       {pendingHostKey && <HostKeyDialog info={pendingHostKey} onClose={() => setPendingHostKey(null)} onTrust={async () => { const serverId = pendingHostKey.serverId; await api.trustHostKey(pendingHostKey); setPendingHostKey(null); setToast('已信任服务器指纹'); await refreshServer(serverId) }} />}
       {serverPendingDelete && <DeleteServerDialog server={serverPendingDelete} onClose={() => setServerPendingDelete(null)} onDelete={() => removeServer(serverPendingDelete)} />}
       {processPendingTermination && <TerminateProcessDialog target={processPendingTermination} onClose={() => setProcessPendingTermination(null)} onTerminate={async () => { const result = await api.terminateProcess(processPendingTermination.serverId, processPendingTermination.process.pid); setProcessPendingTermination(null); setToast(result); await refreshServer(processPendingTermination.serverId) }} />}
       {reservationEditor && <IdleReservationSheet reservation={reservationEditor.reservation} filters={reservationEditor.filters} availableGpuKeys={reservationEditorItems.filter((item) => item.available).map(({ server, gpu }) => idleReservationGpuKey(server.id, gpu.uuid))} onClose={() => setReservationEditor(null)} onSave={saveIdleReservation} />}
-      {showReservationCenter && <IdleReservationCenter reservations={idleReservations} onClose={() => setShowReservationCenter(false)} onEdit={(reservation) => { setShowReservationCenter(false); setReservationEditor({ filters: reservation.filters, reservation }) }} onStatusChange={setIdleReservationStatus} onDelete={removeIdleReservation} />}
+      {showReservationCenter && <IdleReservationCenter reservations={idleReservations} onClose={() => setShowReservationCenter(false)} onEdit={(reservation) => { setShowReservationCenter(false); setReservationEditor({ filters: reservation.filters, reservation }) }} onStatusChange={setIdleReservationStatus} onClearPending={clearReservationPending} onDelete={removeIdleReservation} />}
+      {quickTerminal && <div className="scrim quick-terminal-scrim"><section className="sheet quick-terminal-sheet" role="dialog" aria-modal="true" aria-label={`${quickTerminal.server.name} GPU ${quickTerminal.gpu.index} 终端`}><header className="sheet__header"><div><p className="eyebrow">GPU 固定终端</p><h2>{quickTerminal.server.name} · GPU {quickTerminal.gpu.index}</h2></div><button className="icon-button" onClick={() => setQuickTerminal(null)} aria-label="关闭"><X size={18} /></button></header><SshTerminal serverId={quickTerminal.server.id} serverName={quickTerminal.server.name} gpuIndex={quickTerminal.gpu.index} onNotice={setToast} /></section></div>}
       {toast && <div className="toast" role="status"><AlertCircle size={17} /><span>{toast}</span><button onClick={() => setToast(null)} aria-label="关闭"><X size={14} /></button></div>}
     </div>
   )
@@ -748,12 +814,14 @@ interface ServerDetailProps {
 }
 
 function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid, onTab, onSelectGpu, onRefresh, onDelete, onEdit, onRequestTerminate, isRefreshing, animateCharts }: ServerDetailProps) {
+  const [showLogs, setShowLogs] = useState(false)
   return (
     <div className="detail-page">
       <div className="server-identity">
         <div><StatusPill status={server.status} /><span className="server-identity__meta">{server.location ? `${server.location} · ` : ''}{snapshot.username}@{snapshot.hostname} · 端口 {server.port}</span></div>
-        <button className="icon-button" aria-label="编辑服务器" onClick={onEdit}><MoreHorizontal size={18} /></button>
+        <div className="server-identity__actions"><button className="icon-button" aria-label="打开采集与连接日志" title="日志" onClick={() => setShowLogs((value) => !value)}><ScrollText size={17} /></button><button className="icon-button" aria-label="编辑服务器" title="编辑服务器" onClick={onEdit}><MoreHorizontal size={18} /></button></div>
       </div>
+      {showLogs && <div className="floating-log-panel"><LogsView server={server} snapshot={snapshot} /><button className="icon-button floating-log-panel__close" onClick={() => setShowLogs(false)} aria-label="关闭日志"><X size={15} /></button></div>}
       <div className="detail-tabs" role="tablist">
         {tabs.map((item) => <button key={item.value} role="tab" aria-selected={tab === item.value} className={tab === item.value ? 'is-active' : ''} onClick={() => onTab(item.value)}>{item.label}</button>)}
       </div>
@@ -763,8 +831,8 @@ function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid
         {tab === 'gpu' && <GpuDetail snapshot={snapshot} points={points} selectedGpuUuid={selectedGpuUuid} onSelectGpu={onSelectGpu} animateChart={animateCharts} />}
         {tab === 'cpu' && <CpuDetail snapshot={snapshot} points={points} animateChart={animateCharts} />}
         {tab === 'processes' && <ProcessBlocks snapshot={snapshot} onRequestTerminate={onRequestTerminate} />}
+        {tab === 'terminal' && <SshTerminal serverId={server.id} serverName={server.name} />}
         {tab === 'history' && <HistoryView server={server} snapshot={snapshot} />}
-        {tab === 'logs' && <LogsView server={server} snapshot={snapshot} />}
         {tab === 'connection' && <ConnectionView server={server} onRefresh={onRefresh} onDelete={onDelete} onEdit={onEdit} isRefreshing={isRefreshing} />}
       </div>
     </div>
@@ -779,27 +847,48 @@ function PanelHeader({ icon, title, subtitle, action }: { icon?: React.ReactNode
   return <header className="panel__header"><div>{icon && <span>{icon}</span>}<div><h3>{title}</h3>{subtitle && <p>{subtitle}</p>}</div></div>{action}</header>
 }
 
+type OverviewModule = 'metrics' | 'resources' | 'processes' | 'trends'
+const DEFAULT_OVERVIEW_ORDER: OverviewModule[] = ['metrics', 'resources', 'processes', 'trends']
+
+function loadOverviewOrder(): OverviewModule[] {
+  try {
+    const value = JSON.parse(localStorage.getItem('racktop.overviewOrder') ?? '[]')
+    return Array.isArray(value) && value.length === DEFAULT_OVERVIEW_ORDER.length && DEFAULT_OVERVIEW_ORDER.every((item) => value.includes(item)) ? value : DEFAULT_OVERVIEW_ORDER
+  } catch {
+    return DEFAULT_OVERVIEW_ORDER
+  }
+}
+
 function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCpu, onRequestTerminate, animateCharts }: { snapshot: Snapshot; points: HistoryPoint[]; idleThreshold: number; onSelectGpu: (gpuUuid: string) => void; onOpenCpu: () => void; onRequestTerminate: (target: ProcessTerminationTarget) => void; animateCharts: boolean }) {
   const totalMemoryMb = snapshot.gpus.reduce((sum, gpu) => sum + Math.max(0, gpu.memoryTotalMb), 0)
   const usedMemoryMb = snapshot.gpus.reduce((sum, gpu) => sum + Math.max(0, gpu.memoryUsedMb), 0)
   const gpuAverage = snapshot.gpus.length ? snapshot.gpus.reduce((sum, gpu) => sum + clampPercent(gpu.utilization), 0) / snapshot.gpus.length : 0
   const idleCount = snapshot.gpus.filter((gpu) => isGpuIdle(gpu, idleThreshold)).length
   const systemMemoryPercent = snapshot.system.memoryTotalBytes ? snapshot.system.memoryUsedBytes / snapshot.system.memoryTotalBytes * 100 : 0
+  const [order, setOrder] = useState<OverviewModule[]>(loadOverviewOrder)
+  const [dragged, setDragged] = useState<OverviewModule | null>(null)
+  const moveBefore = (target: OverviewModule) => {
+    if (!dragged || dragged === target) return
+    setOrder((current) => {
+      const next = current.filter((item) => item !== dragged)
+      next.splice(next.indexOf(target), 0, dragged)
+      localStorage.setItem('racktop.overviewOrder', JSON.stringify(next))
+      return next
+    })
+  }
 
-  return <div className="overview-stack">
-    <section className="metric-grid">
+  const modules: Record<OverviewModule, React.ReactNode> = {
+    metrics: <section className="metric-grid">
       <MetricCard icon={<Zap />} label="可用 GPU" value={`${idleCount} / ${snapshot.gpus.length}`} foot="显存低于 1% 且核心空闲" tone="green" />
       <MetricCard icon={<MemoryStick />} label="GPU 显存" value={`${(usedMemoryMb / 1024).toFixed(1)} GB`} foot={`共 ${(totalMemoryMb / 1024).toFixed(1)} GB`} tone="purple" />
       <MetricCard icon={<Gauge />} label="GPU 平均 UTL" value={`${gpuAverage.toFixed(1)}%`} foot={`${snapshot.gpus.length} 块 GPU`} tone={gpuLoadAccent(gpuAverage)} />
       <MetricCard icon={<TerminalSquare />} label="当前进程" value={`${snapshot.processes.length + snapshot.cpuProcesses.length} 个进程`} foot={`GPU ${snapshot.processes.length} · CPU ${snapshot.cpuProcesses.length}${[...snapshot.processes, ...snapshot.cpuProcesses].some((process) => process.isCurrentUser) ? ' · 包含你的任务' : ''}`} tone="orange" emphasisFoot={[...snapshot.processes, ...snapshot.cpuProcesses].some((process) => process.isCurrentUser)} />
-    </section>
-
-    <section className="overview-section" aria-labelledby="overview-resource-title">
+    </section>,
+    resources: <section className="overview-section" aria-labelledby="overview-resource-title">
       <div className="overview-section__header"><Gauge size={17} /><div><h2 id="overview-resource-title">GPU 与 CPU 状态</h2><p>GPU 显存优先，CPU 资源并列概览</p></div></div>
       <div className="gpu-grid">{snapshot.gpus.map((gpu) => <GpuCard key={gpu.uuid} gpu={gpu} processes={snapshot.processes.filter((process) => process.gpuUuid === gpu.uuid)} onOpen={() => onSelectGpu(gpu.uuid)} />)}<CpuOverviewCard snapshot={snapshot} memoryPercent={systemMemoryPercent} onOpen={onOpenCpu} /></div>
-    </section>
-
-    <section className="overview-section" aria-labelledby="overview-trends-title">
+    </section>,
+    trends: <section className="overview-section" aria-labelledby="overview-trends-title">
       <div className="overview-section__header"><Activity size={17} /><div><h2 id="overview-trends-title">实时趋势</h2><p>CPU、GPU 显存、系统内存与 Swap、GPU 核心利用率</p></div></div>
       <div className="trend-grid">
         <section className="panel panel--mini-chart"><PanelHeader title="CPU UTL" /><TrendChart points={points} snapshot={snapshot} mode="cpu" height={170} animate={animateCharts} /></section>
@@ -807,13 +896,25 @@ function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCp
         <section className="panel panel--mini-chart"><PanelHeader title="系统 MEM / SWP" /><TrendChart points={points} snapshot={snapshot} mode="systemMemory" height={170} animate={animateCharts} /></section>
         <section className="panel panel--mini-chart"><PanelHeader title="GPU UTL" /><TrendChart points={points} snapshot={snapshot} mode="gpu" height={170} animate={animateCharts} /></section>
       </div>
-    </section>
-
-    <section className="overview-section" aria-labelledby="overview-process-title">
+    </section>,
+    processes: <section className="overview-section" aria-labelledby="overview-process-title">
       <div className="overview-section__header"><TerminalSquare size={17} /><div><h2 id="overview-process-title">当前进程</h2><p>GPU 与 CPU 进程及其父子关系</p></div></div>
       <ProcessBlocks snapshot={snapshot} compact onRequestTerminate={onRequestTerminate} />
-    </section>
-  </div>
+    </section>,
+  }
+
+  return <div className="overview-stack">{order.map((key) => (
+    <div
+      className={`overview-module ${dragged === key ? 'is-dragging' : ''}`}
+      key={key}
+      onDragOver={(event) => { if (dragged) { event.preventDefault(); event.dataTransfer.dropEffect = 'move' } }}
+      onDrop={(event) => { event.preventDefault(); moveBefore(key); setDragged(null) }}
+      onDragEnd={() => setDragged(null)}
+    >
+      <button type="button" draggable className="overview-module__handle" aria-label="拖动调整模块顺序" title="拖动调整模块顺序" onDragStart={(event) => { setDragged(key); event.dataTransfer.effectAllowed = 'move' }} onDragEnd={() => setDragged(null)}><GripVertical size={15} /></button>
+      {modules[key]}
+    </div>
+  ))}</div>
 }
 
 function GpuCard({ gpu, processes, onOpen }: { gpu: Snapshot['gpus'][number]; processes: Snapshot['processes']; onOpen: () => void }) {
@@ -844,35 +945,43 @@ function CpuOverviewCard({ snapshot, memoryPercent, onOpen }: { snapshot: Snapsh
   )
 }
 
-function GpuDetail({ snapshot, points, selectedGpuUuid, onSelectGpu, animateChart }: { snapshot: Snapshot; points: HistoryPoint[]; selectedGpuUuid: string | null; onSelectGpu: (gpuUuid: string) => void; animateChart: boolean }) {
+function GpuDetail({ snapshot, points, selectedGpuUuid, animateChart }: { snapshot: Snapshot; points: HistoryPoint[]; selectedGpuUuid: string | null; onSelectGpu: (gpuUuid: string) => void; animateChart: boolean }) {
   const orderedGpus = snapshot.gpus
+  const [expanded, setExpanded] = useState<{ uuid: string; mode: 'sm' | 'processes' } | null>(() => selectedGpuUuid ? { uuid: selectedGpuUuid, mode: 'sm' } : null)
+  useEffect(() => { if (selectedGpuUuid) setExpanded({ uuid: selectedGpuUuid, mode: 'sm' }) }, [selectedGpuUuid])
+  const toggleExpanded = (uuid: string, mode: 'sm' | 'processes') => setExpanded((current) => current?.uuid === uuid && current.mode === mode ? null : { uuid, mode })
   return <div className="content-stack">
-    <section className="panel panel--chart"><PanelHeader icon={<Gauge />} title="GPU 利用率" subtitle="实时窗口内的设备趋势" /><TrendChart points={points} snapshot={snapshot} mode="gpu" height={300} animate={animateChart} /></section>
+    <section className="resource-trend-grid">{orderedGpus.map((gpu) => <ResourceTrend key={gpu.uuid} snapshot={snapshot} kind="gpu" gpuUuid={gpu.uuid} title={`GPU ${gpu.index} · ${gpu.name.replace('NVIDIA ', '')}`} animate={animateChart} />)}</section>
     <section className="gpu-detail-list">{orderedGpus.map((gpu) => {
       const gpuProcesses = snapshot.processes.filter((process) => process.gpuUuid === gpu.uuid)
       const ownMemoryMb = gpuProcesses.filter((process) => process.isCurrentUser).reduce((sum, process) => sum + process.memoryUsedMb, 0)
       const totalSmUtilization = aggregateGpuSmUtilization(gpuProcesses)
       const memory = gpuMemoryPercent(gpu)
-      return <button type="button" className={`panel gpu-detail gpu-detail--${gpuMemoryLevel(memory)} ${gpu.uuid === selectedGpuUuid ? 'is-selected' : ''}`} aria-pressed={gpu.uuid === selectedGpuUuid} key={gpu.uuid} onClick={() => onSelectGpu(gpu.uuid)}>
-        <div className="gpu-detail__title"><div><span>GPU {gpu.index}{gpu.uuid === selectedGpuUuid ? ' · 已选中' : ''}</span><h3>{gpu.name}</h3><small>{gpu.uuid}</small></div><strong>{displayedGpuMemoryPercent(memory)}%<small> MEM</small></strong></div>
+      const isExpanded = expanded?.uuid === gpu.uuid
+      return <article className={`panel gpu-detail gpu-detail--${gpuMemoryLevel(memory)} ${isExpanded ? 'is-selected' : ''}`} key={gpu.uuid}>
+        <div className="gpu-detail__title"><div><span>GPU {gpu.index}{isExpanded ? ' · 已展开' : ''}</span><h3>{gpu.name}</h3><small>{gpu.uuid}</small></div><strong>{displayedGpuMemoryPercent(memory)}%<small> MEM</small></strong></div>
         <div className="gpu-detail__meters"><MetricBar label="MEM" value={displayedGpuMemoryPercent(memory)} detail={`${(gpu.memoryUsedMb / 1024).toFixed(1)} / ${(gpu.memoryTotalMb / 1024).toFixed(1)} GB`} accent="purple" /><MetricBar label="UTL" value={gpu.utilization} accent={gpuLoadAccent(gpu.utilization)} /></div>
-        <div className="stat-row stat-row--gpu"><span><small>MBW</small><strong>{clampPercent(gpu.memoryUtilization).toFixed(0)}%</strong></span><span><small>温度</small><strong>{gpu.temperatureCelsius}°C</strong></span><span><small>功耗</small><strong>{gpu.powerWatts.toFixed(1)} W</strong></span><span><small>进程</small><strong>{gpuProcesses.length}</strong></span><span><small>SM</small><strong>{totalSmUtilization.toFixed(0)}%</strong></span></div>
-        {gpu.uuid === selectedGpuUuid && gpuProcesses.length > 0 && <div className="gpu-detail__processes"><header><strong>进程 SM 活跃率</strong><small>单次 pmon 采样，不代表算法效率</small></header>{gpuProcesses.map((process) => <div key={process.pid}><code>PID {process.pid}</code><span title={process.command}>{process.command}</span><strong>SM {clampPercent(process.smUtilization ?? 0).toFixed(0)}%</strong></div>)}</div>}
+        <div className="stat-row stat-row--gpu"><span><small>MBW</small><strong>{clampPercent(gpu.memoryUtilization).toFixed(0)}%</strong></span><span><small>温度</small><strong>{gpu.temperatureCelsius}°C</strong></span><span><small>功耗</small><strong>{gpu.powerWatts.toFixed(1)} W</strong></span><button type="button" className={expanded?.uuid === gpu.uuid && expanded.mode === 'processes' ? 'is-active' : ''} aria-expanded={expanded?.uuid === gpu.uuid && expanded.mode === 'processes'} onClick={() => toggleExpanded(gpu.uuid, 'processes')}><small>进程</small><strong>{gpuProcesses.length}</strong></button><button type="button" className={expanded?.uuid === gpu.uuid && expanded.mode === 'sm' ? 'is-active' : ''} aria-expanded={expanded?.uuid === gpu.uuid && expanded.mode === 'sm'} onClick={() => toggleExpanded(gpu.uuid, 'sm')}><small>SM</small><strong>{totalSmUtilization.toFixed(0)}%</strong></button></div>
+        {isExpanded && <div className="gpu-detail__processes"><header><strong>{expanded.mode === 'sm' ? '进程 SM 活跃率' : `GPU ${gpu.index} 进程`}</strong><small>{expanded.mode === 'sm' ? '单次 pmon 采样，不代表算法效率' : `${gpuProcesses.length} 个计算进程`}</small></header>{gpuProcesses.length ? gpuProcesses.map((process) => <div key={process.pid}><code>PID {process.pid}</code><span title={process.command}>{process.command}</span><strong>{expanded.mode === 'sm' ? `SM ${clampPercent(process.smUtilization ?? 0).toFixed(0)}%` : `${(process.memoryUsedMb / 1024).toFixed(1)} GB`}</strong></div>) : <p className="gpu-detail__empty">当前没有 GPU 计算进程</p>}</div>}
         {ownMemoryMb > 0 && <div className="gpu-detail__own"><UserRound size={13} /><strong>你的任务</strong><span>占用 {(ownMemoryMb / 1024).toFixed(1)} GB 显存</span></div>}
-      </button>
+      </article>
     })}</section>
   </div>
 }
 
 function CpuDetail({ snapshot, points, animateChart }: { snapshot: Snapshot; points: HistoryPoint[]; animateChart: boolean }) {
   const memoryPercent = snapshot.system.memoryTotalBytes ? snapshot.system.memoryUsedBytes / snapshot.system.memoryTotalBytes * 100 : 0
-  return <div className="content-stack"><section className="panel panel--chart"><PanelHeader icon={<Cpu />} title="CPU 利用率" subtitle={`当前用户 ${snapshot.system.currentUserCpuUtilization.toFixed(1)}%`} /><TrendChart points={points} snapshot={snapshot} mode="cpu" height={300} animate={animateChart} /></section><section className="panel system-resource-panel"><PanelHeader icon={<MemoryStick />} title="系统资源" /><div className="resource-bars"><MetricBar label="CPU" value={snapshot.system.cpuUtilization} currentUserValue={snapshot.system.currentUserCpuUtilization} /><MetricBar label="内存" value={memoryPercent} detail={`${formatBytes(snapshot.system.memoryUsedBytes)} / ${formatBytes(snapshot.system.memoryTotalBytes)}`} accent="purple" /></div><div className="stat-row stat-row--border"><span><small>1 分钟负载</small><strong>{snapshot.system.load1.toFixed(2)}</strong></span><span><small>5 分钟负载</small><strong>{snapshot.system.load5.toFixed(2)}</strong></span><span><small>15 分钟负载</small><strong>{snapshot.system.load15.toFixed(2)}</strong></span><span><small>Swap</small><strong>{formatBytes(snapshot.system.swapUsedBytes)}</strong></span></div></section></div>
+  return <div className="content-stack"><ResourceTrend snapshot={snapshot} kind="cpu" title={snapshot.system.cpuModel || 'CPU'} animate={animateChart} /><section className="panel system-resource-panel"><PanelHeader icon={<MemoryStick />} title="系统资源" /><div className="resource-bars"><MetricBar label="CPU" value={snapshot.system.cpuUtilization} currentUserValue={snapshot.system.currentUserCpuUtilization} /><MetricBar label="内存" value={memoryPercent} detail={`${formatBytes(snapshot.system.memoryUsedBytes)} / ${formatBytes(snapshot.system.memoryTotalBytes)}`} accent="purple" /></div><div className="stat-row stat-row--border"><span><small>1 分钟负载</small><strong>{snapshot.system.load1.toFixed(2)}</strong></span><span><small>5 分钟负载</small><strong>{snapshot.system.load5.toFixed(2)}</strong></span><span><small>15 分钟负载</small><strong>{snapshot.system.load15.toFixed(2)}</strong></span><span><small>Swap</small><strong>{formatBytes(snapshot.system.swapUsedBytes)}</strong></span></div></section></div>
 }
 
 function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot }) {
+  const [usageDays, setUsageDays] = useState<7 | 15 | 30 | 90>(30)
+  const [usage, setUsage] = useState<import('./types/models').UsageDistribution | null>(null)
   const [heatmapPoints, setHeatmapPoints] = useState<HistoryHeatmapPoint[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [heatmapLoading, setHeatmapLoading] = useState(true)
+  const [usageLoading, setUsageLoading] = useState(true)
+  const [heatmapError, setHeatmapError] = useState<string | null>(null)
+  const [usageError, setUsageError] = useState<string | null>(null)
   const gpuUuidKey = snapshot.gpus.map((gpu) => gpu.uuid).join('\n')
 
   useEffect(() => {
@@ -881,18 +990,31 @@ function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot 
     firstDay.setHours(0, 0, 0, 0)
     firstDay.setDate(firstDay.getDate() - Math.min(90, Math.max(1, server.historyRetentionDays)) + 1)
     const timezoneOffsetSeconds = -new Date().getTimezoneOffset() * 60
-    setLoading(true)
-    setError(null)
+    setHeatmapLoading(true)
+    setHeatmapError(null)
     const loadHeatmap = () => api.getHistoryHeatmap(server.id, Math.floor(firstDay.getTime() / 1000), timezoneOffsetSeconds, snapshot.gpus.map((gpu) => gpu.uuid))
-      .then((points) => { if (!cancelled) { setHeatmapPoints(points); setError(null) } })
-      .catch((historyError) => { if (!cancelled) setError(String(historyError)) })
-      .finally(() => { if (!cancelled) setLoading(false) })
+      .then((points) => { if (!cancelled) { setHeatmapPoints(points); setHeatmapError(null) } })
+      .catch((historyError) => { if (!cancelled) setHeatmapError(String(historyError)) })
+      .finally(() => { if (!cancelled) setHeatmapLoading(false) })
     void loadHeatmap()
     const interval = window.setInterval(() => { void loadHeatmap() }, 60_000)
     return () => { cancelled = true; window.clearInterval(interval) }
   }, [gpuUuidKey, server.historyRetentionDays, server.id])
 
-  return <div className="history-page"><header className="history-page__header"><div><History size={18} /><span><h2>资源历史</h2><p>每列 1 天，每格汇总连续 3 小时的平均使用率</p></span></div><small>最近 {Math.min(90, Math.max(1, server.historyRetentionDays))} 天</small></header>{loading ? <div className="history-page__state"><RefreshCw className="spin" size={16} />正在聚合历史样本…</div> : error ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />历史数据读取失败：{error}</div> : <HistoryHeatmaps snapshot={snapshot} points={heatmapPoints} retentionDays={server.historyRetentionDays} />}<section className="data-retention"><Database size={18} /><div><strong>{server.remoteHistoryEnabled ? '本地与远端历史' : '本地历史数据'}</strong><p>{server.remoteHistoryEnabled ? '服务器上的隐藏常驻进程每分钟保留一份轻量资源样本并滚动保存 30 天；RackTop 打开后先增量同步，再检查采集进程。' : '样本仅在 RackTop 运行时写入本机 SQLite，保存期到期自动清理。'}敏感凭据、进程和命令不会写入历史。</p></div></section></div>
+  useEffect(() => {
+    let cancelled = false
+    setUsageLoading(true)
+    setUsageError(null)
+    const from = Math.floor(Date.now() / 1000) - usageDays * 86_400
+    void api.getUsageDistribution(server.id, from, usageDays).then((value) => { if (!cancelled) setUsage(value) }).catch((reason) => { if (!cancelled) setUsageError(String(reason)) }).finally(() => { if (!cancelled) setUsageLoading(false) })
+    return () => { cancelled = true }
+  }, [server.id, usageDays])
+
+  return <div className="history-page">
+    <section className="history-section"><header className="history-page__header"><div><History size={18} /><span><h2>资源热力图</h2><p>每列 1 天，每格汇总连续 3 小时的平均使用率</p></span></div><small>最近 {Math.min(90, Math.max(1, server.historyRetentionDays))} 天</small></header>{heatmapLoading ? <div className="history-page__state"><RefreshCw className="spin" size={16} />正在读取资源历史…</div> : heatmapError ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />资源历史读取失败：{heatmapError}</div> : <HistoryHeatmaps snapshot={snapshot} points={heatmapPoints} retentionDays={server.historyRetentionDays} />}</section>
+    <section className="history-section"><header className="history-page__header"><div><History size={18} /><span><h2>GPU 使用分布</h2><p>按 Unix 用户聚合活跃时间与显存积分</p></span></div><div className="usage-range" aria-label="使用分布时间范围">{([7, 15, 30, 90] as const).map((days) => <button key={days} aria-pressed={usageDays === days} onClick={() => setUsageDays(days)}>{days === 7 ? '1 周' : days === 15 ? '半个月' : days === 30 ? '1 个月' : '3 个月'}</button>)}</div></header>{usageLoading ? <div className="history-page__state"><RefreshCw className="spin" size={16} />正在聚合使用分布…</div> : usageError ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />使用分布读取失败：{usageError}</div> : usage && <UsageDistribution snapshot={snapshot} data={usage} />}</section>
+    <section className="data-retention"><Database size={18} /><div><strong>{server.remoteHistoryEnabled ? '本地 90 天 · 远端 30 天' : '本地历史数据'}</strong><p>{server.remoteHistoryEnabled ? '远端隐藏常驻进程保留轻量资源样本与用户级聚合时间桶；RackTop 打开后增量同步，本地最多保留 90 天。' : '样本仅在 RackTop 运行时写入本机 SQLite，保存期到期自动清理。'}不会保存 PID、进程命令、路径或终端输入输出。</p></div></section>
+  </div>
 }
 
 function LogsView({ server, snapshot }: { server: Server; snapshot: Snapshot }) {
@@ -1021,7 +1143,7 @@ function FleetOverview({ servers, snapshots, settings, totals, sort, descending,
   </div>
 }
 
-function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentReservation, onFiltersChange, onReserve, sortRevision, onSelect }: { servers: Server[]; snapshots: Record<string, Snapshot>; items: IdleGpuItem[]; filters: IdleFilters; currentReservation?: IdleReservation; onFiltersChange: (filters: IdleFilters) => void; onReserve: () => void; sortRevision: number; onSelect: (serverId: string, gpuUuid: string) => void }) {
+function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentReservation, onFiltersChange, onReserve, sortRevision, onSelect, onQuickTerminal, onReserveGpu }: { servers: Server[]; snapshots: Record<string, Snapshot>; items: IdleGpuItem[]; filters: IdleFilters; currentReservation?: IdleReservation; onFiltersChange: (filters: IdleFilters) => void; onReserve: () => void; sortRevision: number; onSelect: (serverId: string, gpuUuid: string) => void; onQuickTerminal: (server: Server, gpu: Snapshot['gpus'][number]) => void; onReserveGpu: (server: Server, gpu: Snapshot['gpus'][number]) => void }) {
   const [gpuMemoryInput, setGpuMemoryInput] = useState(String(filters.gpuMemoryGb))
   const [cpuMemoryInput, setCpuMemoryInput] = useState(String(filters.cpuMemoryGb))
   const { gpuMemoryGb, cpuMemoryGb, otherUserProcess, duration, gpuModel, cpuModel, tag } = filters
@@ -1053,8 +1175,8 @@ function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentR
     <section className="idle-filters" aria-label="空闲算力筛选条件">
       <header><div><SlidersHorizontal size={17} /><div><strong>空闲条件</strong><small>仅检测其他用户；系统显示进程与不超过 GPU MEM 3% 的小占用不计入</small></div></div><div className="idle-filter-actions"><button className={`button button--secondary button--small ${currentReservation ? 'is-active' : ''}`} onClick={onReserve}><BellPlus size={13} />{currentReservation?.status === 'active' ? '预约中' : currentReservation?.status === 'paused' ? '已暂停' : '预约'}</button><button className="button button--secondary button--small" onClick={reset}><RotateCcw size={13} />重置</button></div></header>
       <div className="idle-filter-grid">
-        <label>GPU MEM 至少<div><input inputMode="decimal" type="number" min="0" step="1" value={gpuMemoryInput} onChange={(event) => setNumericFilter('gpuMemoryGb', event.target.value, setGpuMemoryInput)} onBlur={() => setGpuMemoryInput(String(gpuMemoryGb))} /><span>GB</span></div></label>
-        <label>CPU MEM 至少<div><input inputMode="decimal" type="number" min="0" step="1" value={cpuMemoryInput} onChange={(event) => setNumericFilter('cpuMemoryGb', event.target.value, setCpuMemoryInput)} onBlur={() => setCpuMemoryInput(String(cpuMemoryGb))} /><span>GB</span></div></label>
+        <label>GPU MEM 至少<div><input inputMode="decimal" type="number" min="0" step="5" value={gpuMemoryInput} onChange={(event) => setNumericFilter('gpuMemoryGb', event.target.value, setGpuMemoryInput)} onBlur={() => setGpuMemoryInput(String(gpuMemoryGb))} /><span>GB</span></div></label>
+        <label>CPU MEM 至少<div><input inputMode="decimal" type="number" min="0" step="10" value={cpuMemoryInput} onChange={(event) => setNumericFilter('cpuMemoryGb', event.target.value, setCpuMemoryInput)} onBlur={() => setCpuMemoryInput(String(cpuMemoryGb))} /><span>GB</span></div></label>
         <label>进程占用<select value={otherUserProcess} onChange={(event) => setFilters({ otherUserProcess: event.target.value as IdleFilters['otherUserProcess'] })}><option value="without">无人占用</option><option value="all">不限</option></select></label>
         <label>GPU 型号<select value={gpuModel} onChange={(event) => setFilters({ gpuModel: event.target.value })}><option value="all">全部型号</option>{gpuModels.map((item) => <option value={item} key={item}>{item.replace('NVIDIA ', '')}</option>)}</select></label>
         <label>CPU 型号<select value={cpuModel} onChange={(event) => setFilters({ cpuModel: event.target.value })}><option value="all">全部型号</option>{cpuModels.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
@@ -1067,8 +1189,13 @@ function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentR
       const snapshot = snapshots[server.id]
       const freeGpuGb = displayedFreeMemoryGb(gpu.memoryTotalMb - gpu.memoryUsedMb)
       const freeCpuGb = displayedFreeMemoryGb(((snapshot?.system.memoryTotalBytes ?? 0) - (snapshot?.system.memoryUsedBytes ?? 0)) / 1024 ** 2)
-      const occupiedByOtherUser = hasOtherUserGpuWorkload(gpu, snapshot?.processes ?? [])
-      return <button className={`panel idle-card ${available ? '' : 'idle-card--unavailable'}`} key={`${server.id}-${gpu.uuid}`} onClick={() => onSelect(server.id, gpu.uuid)}><div className="idle-card__top"><span className={`idle-badge ${available ? '' : 'idle-badge--unavailable'}`}>{available ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}{available ? '可用' : '不可用'}</span><ChevronRight size={16} /></div><h3>{server.name} · GPU {gpu.index}</h3><p>{gpu.name} · {snapshot?.system.cpuModel || '未知 CPU'}</p><div className="idle-card__stats"><span><strong>{freeGpuGb.toFixed(1)} GB</strong><small>GPU MEM</small></span><span><strong>{freeCpuGb.toFixed(1)} GB</strong><small>CPU MEM</small></span><span><strong>{occupiedByOtherUser ? '有' : '无'}</strong><small>进程占用</small></span></div><div className="tag-row">{server.tags.map((item) => <span key={item}>{item}</span>)}</div></button>
+      const occupiedProcessCount = countOtherUserGpuWorkloads(gpu, snapshot?.processes ?? [])
+      return <article className={`panel idle-card ${available ? '' : 'idle-card--unavailable'}`} key={`${server.id}-${gpu.uuid}`}>
+        <div className="idle-card__body">
+          <div className="idle-card__top"><span className={`idle-badge ${available ? '' : 'idle-badge--unavailable'}`}>{available ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}{available ? '可用' : '不可用'}</span><div className="idle-card__actions"><button className="icon-button" onClick={() => available ? onQuickTerminal(server, gpu) : onReserveGpu(server, gpu)} aria-label={`${available ? '打开终端' : '预约'} ${server.name} GPU ${gpu.index}`} title={available ? '打开终端' : '预约此卡'}>{available ? <TerminalSquare size={15} /> : <BellPlus size={15} />}</button><button className="icon-button" onClick={() => onSelect(server.id, gpu.uuid)} aria-label={`打开 ${server.name} GPU ${gpu.index} 详情`} title="查看详情"><ChevronRight size={16} /></button></div></div>
+          <h3>{server.name} · GPU {gpu.index}</h3><p>{gpu.name} · {snapshot?.system.cpuModel || '未知 CPU'}</p><div className="idle-card__stats"><span><strong>{freeGpuGb.toFixed(1)} GB</strong><small>GPU MEM</small></span><span><strong>{freeCpuGb.toFixed(1)} GB</strong><small>CPU MEM</small></span><span><strong>{occupiedProcessCount > 0 ? `有 ${occupiedProcessCount} 个` : '无'}</strong><small>进程占用</small></span></div><div className="tag-row">{server.tags.map((item) => <span key={item}>{item}</span>)}</div>
+        </div>
+      </article>
     })}{items.length === 0 && <div className="inline-empty inline-empty--wide"><WifiOff size={28} /><strong>没有对应范围的 GPU</strong><p>当前没有符合所选 GPU 型号、CPU 型号或服务器标签的设备。</p></div>}</section>
   </div>
 }
@@ -1137,6 +1264,8 @@ function IdleReservationSheet({ reservation, filters, availableGpuKeys, onClose,
             notifyMode,
             status: reservation?.status === 'completed' || reservation?.status === 'expired' ? 'active' : nextStatus,
             matchedGpuKeys: reservation?.matchedGpuKeys ?? [...availableGpuKeys].sort(),
+            currentAvailableGpuKeys: reservation?.currentAvailableGpuKeys ?? [...availableGpuKeys].sort(),
+            pendingConfirmationGpuKeys: reservation?.pendingConfirmationGpuKeys ?? [],
           })
         } catch (reason) {
           setError(String(reason))
@@ -1149,7 +1278,7 @@ function IdleReservationSheet({ reservation, filters, availableGpuKeys, onClose,
 
 const reservationStatusLabel: Record<IdleReservation['status'], string> = { active: '监测中', paused: '已暂停', completed: '已完成', expired: '已过期' }
 
-function IdleReservationCenter({ reservations, onClose, onEdit, onStatusChange, onDelete }: { reservations: IdleReservation[]; onClose: () => void; onEdit: (reservation: IdleReservation) => void; onStatusChange: (reservation: IdleReservation, status: IdleReservation['status']) => Promise<void>; onDelete: (reservationId: string) => Promise<void> }) {
+function IdleReservationCenter({ reservations, onClose, onEdit, onStatusChange, onClearPending, onDelete }: { reservations: IdleReservation[]; onClose: () => void; onEdit: (reservation: IdleReservation) => void; onStatusChange: (reservation: IdleReservation, status: IdleReservation['status']) => Promise<void>; onClearPending: (reservation: IdleReservation) => Promise<void>; onDelete: (reservationId: string) => Promise<void> }) {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const activeCount = reservations.filter((reservation) => reservation.status === 'active').length
@@ -1164,11 +1293,12 @@ function IdleReservationCenter({ reservations, onClose, onEdit, onStatusChange, 
       <div className="reservation-list">
         {reservations.map((reservation) => <div className="reservation-row" key={reservation.id}>
           <span className={`reservation-row__status reservation-row__status--${reservation.status}`}><Bell size={15} /></span>
-          <div className="reservation-row__content"><div><strong>{reservation.name}</strong><em>{reservationStatusLabel[reservation.status]}</em></div><p>{idleReservationSummary(reservation.filters)}</p><small>{formatReservationExpiry(reservation.expiresAt)} · {reservation.notifyMode === 'once' ? '通知一次' : '持续监测'}</small></div>
+          <div className="reservation-row__content"><div><strong>{reservation.name}</strong><em>{reservationStatusLabel[reservation.status]}</em></div><p>{idleReservationSummary(reservation.filters)}</p><small>{formatReservationExpiry(reservation.expiresAt)} · {reservation.notifyMode === 'once' ? '通知一次' : '持续监测'}{reservation.currentAvailableGpuKeys?.length ? ` · 当前可用 ${reservation.currentAvailableGpuKeys.length}` : ''}{reservation.pendingConfirmationGpuKeys?.length ? ` · 待确认 ${reservation.pendingConfirmationGpuKeys.length}` : ''}</small></div>
           <div className="reservation-row__actions">
             <button className="icon-button" title="编辑预约" aria-label={`编辑 ${reservation.name}`} disabled={busyId === reservation.id} onClick={() => onEdit(reservation)}><Pencil size={14} /></button>
             {reservation.status === 'active' && <button className="icon-button" title="暂停预约" aria-label={`暂停 ${reservation.name}`} disabled={busyId === reservation.id} onClick={() => void run(reservation.id, () => onStatusChange(reservation, 'paused'))}><Pause size={14} /></button>}
             {(reservation.status === 'paused' || reservation.status === 'completed') && <button className="icon-button" title="恢复预约" aria-label={`恢复 ${reservation.name}`} disabled={busyId === reservation.id} onClick={() => void run(reservation.id, () => onStatusChange(reservation, 'active'))}><Play size={14} /></button>}
+            {!!reservation.pendingConfirmationGpuKeys?.length && <button className="button button--secondary button--small" title="清除待确认" disabled={busyId === reservation.id} onClick={() => void run(reservation.id, () => onClearPending(reservation))}>已确认</button>}
             <button className="icon-button reservation-delete" title="删除预约" aria-label={`删除 ${reservation.name}`} disabled={busyId === reservation.id} onClick={() => void run(reservation.id, () => onDelete(reservation.id))}><Trash2 size={14} /></button>
           </div>
         </div>)}
@@ -1193,6 +1323,7 @@ function SettingsSheet({ settings, onClose, onSave }: { settings: AppSettings; o
           <label>主题<select value={value.theme} onChange={(event) => set('theme', event.target.value as AppSettings['theme'])}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
           <label className="switch-row"><span><strong>我的任务标记色</strong><small>用于显存光标、你的任务标签与侧栏提示</small></span><input type="color" value={value.currentUserAccent} onChange={(event) => set('currentUserAccent', event.target.value)} /></label>
           <label className="switch-row"><span><strong>减少非必要动效</strong><small>也会自动尊重系统“减少动态效果”设置</small></span><input type="checkbox" checked={value.reduceMotion} onChange={(event) => set('reduceMotion', event.target.checked)} /></label>
+          <label className="switch-row"><span><strong>显示添加服务器引导</strong><small>重新开启地址、认证、Host Key 与远端历史提示</small></span><input type="checkbox" checked={value.showAddServerGuide} onChange={(event) => set('showAddServerGuide', event.target.checked)} /></label>
         </SettingsGroup>
         <SettingsGroup icon={<RefreshCw />} title="采样">
           <label>新服务器默认采样 <span>{value.defaultSamplingIntervalSeconds} 秒</span><input type="range" min="2" max="30" value={value.defaultSamplingIntervalSeconds} onChange={(event) => set('defaultSamplingIntervalSeconds', Number(event.target.value))} /></label>
@@ -1219,6 +1350,11 @@ function SettingsSheet({ settings, onClose, onSave }: { settings: AppSettings; o
 
 function SettingsGroup({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
   return <section className="settings-group"><header><span>{icon}</span><h3>{title}</h3></header><div>{children}</div></section>
+}
+
+function AboutSheet({ onClose }: { onClose: () => void }) {
+  const [licenses, setLicenses] = useState(false)
+  return <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="sheet about-sheet" role="dialog" aria-modal="true" aria-labelledby="about-title"><header className="sheet__header"><div><p className="eyebrow">About</p><h2 id="about-title">RackTop</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="about-body"><div className="about-product"><span className="about-product__mark"><Activity size={28} /></span><div><strong>RackTop {packageInfo.version}</strong><p>面向共享 GPU 服务器的安静、实时算力监控与 SSH 工作台。</p></div></div><div className="about-author"><img src={authorAvatar} alt="Tongzh-SEU 头像" /><div><strong>Tongzh-SEU</strong><small>作者与维护者</small><a href="https://github.com/Tongzh-SEU" target="_blank" rel="noreferrer"><Github size={13} />GitHub @Tongzh-SEU<ExternalLink size={11} /></a></div></div><div className="about-links"><a href="https://github.com/Tongzh-SEU/RackTop" target="_blank" rel="noreferrer"><Github size={15} /><span><strong>GitHub 仓库</strong><small>Tongzh-SEU/RackTop</small></span><ExternalLink size={13} /></a><button onClick={() => setLicenses((value) => !value)}><Database size={15} /><span><strong>第三方许可</strong><small>{licenses ? '收起开源组件' : '查看主要运行时依赖'}</small></span><ChevronRight size={13} /></button></div>{licenses && <div className="about-licenses"><p><strong>React、Tauri、xterm.js、ECharts、Lucide</strong></p><p>各组件版权归其贡献者所有，并按各自开源许可证分发。完整版本与传递依赖记录见应用包内的 npm 与 Cargo 锁文件。</p></div>}<small className="about-contact">联系：通过 GitHub Issues 或作者主页发起讨论</small></div><footer className="sheet__footer"><button className="button button--primary" onClick={onClose}>完成</button></footer></section></div>
 }
 
 function SshImportSheet({ drafts, servers, onClose, onImport }: { drafts: ServerDraft[]; servers: Server[]; onClose: () => void; onImport: (drafts: ServerDraft[]) => Promise<void> }) {

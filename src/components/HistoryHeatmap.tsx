@@ -66,7 +66,7 @@ export function HistoryHeatmaps({ snapshot, points, retentionDays }: { snapshot:
   const days = useMemo(() => buildHeatmapDays(snapshot.timestamp, retentionDays), [retentionDays, snapshot.timestamp])
   return (
     <div className="history-heatmap-list">
-      <ResourceHeatmap title="CPU" subtitle={snapshot.system.cpuModel || '系统 CPU'} resource="cpu" points={points} days={days} defaultMetric="utilization" memoryTone="blue" icon={<Cpu size={16} />} />
+      <ResourceHeatmap title="CPU" subtitle={snapshot.system.cpuModel || '系统 CPU'} resource="cpu" points={points} days={days} defaultMetric="memory" memoryTone="blue" icon={<Cpu size={16} />} />
       {snapshot.gpus.map((gpu) => <ResourceHeatmap key={gpu.uuid} title={`GPU ${gpu.index}`} subtitle={gpu.name.replace('NVIDIA ', '')} resource={gpu.uuid} points={points} days={days} defaultMetric="memory" memoryTone="green" icon={<MemoryStick size={16} />} />)}
     </div>
   )

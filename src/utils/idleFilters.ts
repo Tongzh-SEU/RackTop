@@ -63,6 +63,8 @@ export function displayedFreeMemoryGb(memoryMb: number): number {
 export function rankIdleGpuItems(servers: Server[], snapshots: Record<string, Snapshot>, history: Record<string, HistoryPoint[]>, filters: IdleFilters): IdleGpuItem[] {
   return servers.flatMap((server) => (snapshots[server.id]?.gpus ?? []).map((gpu) => ({ server, gpu }))).filter(({ server, gpu }) => {
     const snapshot = snapshots[server.id]
+    if (filters.targetServerId && server.id !== filters.targetServerId) return false
+    if (filters.targetGpuUuid && gpu.uuid !== filters.targetGpuUuid) return false
     if (filters.gpuModel !== 'all' && gpu.name !== filters.gpuModel) return false
     if (filters.cpuModel !== 'all' && (snapshot?.system.cpuModel || '未知 CPU') !== filters.cpuModel) return false
     return filters.tag === 'all' || server.tags.includes(filters.tag)

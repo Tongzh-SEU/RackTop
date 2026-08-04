@@ -16,6 +16,7 @@ export interface Server {
   historyRetentionDays: number
   remoteHistoryEnabled: boolean
   remoteHistoryLastSyncAt?: number | null
+  sortOrder?: number
   authMethod: AuthMethod
   status: ServerStatus
   lastError?: string | null
@@ -115,6 +116,19 @@ export interface RemoteHistorySyncResult {
   latestTimestamp?: number | null
 }
 
+export interface UsageUserAggregate {
+  username: string
+  activeSeconds: number
+  memoryMbSeconds: number
+}
+
+export interface UsageDistribution {
+  users: UsageUserAggregate[]
+  coveredDays: number
+  requestedDays: number
+  coverageGpuSeconds: number
+}
+
 export interface HostKeyInfo {
   serverId: string
   host: string
@@ -138,6 +152,7 @@ export interface AppSettings {
   currentUserAccent: string
   theme: 'system' | 'light' | 'dark'
   reduceMotion: boolean
+  showAddServerGuide: boolean
 }
 
 export interface IdleReservationFilters {
@@ -148,6 +163,8 @@ export interface IdleReservationFilters {
   cpuModel: string
   duration: number
   tag: string
+  targetServerId?: string
+  targetGpuUuid?: string
 }
 
 export type IdleReservationStatus = 'active' | 'paused' | 'completed' | 'expired'
@@ -161,9 +178,11 @@ export interface IdleReservation {
   notifyMode: 'once' | 'continuous'
   status: IdleReservationStatus
   matchedGpuKeys: string[]
+  currentAvailableGpuKeys?: string[]
+  pendingConfirmationGpuKeys?: string[]
 }
 
-export type DetailTab = 'overview' | 'gpu' | 'cpu' | 'processes' | 'history' | 'logs' | 'connection'
+export type DetailTab = 'overview' | 'processes' | 'terminal' | 'gpu' | 'cpu' | 'history' | 'connection'
 
 export interface ServerDraft {
   id?: string

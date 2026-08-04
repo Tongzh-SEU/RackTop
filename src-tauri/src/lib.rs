@@ -4,12 +4,14 @@ mod remote_history;
 mod host_key;
 mod ssh_config;
 mod storage;
+mod terminal;
 
-use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, RemoteHistorySyncResult, Server, ServerDraft, Snapshot};
+use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::Database;
-use tauri::{image::Image, menu::{MenuBuilder, MenuItemBuilder}, tray::TrayIconBuilder, Emitter, Manager, State};
+use terminal::TerminalManager;
+use tauri::{image::Image, menu::{Menu, MenuBuilder, MenuItemBuilder}, tray::TrayIconBuilder, AppHandle, Emitter, Manager, State};
 
 #[tauri::command]
 fn list_servers(database: State<'_, Database>) -> Result<Vec<Server>, String> {
@@ -24,6 +26,33 @@ fn save_server(database: State<'_, Database>, draft: ServerDraft) -> Result<Serv
 #[tauri::command]
 fn delete_server(database: State<'_, Database>, server_id: String) -> Result<(), String> {
     database.delete_server(&server_id)
+}
+
+#[tauri::command]
+fn reorder_servers(database: State<'_, Database>, server_ids: Vec<String>) -> Result<(), String> {
+    database.reorder_servers(&server_ids)
+}
+
+#[tauri::command]
+fn start_terminal(app: tauri::AppHandle, database: State<'_, Database>, terminals: State<'_, TerminalManager>, server_id: String, columns: u16, rows: u16, gpu_index: Option<u32>) -> Result<String, String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
+    terminals.start(app, &server, password.as_deref(), columns, rows, gpu_index)
+}
+
+#[tauri::command]
+fn write_terminal(terminals: State<'_, TerminalManager>, session_id: String, data: String) -> Result<(), String> {
+    terminals.write(&session_id, data.as_bytes())
+}
+
+#[tauri::command]
+fn resize_terminal(terminals: State<'_, TerminalManager>, session_id: String, columns: u16, rows: u16) -> Result<(), String> {
+    terminals.resize(&session_id, columns, rows)
+}
+
+#[tauri::command]
+fn close_terminal(terminals: State<'_, TerminalManager>, session_id: String) -> Result<(), String> {
+    terminals.close(&session_id)
 }
 
 #[tauri::command]
@@ -53,6 +82,11 @@ fn get_history_heatmap(database: State<'_, Database>, server_id: String, from_ti
 }
 
 #[tauri::command]
+fn get_usage_distribution(database: State<'_, Database>, server_id: String, from_timestamp: i64, requested_days: i64) -> Result<UsageDistribution, String> {
+    database.get_usage_distribution(&server_id, from_timestamp, requested_days)
+}
+
+#[tauri::command]
 async fn configure_remote_history(database: State<'_, Database>, server_id: String) -> Result<(), String> {
     let server = database.get_server(&server_id)?;
     let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
@@ -72,13 +106,15 @@ async fn sync_remote_history(database: State<'_, Database>, server_id: String) -
     let since = database.remote_history_cursor(&server_id, now)?;
     let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
     let fetched_points = remote_history::fetch(&server, password.as_deref(), since).await?;
+    let usage_points = remote_history::fetch_usage(&server, password.as_deref(), since).await?;
     let points: Vec<_> = fetched_points.iter().filter(|point| point.timestamp >= now - 31 * 86_400 && point.timestamp <= now + 300).cloned().collect();
     if !fetched_points.is_empty() && points.is_empty() {
         return Err("远端历史时间戳超出有效范围，请检查服务器系统时间和时区".into());
     }
     let latest_timestamp = points.iter().map(|point| point.timestamp).max().or(server.remote_history_last_sync_at);
     let imported_count = database.import_remote_history(&server_id, &points)?;
-    Ok(RemoteHistorySyncResult { imported_count, latest_timestamp })
+    let usage_imported = database.import_remote_usage(&server_id, &usage_points, now)?;
+    Ok(RemoteHistorySyncResult { imported_count: imported_count + usage_imported, latest_timestamp })
 }
 
 #[tauri::command]
@@ -164,6 +200,23 @@ fn tray_image() -> Image<'static> {
     Image::new_owned(rgba, width as u32, height as u32)
 }
 
+fn build_tray_menu(app: &AppHandle, summary: &str) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
+    let open = MenuItemBuilder::with_id("open", "打开 RackTop").build(app)?;
+    let reservations = MenuItemBuilder::with_id("reservations", summary).build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+    Ok(MenuBuilder::new(app).items(&[&open, &reservations, &quit]).build()?)
+}
+
+#[tauri::command]
+fn update_tray_summary(app: AppHandle, waiting: usize, current: usize, pending: usize) -> Result<(), String> {
+    let summary = if waiting + current + pending == 0 { "预约摘要".to_string() } else { format!("预约 {} · 可用 {} · 待确认 {}", waiting, current, pending) };
+    let menu = build_tray_menu(&app, &summary).map_err(|error| error.to_string())?;
+    let tray = app.tray_by_id("racktop-tray").ok_or("找不到 RackTop 菜单栏图标")?;
+    tray.set_menu(Some(menu)).map_err(|error| error.to_string())?;
+    tray.set_tooltip(Some(&format!("RackTop · {summary}"))).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -171,32 +224,31 @@ pub fn run() {
             let app_data = app.path().app_data_dir().map_err(|error| Box::<dyn std::error::Error>::from(error))?;
             let database = Database::open(&app_data.join("racktop.sqlite")).map_err(|error| Box::<dyn std::error::Error>::from(std::io::Error::other(error)))?;
             app.manage(database);
+            app.manage(TerminalManager::default());
 
-            let open = MenuItemBuilder::with_id("open", "打开 RackTop").build(app)?;
-            let connect = MenuItemBuilder::with_id("connect", "连接全部").build(app)?;
-            let pause = MenuItemBuilder::with_id("pause", "暂停 / 继续采集").build(app)?;
-            let idle = MenuItemBuilder::with_id("idle", "查看空闲 GPU").build(app)?;
-            let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
-            let menu = MenuBuilder::new(app).items(&[&open, &connect, &pause, &idle, &quit]).build()?;
-            TrayIconBuilder::new()
+            let menu = build_tray_menu(&app.handle(), "预约摘要")?;
+            TrayIconBuilder::with_id("racktop-tray")
                 .icon(tray_image())
                 .tooltip("RackTop · GPU 与 CPU 监控")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
-                    "open" | "connect" | "pause" | "idle" => {
+                    "open" | "reservations" => {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
                         let _ = app.emit("tray-action", event.id().as_ref());
                     }
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        app.state::<TerminalManager>().close_all();
+                        app.exit(0)
+                    },
                     _ => {}
                 })
                 .build(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, collect_server, get_history, get_history_heatmap, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }

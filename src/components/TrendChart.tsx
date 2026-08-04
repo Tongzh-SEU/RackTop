@@ -20,17 +20,28 @@ function capacityTooltip(value: number, totalGb: number) {
   return `${percent.toFixed(1)}% · ${usedGb.toFixed(1)} / ${totalGb.toFixed(1)} GB`
 }
 
+function timeAxisInterval(timestamps: number[]) {
+  if (timestamps.length < 2) return 10 * MINUTE_MS
+  const span = Math.max(0, timestamps[timestamps.length - 1] - timestamps[0])
+  if (span <= 90 * MINUTE_MS) return 10 * MINUTE_MS
+  if (span <= 6 * 60 * MINUTE_MS) return 30 * MINUTE_MS
+  if (span <= 36 * 60 * MINUTE_MS) return 3 * 60 * MINUTE_MS
+  return 12 * 60 * MINUTE_MS
+}
+
 interface TrendChartProps {
   points: HistoryPoint[]
   snapshot?: Snapshot
   mode?: 'all' | 'cpu' | 'gpu' | 'systemMemory' | 'gpuMemory'
   height?: number
   animate?: boolean
+  gpuUuid?: string
 }
 
-export function TrendChart({ points, snapshot, mode = 'all', height = 260, animate = false }: TrendChartProps) {
+export function TrendChart({ points, snapshot, mode = 'all', height = 260, animate = false, gpuUuid }: TrendChartProps) {
   const series = []
   const timestamps = points.map((point) => point.timestamp * 1000)
+  const axisInterval = timeAxisInterval(timestamps)
   if (mode === 'all' || mode === 'cpu') {
     series.push({
       id: 'cpu-utilization',
@@ -75,7 +86,7 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
     })
   }
   if (mode === 'all' || mode === 'gpu' || mode === 'gpuMemory') {
-    snapshot?.gpus.forEach((gpu, index) => {
+    snapshot?.gpus.filter((gpu) => !gpuUuid || gpu.uuid === gpuUuid).forEach((gpu, index) => {
       const colors = ['#30d158', '#bf5af2', '#ff9f0a', '#64d2ff']
       const isMemory = mode === 'gpuMemory'
       series.push({
@@ -111,8 +122,8 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
           type: 'time',
           boundaryGap: false,
           splitNumber: minuteTickSplitNumber(timestamps),
-          minInterval: MINUTE_MS,
-          maxInterval: MINUTE_MS,
+          minInterval: axisInterval,
+          maxInterval: axisInterval,
           axisLine: { show: false },
           axisTick: { show: false },
           axisLabel: { formatter: formatFiveMinuteTimeLabel, color: '#8e9198', fontSize: 10 },

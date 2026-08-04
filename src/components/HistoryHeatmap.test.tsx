@@ -24,9 +24,9 @@ describe('HistoryHeatmaps', () => {
     expect(markup).toContain('GPU 1')
   })
 
-  it('defaults CPU to UTL and every GPU to MEM', () => {
+  it('defaults CPU and every GPU to MEM', () => {
     const markup = renderToStaticMarkup(<HistoryHeatmaps snapshot={snapshot} points={points} retentionDays={2} />)
-    expect(markup).toContain('CPU UTL 每 3 小时平均值热力图')
+    expect(markup).toContain('CPU MEM 每 3 小时平均值热力图')
     expect(markup).toContain('GPU 0 MEM 每 3 小时平均值热力图')
     expect(markup).toContain('GPU 1 MEM 每 3 小时平均值热力图')
   })

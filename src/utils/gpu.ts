@@ -76,3 +76,8 @@ export function hasOtherUserGpuWorkload(gpu: GpuMetric, processes: ProcessMetric
     .reduce((sum, process) => sum + Math.max(0, process.memoryUsedMb), 0)
   return otherUserMemoryMb / gpu.memoryTotalMb * 100 > 3
 }
+
+export function countOtherUserGpuWorkloads(gpu: GpuMetric, processes: ProcessMetric[]): number {
+  if (!hasOtherUserGpuWorkload(gpu, processes)) return 0
+  return processes.filter((process) => process.gpuUuid === gpu.uuid && !process.isCurrentUser && !isIgnoredSystemGpuProcess(process) && process.memoryUsedMb > 0).length
+}

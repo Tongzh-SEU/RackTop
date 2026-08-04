@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GpuMetric, ProcessMetric } from '../types/models'
-import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
+import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, countOtherUserGpuWorkloads, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
 
 function gpu(memoryUsedMb: number, memoryTotalMb = 40_960, utilization = 0): GpuMetric {
   return {
@@ -92,6 +92,12 @@ describe('GPU memory display semantics', () => {
     expect(hasOtherUserGpuWorkload(metric, [process('researcher', 40_960 * 0.03)])).toBe(false)
     expect(hasOtherUserGpuWorkload(metric, [process('researcher', 40_960 * 0.031)])).toBe(true)
     expect(hasOtherUserGpuWorkload(metric, [process('tongzh', 10_000, 'python train.py', true)])).toBe(false)
+  })
+
+  it('counts only relevant other-user processes once the occupancy threshold is exceeded', () => {
+    const metric = gpu(0)
+    expect(countOtherUserGpuWorkloads(metric, [process('researcher', 100), process('gdm', 10_000, '/usr/lib/xorg/Xorg')])).toBe(0)
+    expect(countOtherUserGpuWorkloads(metric, [process('researcher', 800), { ...process('researcher', 700), pid: 43 }, process('gdm', 10_000, '/usr/lib/xorg/Xorg')])).toBe(2)
   })
 
 })

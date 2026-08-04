@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from '../types/models'
+import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
 import { clampPercent, gpuMemoryPercent } from '../utils/gpu'
 
 const isTauri = '__TAURI_INTERNALS__' in window
@@ -18,6 +18,7 @@ const demoServers: Server[] = [
     samplingIntervalSeconds: 2,
     historyRetentionDays: 30,
     remoteHistoryEnabled: false,
+    sortOrder: 0,
     authMethod: 'sshAgent',
     status: 'online',
     lastSeenAt: now,
@@ -33,6 +34,7 @@ const demoServers: Server[] = [
     samplingIntervalSeconds: 2,
     historyRetentionDays: 30,
     remoteHistoryEnabled: false,
+    sortOrder: 1,
     authMethod: 'sshAgent',
     status: 'online',
     lastSeenAt: now,
@@ -53,6 +55,7 @@ const defaultSettings: AppSettings = {
   currentUserAccent: '#0a84ff',
   theme: 'system',
   reduceMotion: false,
+  showAddServerGuide: true,
 }
 
 const demoSnapshot: Snapshot = {
@@ -151,6 +154,7 @@ export const api = {
     const server: Server = {
       ...draft,
       id: draft.id ?? crypto.randomUUID(),
+      sortOrder: browserServers.find((item) => item.id === draft.id)?.sortOrder ?? browserServers.length,
       status: 'unknown',
       lastError: null,
       lastSeenAt: null,
@@ -161,6 +165,27 @@ export const api = {
   async deleteServer(serverId: string): Promise<void> {
     if (isTauri) return invoke('delete_server', { serverId })
     browserServers = browserServers.filter((server) => server.id !== serverId)
+  },
+  async reorderServers(serverIds: string[]): Promise<void> {
+    if (isTauri) return invoke('reorder_servers', { serverIds })
+    const order = new Map(serverIds.map((id, index) => [id, index]))
+    browserServers = [...browserServers].sort((left, right) => (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.id) ?? Number.MAX_SAFE_INTEGER)).map((server, index) => ({ ...server, sortOrder: index }))
+  },
+  async startTerminal(serverId: string, columns: number, rows: number, gpuIndex?: number): Promise<string> {
+    if (!isTauri) throw new Error('终端仅在 RackTop 桌面 App 中可用')
+    return invoke('start_terminal', { serverId, columns, rows, gpuIndex: gpuIndex ?? null })
+  },
+  async writeTerminal(sessionId: string, data: string): Promise<void> {
+    if (isTauri) return invoke('write_terminal', { sessionId, data })
+  },
+  async resizeTerminal(sessionId: string, columns: number, rows: number): Promise<void> {
+    if (isTauri) return invoke('resize_terminal', { sessionId, columns, rows })
+  },
+  async closeTerminal(sessionId: string): Promise<void> {
+    if (isTauri) return invoke('close_terminal', { sessionId })
+  },
+  async updateTraySummary(waiting: number, current: number, pending: number): Promise<void> {
+    if (isTauri) return invoke('update_tray_summary', { waiting, current, pending })
   },
   async collectServer(serverId: string, includeProcesses = true, recordHistory = true): Promise<Snapshot> {
     if (isTauri) return invoke('collect_server', { serverId, includeProcesses, recordHistory })
@@ -190,6 +215,10 @@ export const api = {
         gpuMemoryUtilizations: Object.fromEntries(gpuUuids.map((uuid, gpuIndex) => [uuid, clampPercent(gpuMemoryPercent(source.gpus.find((gpu) => gpu.uuid === uuid) ?? source.gpus[gpuIndex]) + Math.sin(phase / 3 + gpuIndex) * 5)])),
       }
     })
+  },
+  async getUsageDistribution(serverId: string, fromTimestamp: number, requestedDays: number): Promise<UsageDistribution> {
+    if (isTauri) return invoke('get_usage_distribution', { serverId, fromTimestamp, requestedDays })
+    return { users: [], coveredDays: 0, requestedDays, coverageGpuSeconds: 0 }
   },
   async configureRemoteHistory(serverId: string): Promise<void> {
     if (isTauri) return invoke('configure_remote_history', { serverId })

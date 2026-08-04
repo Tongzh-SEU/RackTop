@@ -14,7 +14,7 @@ async fn main() {
         let server = Server {
             id: format!("probe-{index}"), name: target.clone(), location: None, host: host.into(), port: 22, username: username.into(),
             ssh_alias: None, identity_file: None, proxy_jump: None, tags: vec!["integration-test".into()],
-            sampling_interval_seconds: 2, history_retention_days: 1, remote_history_enabled: false, remote_history_last_sync_at: None, auth_method: "sshAgent".into(),
+            sampling_interval_seconds: 2, history_retention_days: 1, remote_history_enabled: false, remote_history_last_sync_at: None, sort_order: index as i64, auth_method: "sshAgent".into(),
             status: "unknown".into(), last_error: None, last_seen_at: None,
         };
         tasks.spawn(async move { (target, collector::collect(&server).await) });
