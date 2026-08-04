@@ -3,6 +3,7 @@ use std::{collections::{HashMap, HashSet}, process::Stdio, time::{SystemTime, UN
 use tokio::{process::Command, time::{timeout, Duration}};
 
 const REMOTE_SCRIPT: &str = r#"export LANG=C LC_ALL=C;
+if [ "${RACKTOP_REMOTE_HISTORY:-0}" = "1" ]; then mkdir -p "$HOME/.racktop" && touch "$HOME/.racktop/.client-heartbeat"; fi;
 printf '__RACKTOP_USER__\n'; id -un;
 uid_min="$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null)"; uid_min="${uid_min:-1000}";
 printf '__RACKTOP_UIDMIN__\n%s\n' "$uid_min";
@@ -43,7 +44,11 @@ pub async fn collect(server: &Server) -> Result<Snapshot, String> {
 
 pub async fn collect_with_password(server: &Server, password: Option<&str>, include_processes: bool) -> Result<Snapshot, String> {
     let (mut command, target) = configured_ssh_command(server, password)?;
-    command.arg(target).arg(format!("RACKTOP_INCLUDE_PROCESSES={};{REMOTE_SCRIPT}", if include_processes { 1 } else { 0 })).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.arg(target).arg(format!(
+        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_REMOTE_HISTORY={};{REMOTE_SCRIPT}",
+        if include_processes { 1 } else { 0 },
+        if server.remote_history_enabled { 1 } else { 0 },
+    )).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = timeout(Duration::from_secs(15), command.output()).await.map_err(|_| format!("连接 {} 超时（15 秒）", server.name))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

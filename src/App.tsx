@@ -49,6 +49,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { api } from './services/api'
+import { openExternalUrl } from './services/external'
 import type { AppSettings, DetailTab, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
 import { HistoryHeatmaps } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
@@ -72,9 +73,9 @@ const tabs: Array<{ value: DetailTab; label: string }> = [
   { value: 'overview', label: '概览' },
   { value: 'processes', label: '进程' },
   { value: 'terminal', label: navigator.userAgent.includes('Windows') ? '命令行' : '终端' },
+  { value: 'history', label: '趋势' },
   { value: 'gpu', label: 'GPU' },
   { value: 'cpu', label: 'CPU' },
-  { value: 'history', label: '历史' },
   { value: 'connection', label: '连接' },
 ]
 
@@ -373,14 +374,11 @@ function App() {
         if (remoteSyncInFlight.current.has(server.id)) return
         remoteSyncInFlight.current.add(server.id)
         try {
-          try {
-            const result = await api.syncRemoteHistory(server.id)
-            importedCount += result.importedCount
-            if (!cancelled && result.latestTimestamp) {
-              setServers((current) => current.map((item) => item.id === server.id && item.remoteHistoryLastSyncAt !== result.latestTimestamp ? { ...item, remoteHistoryLastSyncAt: result.latestTimestamp } : item))
-            }
-          } finally {
-            await api.configureRemoteHistory(server.id)
+          await api.configureRemoteHistory(server.id)
+          const result = await api.syncRemoteHistory(server.id)
+          importedCount += result.importedCount
+          if (!cancelled && result.latestTimestamp) {
+            setServers((current) => current.map((item) => item.id === server.id && item.remoteHistoryLastSyncAt !== result.latestTimestamp ? { ...item, remoteHistoryLastSyncAt: result.latestTimestamp } : item))
           }
         } catch {
           failedServerIds.push(server.id)
@@ -572,10 +570,11 @@ function App() {
     const saved = await api.saveServer(draft)
     let sync: RemoteHistorySyncResult | null = null
     if (saved.remoteHistoryEnabled) {
+      await api.configureRemoteHistory(saved.id)
       try {
         sync = await api.syncRemoteHistory(saved.id)
-      } finally {
-        await api.configureRemoteHistory(saved.id)
+      } catch (reason) {
+        setToast(`服务器已保存，远端历史首次同步失败：${String(reason)}`)
       }
     } else if (previous?.remoteHistoryEnabled) {
       await api.configureRemoteHistory(saved.id)
@@ -640,11 +639,11 @@ function App() {
     }
   }
 
-  async function moveServerBefore(targetId: string) {
-    if (!draggedServerId || draggedServerId === targetId || search) return
+  async function moveServerBefore(sourceId: string, targetId: string) {
+    if (!sourceId || sourceId === targetId || search) return
     const previousOrder = servers
-    const next = servers.filter((server) => server.id !== draggedServerId)
-    const moved = servers.find((server) => server.id === draggedServerId)
+    const next = servers.filter((server) => server.id !== sourceId)
+    const moved = servers.find((server) => server.id === sourceId)
     if (!moved) return
     next.splice(next.findIndex((server) => server.id === targetId), 0, moved)
     const ordered = next.map((server, index) => ({ ...server, sortOrder: index }))
@@ -682,9 +681,9 @@ function App() {
                 className={`server-row ${selectedServerId === server.id && mainView === 'server' ? 'is-selected' : ''}`}
                 key={server.id}
                 draggable={!search}
-                onDragStart={(event) => { setDraggedServerId(server.id); event.dataTransfer.effectAllowed = 'move' }}
-                onDragOver={(event) => { if (draggedServerId && !search) { event.preventDefault(); event.dataTransfer.dropEffect = 'move' } }}
-                onDrop={(event) => { event.preventDefault(); void moveServerBefore(server.id) }}
+                onDragStart={(event) => { setDraggedServerId(server.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', server.id) }}
+                onDragOver={(event) => { if (!search) { event.preventDefault(); event.dataTransfer.dropEffect = 'move' } }}
+                onDrop={(event) => { event.preventDefault(); void moveServerBefore(event.dataTransfer.getData('text/plain') || draggedServerId || '', server.id) }}
                 onDragEnd={() => setDraggedServerId(null)}
                 onClick={() => { setSelectedServerId(server.id); setSelectedGpuUuid(null); setMainView('server') }}
               >
@@ -761,7 +760,7 @@ function App() {
 
       {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultSamplingInterval={settings?.defaultSamplingIntervalSeconds} defaultHistoryRetentionDays={settings?.historyRetentionDays} defaultRemoteHistoryEnabled={localStorage.getItem('racktop.defaultRemoteHistoryEnabled') !== 'false'} showGuide={settings?.showAddServerGuide ?? true} onGuideDismiss={() => { if (settings) void api.saveSettings({ ...settings, showAddServerGuide: false }).then(setSettings) }} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
       {showSettings && settings && <SettingsSheet settings={settings} onClose={() => setShowSettings(false)} onSave={async (value) => { setSettings(await api.saveSettings(value)); setShowSettings(false); setToast('设置已保存') }} />}
-      {showAbout && <AboutSheet onClose={() => setShowAbout(false)} />}
+      {showAbout && <AboutSheet onClose={() => setShowAbout(false)} onNotice={setToast} />}
       {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setImportDrafts(null); setToast(`已导入 ${selected.length} 台服务器`) }} />}
       {pendingHostKey && <HostKeyDialog info={pendingHostKey} onClose={() => setPendingHostKey(null)} onTrust={async () => { const serverId = pendingHostKey.serverId; await api.trustHostKey(pendingHostKey); setPendingHostKey(null); setToast('已信任服务器指纹'); await refreshServer(serverId) }} />}
       {serverPendingDelete && <DeleteServerDialog server={serverPendingDelete} onClose={() => setServerPendingDelete(null)} onDelete={() => removeServer(serverPendingDelete)} />}
@@ -847,37 +846,13 @@ function PanelHeader({ icon, title, subtitle, action }: { icon?: React.ReactNode
   return <header className="panel__header"><div>{icon && <span>{icon}</span>}<div><h3>{title}</h3>{subtitle && <p>{subtitle}</p>}</div></div>{action}</header>
 }
 
-type OverviewModule = 'metrics' | 'resources' | 'processes' | 'trends'
-const DEFAULT_OVERVIEW_ORDER: OverviewModule[] = ['metrics', 'resources', 'processes', 'trends']
-
-function loadOverviewOrder(): OverviewModule[] {
-  try {
-    const value = JSON.parse(localStorage.getItem('racktop.overviewOrder') ?? '[]')
-    return Array.isArray(value) && value.length === DEFAULT_OVERVIEW_ORDER.length && DEFAULT_OVERVIEW_ORDER.every((item) => value.includes(item)) ? value : DEFAULT_OVERVIEW_ORDER
-  } catch {
-    return DEFAULT_OVERVIEW_ORDER
-  }
-}
-
 function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCpu, onRequestTerminate, animateCharts }: { snapshot: Snapshot; points: HistoryPoint[]; idleThreshold: number; onSelectGpu: (gpuUuid: string) => void; onOpenCpu: () => void; onRequestTerminate: (target: ProcessTerminationTarget) => void; animateCharts: boolean }) {
   const totalMemoryMb = snapshot.gpus.reduce((sum, gpu) => sum + Math.max(0, gpu.memoryTotalMb), 0)
   const usedMemoryMb = snapshot.gpus.reduce((sum, gpu) => sum + Math.max(0, gpu.memoryUsedMb), 0)
   const gpuAverage = snapshot.gpus.length ? snapshot.gpus.reduce((sum, gpu) => sum + clampPercent(gpu.utilization), 0) / snapshot.gpus.length : 0
   const idleCount = snapshot.gpus.filter((gpu) => isGpuIdle(gpu, idleThreshold)).length
   const systemMemoryPercent = snapshot.system.memoryTotalBytes ? snapshot.system.memoryUsedBytes / snapshot.system.memoryTotalBytes * 100 : 0
-  const [order, setOrder] = useState<OverviewModule[]>(loadOverviewOrder)
-  const [dragged, setDragged] = useState<OverviewModule | null>(null)
-  const moveBefore = (target: OverviewModule) => {
-    if (!dragged || dragged === target) return
-    setOrder((current) => {
-      const next = current.filter((item) => item !== dragged)
-      next.splice(next.indexOf(target), 0, dragged)
-      localStorage.setItem('racktop.overviewOrder', JSON.stringify(next))
-      return next
-    })
-  }
-
-  const modules: Record<OverviewModule, React.ReactNode> = {
+  const modules = {
     metrics: <section className="metric-grid">
       <MetricCard icon={<Zap />} label="可用 GPU" value={`${idleCount} / ${snapshot.gpus.length}`} foot="显存低于 1% 且核心空闲" tone="green" />
       <MetricCard icon={<MemoryStick />} label="GPU 显存" value={`${(usedMemoryMb / 1024).toFixed(1)} GB`} foot={`共 ${(totalMemoryMb / 1024).toFixed(1)} GB`} tone="purple" />
@@ -892,9 +867,9 @@ function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCp
       <div className="overview-section__header"><Activity size={17} /><div><h2 id="overview-trends-title">实时趋势</h2><p>CPU、GPU 显存、系统内存与 Swap、GPU 核心利用率</p></div></div>
       <div className="trend-grid">
         <section className="panel panel--mini-chart"><PanelHeader title="CPU UTL" /><TrendChart points={points} snapshot={snapshot} mode="cpu" height={170} animate={animateCharts} /></section>
-        <section className="panel panel--mini-chart"><PanelHeader title="GPU MEM" /><TrendChart points={points} snapshot={snapshot} mode="gpuMemory" height={170} animate={animateCharts} /></section>
+        <section className="panel panel--mini-chart"><PanelHeader title="GPU MEM" /><TrendChart points={points} snapshot={snapshot} mode="gpuMemory" height={170} animate={animateCharts} seriesOpacity={0.9} /></section>
         <section className="panel panel--mini-chart"><PanelHeader title="系统 MEM / SWP" /><TrendChart points={points} snapshot={snapshot} mode="systemMemory" height={170} animate={animateCharts} /></section>
-        <section className="panel panel--mini-chart"><PanelHeader title="GPU UTL" /><TrendChart points={points} snapshot={snapshot} mode="gpu" height={170} animate={animateCharts} /></section>
+        <section className="panel panel--mini-chart"><PanelHeader title="GPU UTL" /><TrendChart points={points} snapshot={snapshot} mode="gpu" height={170} animate={animateCharts} seriesOpacity={0.9} /></section>
       </div>
     </section>,
     processes: <section className="overview-section" aria-labelledby="overview-process-title">
@@ -903,18 +878,7 @@ function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCp
     </section>,
   }
 
-  return <div className="overview-stack">{order.map((key) => (
-    <div
-      className={`overview-module ${dragged === key ? 'is-dragging' : ''}`}
-      key={key}
-      onDragOver={(event) => { if (dragged) { event.preventDefault(); event.dataTransfer.dropEffect = 'move' } }}
-      onDrop={(event) => { event.preventDefault(); moveBefore(key); setDragged(null) }}
-      onDragEnd={() => setDragged(null)}
-    >
-      <button type="button" draggable className="overview-module__handle" aria-label="拖动调整模块顺序" title="拖动调整模块顺序" onDragStart={(event) => { setDragged(key); event.dataTransfer.effectAllowed = 'move' }} onDragEnd={() => setDragged(null)}><GripVertical size={15} /></button>
-      {modules[key]}
-    </div>
-  ))}</div>
+  return <div className="overview-stack">{modules.metrics}{modules.resources}{modules.processes}{modules.trends}</div>
 }
 
 function GpuCard({ gpu, processes, onOpen }: { gpu: Snapshot['gpus'][number]; processes: Snapshot['processes']; onOpen: () => void }) {
@@ -1005,15 +969,22 @@ function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot 
     let cancelled = false
     setUsageLoading(true)
     setUsageError(null)
-    const from = Math.floor(Date.now() / 1000) - usageDays * 86_400
-    void api.getUsageDistribution(server.id, from, usageDays).then((value) => { if (!cancelled) setUsage(value) }).catch((reason) => { if (!cancelled) setUsageError(String(reason)) }).finally(() => { if (!cancelled) setUsageLoading(false) })
-    return () => { cancelled = true }
+    const loadUsage = () => {
+      const from = Math.floor(Date.now() / 1000) - usageDays * 86_400
+      void api.getUsageDistribution(server.id, from, usageDays)
+        .then((value) => { if (!cancelled) { setUsage(value); setUsageError(null) } })
+        .catch((reason) => { if (!cancelled) setUsageError(String(reason)) })
+        .finally(() => { if (!cancelled) setUsageLoading(false) })
+    }
+    loadUsage()
+    const interval = window.setInterval(loadUsage, 60_000)
+    return () => { cancelled = true; window.clearInterval(interval) }
   }, [server.id, usageDays])
 
   return <div className="history-page">
     <section className="history-section"><header className="history-page__header"><div><History size={18} /><span><h2>资源热力图</h2><p>每列 1 天，每格汇总连续 3 小时的平均使用率</p></span></div><small>最近 {Math.min(90, Math.max(1, server.historyRetentionDays))} 天</small></header>{heatmapLoading ? <div className="history-page__state"><RefreshCw className="spin" size={16} />正在读取资源历史…</div> : heatmapError ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />资源历史读取失败：{heatmapError}</div> : <HistoryHeatmaps snapshot={snapshot} points={heatmapPoints} retentionDays={server.historyRetentionDays} />}</section>
     <section className="history-section"><header className="history-page__header"><div><History size={18} /><span><h2>GPU 使用分布</h2><p>按 Unix 用户聚合活跃时间与显存积分</p></span></div><div className="usage-range" aria-label="使用分布时间范围">{([7, 15, 30, 90] as const).map((days) => <button key={days} aria-pressed={usageDays === days} onClick={() => setUsageDays(days)}>{days === 7 ? '1 周' : days === 15 ? '半个月' : days === 30 ? '1 个月' : '3 个月'}</button>)}</div></header>{usageLoading ? <div className="history-page__state"><RefreshCw className="spin" size={16} />正在聚合使用分布…</div> : usageError ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />使用分布读取失败：{usageError}</div> : usage && <UsageDistribution snapshot={snapshot} data={usage} />}</section>
-    <section className="data-retention"><Database size={18} /><div><strong>{server.remoteHistoryEnabled ? '本地 90 天 · 远端 30 天' : '本地历史数据'}</strong><p>{server.remoteHistoryEnabled ? '远端隐藏常驻进程保留轻量资源样本与用户级聚合时间桶；RackTop 打开后增量同步，本地最多保留 90 天。' : '样本仅在 RackTop 运行时写入本机 SQLite，保存期到期自动清理。'}不会保存 PID、进程命令、路径或终端输入输出。</p></div></section>
+    <section className="data-retention"><Database size={18} /><div><strong>{server.remoteHistoryEnabled ? '在线本地采样 · 离线远端补档' : '仅在线本地采样'}</strong><p>{server.remoteHistoryEnabled ? 'RackTop 在线时写入本机时间桶；远端隐藏进程仅在 App 离线后接管，重新打开时增量补齐缺口。' : 'RackTop 运行时在本机生成使用分布；App 离线期间不补零，缺失时段保持灰色。'}不会保存 PID、进程命令、路径或终端输入输出。</p></div></section>
   </div>
 }
 
@@ -1352,9 +1323,12 @@ function SettingsGroup({ icon, title, children }: { icon: React.ReactNode; title
   return <section className="settings-group"><header><span>{icon}</span><h3>{title}</h3></header><div>{children}</div></section>
 }
 
-function AboutSheet({ onClose }: { onClose: () => void }) {
+function AboutSheet({ onClose, onNotice }: { onClose: () => void; onNotice: (message: string) => void }) {
   const [licenses, setLicenses] = useState(false)
-  return <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="sheet about-sheet" role="dialog" aria-modal="true" aria-labelledby="about-title"><header className="sheet__header"><div><p className="eyebrow">About</p><h2 id="about-title">RackTop</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="about-body"><div className="about-product"><span className="about-product__mark"><Activity size={28} /></span><div><strong>RackTop {packageInfo.version}</strong><p>面向共享 GPU 服务器的安静、实时算力监控与 SSH 工作台。</p></div></div><div className="about-author"><img src={authorAvatar} alt="Tongzh-SEU 头像" /><div><strong>Tongzh-SEU</strong><small>作者与维护者</small><a href="https://github.com/Tongzh-SEU" target="_blank" rel="noreferrer"><Github size={13} />GitHub @Tongzh-SEU<ExternalLink size={11} /></a></div></div><div className="about-links"><a href="https://github.com/Tongzh-SEU/RackTop" target="_blank" rel="noreferrer"><Github size={15} /><span><strong>GitHub 仓库</strong><small>Tongzh-SEU/RackTop</small></span><ExternalLink size={13} /></a><button onClick={() => setLicenses((value) => !value)}><Database size={15} /><span><strong>第三方许可</strong><small>{licenses ? '收起开源组件' : '查看主要运行时依赖'}</small></span><ChevronRight size={13} /></button></div>{licenses && <div className="about-licenses"><p><strong>React、Tauri、xterm.js、ECharts、Lucide</strong></p><p>各组件版权归其贡献者所有，并按各自开源许可证分发。完整版本与传递依赖记录见应用包内的 npm 与 Cargo 锁文件。</p></div>}<small className="about-contact">联系：通过 GitHub Issues 或作者主页发起讨论</small></div><footer className="sheet__footer"><button className="button button--primary" onClick={onClose}>完成</button></footer></section></div>
+  const openExternal = (url: string) => {
+    void openExternalUrl(url).catch((error) => onNotice(`无法打开默认浏览器：${String(error)}`))
+  }
+  return <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="sheet about-sheet" role="dialog" aria-modal="true" aria-labelledby="about-title"><header className="sheet__header"><div><p className="eyebrow">About</p><h2 id="about-title">RackTop</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="about-body"><div className="about-product"><span className="about-product__mark"><Activity size={28} /></span><div><strong>RackTop {packageInfo.version}</strong><p>面向共享 GPU 服务器的安静、实时算力监控与 SSH 工作台。</p></div></div><div className="about-author"><img src={authorAvatar} alt="Tongzh-SEU 头像" /><div><strong>Tongzh-SEU</strong><small>作者与维护者</small><button className="about-external-link" onClick={() => openExternal('https://github.com/Tongzh-SEU')}><Github size={13} />GitHub @Tongzh-SEU<ExternalLink size={11} /></button></div></div><div className="about-links"><button onClick={() => openExternal('https://github.com/Tongzh-SEU/RackTop')}><Github size={15} /><span><strong>GitHub 仓库</strong><small>Tongzh-SEU/RackTop</small></span><ExternalLink size={13} /></button><button aria-expanded={licenses} aria-controls="about-licenses" onClick={() => setLicenses((value) => !value)}><Database size={15} /><span><strong>第三方许可</strong><small>{licenses ? '收起开源组件' : '查看主要运行时依赖'}</small></span><ChevronRight className={`disclosure-icon${licenses ? ' disclosure-icon--expanded' : ''}`} size={13} /></button></div>{licenses && <div className="about-licenses" id="about-licenses"><p><strong>React、Tauri、xterm.js、ECharts、Lucide</strong></p><p>各组件版权归其贡献者所有，并按各自开源许可证分发。完整版本与传递依赖记录见应用包内的 npm 与 Cargo 锁文件。</p></div>}<small className="about-contact">联系：通过 GitHub Issues 或作者主页发起讨论</small></div><footer className="sheet__footer"><button className="button button--primary" onClick={onClose}>完成</button></footer></section></div>
 }
 
 function SshImportSheet({ drafts, servers, onClose, onImport }: { drafts: ServerDraft[]; servers: Server[]; onClose: () => void; onImport: (drafts: ServerDraft[]) => Promise<void> }) {

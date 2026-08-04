@@ -5,6 +5,7 @@ umask 077
 state_dir="$HOME/.racktop"
 pid_file="$state_dir/.daemon.pid"
 collector="$state_dir/.collector.sh"
+heartbeat="$state_dir/.client-heartbeat"
 mkdir -p "$state_dir"
 
 if [ -r "$pid_file" ]; then
@@ -17,6 +18,11 @@ cleanup() { rm -f "$pid_file"; }
 trap cleanup EXIT HUP INT TERM
 
 while :; do
-  "$collector" || true
+  now="$(date +%s)"
+  heartbeat_time="$(stat -c %Y "$heartbeat" 2>/dev/null || stat -f %m "$heartbeat" 2>/dev/null || printf 0)"
+  case "$heartbeat_time" in *[!0-9]*|'') heartbeat_time=0 ;; esac
+  if [ $((now - heartbeat_time)) -gt 90 ]; then
+    "$collector" || true
+  fi
   sleep 60
 done

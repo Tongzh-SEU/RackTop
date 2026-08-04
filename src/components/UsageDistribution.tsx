@@ -26,6 +26,6 @@ export function UsageDistribution({ snapshot, data }: { snapshot: Snapshot; data
   const memoryCapacity = data.coverageGpuSeconds * averageGpuMemoryMb
   const active = slices(data.users.map((user) => ({ name: user.username, value: user.activeSeconds })), data.coverageGpuSeconds)
   const memory = slices(data.users.map((user) => ({ name: user.username, value: user.memoryMbSeconds })), memoryCapacity)
-  if (!data.coverageGpuSeconds) return <div className="usage-empty"><Database size={24} /><strong>还没有使用分布数据</strong><p>{snapshot.gpus.length ? '启用远端持续保存后，首次同步到用户级 GPU 时间桶时会在这里显示。' : '当前服务器没有可用 GPU。'}</p></div>
+  if (!data.coverageGpuSeconds) return <div className="usage-empty"><Database size={24} /><strong>还没有使用分布数据</strong><p>{snapshot.gpus.length ? 'RackTop 在线采样约一分钟后会在这里显示；未启用远端保存时，App 离线期间保持为缺失。' : '当前服务器没有可用 GPU。'}</p></div>
   return <><div className="usage-coverage"><Database size={15} /><span>已覆盖 <strong>{data.coveredDays} / {data.requestedDays} 天</strong></span>{data.coveredDays < data.requestedDays && <small>缺失时段未按零使用补齐</small>}</div><div className="usage-waffle-list"><Waffle title="使用时间" subtitle="用户活跃时间 / GPU 数量 × 已覆盖时间" icon={<Clock3 />} data={active} /><Waffle title="显存占用" subtitle="显存积分 / 总显存 × 已覆盖时间" icon={<MemoryStick />} data={memory} /></div></>
 }

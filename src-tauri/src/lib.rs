@@ -65,6 +65,9 @@ async fn collect_server(database: State<'_, Database>, server_id: String, includ
             if record_history {
                 database.save_snapshot(&snapshot)?;
             }
+            if snapshot.processes_sampled {
+                database.save_local_usage(&snapshot)?;
+            }
             Ok(snapshot)
         }
         Err(error) => Err(error),
@@ -220,6 +223,7 @@ fn update_tray_summary(app: AppHandle, waiting: usize, current: usize, pending: 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let app_data = app.path().app_data_dir().map_err(|error| Box::<dyn std::error::Error>::from(error))?;
             let database = Database::open(&app_data.join("racktop.sqlite")).map_err(|error| Box::<dyn std::error::Error>::from(std::io::Error::other(error)))?;
