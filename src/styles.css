@@ -408,6 +408,8 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .process-blocks { display: grid; min-width: 0; gap: 14px; }
 .process-blocks--compact { grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .process-block__header svg { width: 17px; height: 17px; }
+.process-block__terminating { display: inline-flex; align-items: center; gap: 7px; min-height: 28px; margin-left: auto; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--red) 28%, var(--border)); border-radius: 6px; color: var(--red); background: color-mix(in srgb, var(--red) 7%, transparent); font-size: 9px; font-weight: 600; white-space: nowrap; }
+.process-block__terminating svg { width: 15px; height: 15px; }
 .process-block__more { margin: 0; padding: 9px 12px; border-top: 1px solid var(--border); color: var(--text-tertiary); background: var(--surface-subtle); font-size: 9px; }
 .process-block__empty { min-height: 132px; padding: 28px; }
 .table-scroll { overflow: auto; }

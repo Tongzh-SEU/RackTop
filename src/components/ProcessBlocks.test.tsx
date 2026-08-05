@@ -42,6 +42,8 @@ describe('ProcessBlocks', () => {
     expect(markup).toContain('aria-label="正在结束 PID 21312"')
     expect(markup).toContain('process-terminate-button is-terminating')
     expect(markup).toContain('class="lucide lucide-loader-circle spin"')
+    expect(markup).toContain('process-block__terminating')
+    expect(markup).toContain('正在结束 PID 21312')
   })
 
   it('hides empty process kinds when requested', () => {
