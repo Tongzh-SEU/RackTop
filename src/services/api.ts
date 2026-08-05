@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogEntry, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
+import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
 import { clampPercent, gpuMemoryPercent } from '../utils/gpu'
 
 const isTauri = '__TAURI_INTERNALS__' in window
@@ -139,7 +139,7 @@ const a100Snapshot: Snapshot = {
 let browserServers = [...demoServers]
 let browserSettings = { ...defaultSettings }
 let browserReservations: IdleReservation[] = []
-let browserInteractionLogs: InteractionLogEntry[] = []
+const browserInteractionSummary: InteractionLogSummary = { sentBytes: 0, responseBytes: 0, storedBytes: 0, localStorageBytes: 36.3 * 1024 ** 2, failureCount: 0, servers: [] }
 
 function rollingHistory(snapshot: Snapshot): HistoryPoint[] {
   const historyNow = Math.floor(Date.now() / 1000)
@@ -208,17 +208,25 @@ export const api = {
     if (isTauri) return invoke('collect_server', { serverId, includeProcesses, includeDisks, recordHistory })
     const server = browserServers.find((item) => item.id === serverId)
     const remoteCommand = `RACKTOP_INCLUDE_PROCESSES=${includeProcesses ? 1 : 0} RACKTOP_INCLUDE_DISKS=${includeDisks ? 1 : 0}; export LANG=C LC_ALL=C; printf '__RACKTOP_USER__\\n'; id -un; printf '__RACKTOP_HOST__\\n'; hostname; head -n 1 /proc/stat; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo; nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits; ps -eo user=,uid=,pid=,ppid=,pgid=,pcpu=,pmem=,rss=,etime=,args= --sort=-pcpu`
-    const entry: InteractionLogEntry = { id: Date.now() + Math.random(), serverId, serverName: server?.name ?? serverId, startedAt: Date.now(), finishedAt: null, command: `ssh -o BatchMode=yes ${server?.username ?? 'user'}@${server?.host ?? 'host'} '${remoteCommand}'`, responseBytes: 0, storedBytes: 0, status: 'running' }
-    browserInteractionLogs = [entry, ...browserInteractionLogs].slice(0, 200)
+    const command = `ssh -o BatchMode=yes ${server?.username ?? 'user'}@${server?.host ?? 'host'} '${remoteCommand}'`
+    const sentBytes = new TextEncoder().encode(command).length
+    const startedAt = Date.now()
+    let entry: InteractionServerSummary = browserInteractionSummary.servers.find((item) => item.serverId === serverId) ?? { serverId, serverName: server?.name ?? serverId, sentBytes: 0, responseBytes: 0, storedBytes: 0, lastStartedAt: startedAt, lastFinishedAt: null, lastCommand: command, status: 'running' }
+    entry = { ...entry, serverName: server?.name ?? serverId, sentBytes: entry.sentBytes + sentBytes, lastStartedAt: startedAt, lastFinishedAt: null, lastCommand: command, status: 'running', error: null }
+    browserInteractionSummary.sentBytes += sentBytes
+    browserInteractionSummary.servers = [...browserInteractionSummary.servers.filter((item) => item.serverId !== serverId), entry].sort((left, right) => left.serverName.localeCompare(right.serverName, 'zh-CN'))
     await new Promise((resolve) => setTimeout(resolve, 450))
     const source = serverId === 'demo-132' ? a100Snapshot : demoSnapshot
     const snapshot = { ...source, serverId, timestamp: Math.floor(Date.now() / 1000), processesSampled: includeProcesses, disks: includeDisks ? source.disks : [] }
     const responseBytes = new TextEncoder().encode(JSON.stringify(snapshot)).length
-    browserInteractionLogs = browserInteractionLogs.map((item) => item.id === entry.id ? { ...item, finishedAt: Date.now(), responseBytes, storedBytes: recordHistory ? responseBytes : 0, status: 'success' } : item)
+    const storedBytes = recordHistory ? responseBytes : 0
+    browserInteractionSummary.responseBytes += responseBytes
+    browserInteractionSummary.storedBytes += storedBytes
+    browserInteractionSummary.servers = browserInteractionSummary.servers.map((item) => item.serverId === serverId ? { ...item, lastFinishedAt: Date.now(), responseBytes: item.responseBytes + responseBytes, storedBytes: item.storedBytes + storedBytes, status: 'success' } : item)
     return snapshot
   },
-  async listInteractionLogs(): Promise<InteractionLogEntry[]> {
-    return isTauri ? invoke('list_interaction_logs') : browserInteractionLogs
+  async getInteractionLogSummary(): Promise<InteractionLogSummary> {
+    return isTauri ? invoke('get_interaction_log_summary') : { ...browserInteractionSummary, servers: browserInteractionSummary.servers.map((item) => ({ ...item })) }
   },
   async getHistory(serverId: string, fromTimestamp: number): Promise<HistoryPoint[]> {
     if (isTauri) return invoke('get_history', { serverId, fromTimestamp })

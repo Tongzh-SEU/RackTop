@@ -52,7 +52,7 @@ import {
 } from 'lucide-react'
 import { api } from './services/api'
 import { openExternalUrl } from './services/external'
-import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogEntry, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
+import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
 import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
@@ -70,6 +70,7 @@ import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservati
 import { canOfferNvidiaDriverInstall, displayedNvidiaServerStatus, loadIgnoredNvidiaWarningIds, nvidiaIssueGuidance, nvidiaIssueTitle, saveIgnoredNvidiaWarningIds } from './utils/nvidiaStatus'
 import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
 import { deriveGpuMemoryStallWarnings } from './utils/gpuMemoryWarnings'
+import { acquiredDataItems, interactionDurationSeconds, interactionVisualStatus } from './utils/activityLog'
 import { duplicateImportIndexes } from './utils/serverIdentity'
 import { previewServerOrder, serverDropTarget, type ServerDropPlacement } from './utils/serverOrder'
 import authorAvatar from './assets/tongzh-seu.png'
@@ -939,7 +940,7 @@ function App() {
         <div className="sidebar__footer">
           <button onClick={() => { setEditingServer(null); setShowServerForm(true) }}><Plus size={16} />添加服务器</button>
           <button onClick={importConfig} disabled={importingConfig}><Download size={16} />{importingConfig ? '正在读取 SSH Config…' : '导入 SSH Config'}</button>
-          <button onClick={() => setShowActivityLog(true)}><ScrollText size={16} />交互日志</button>
+          <button onClick={() => setShowActivityLog(true)}><ScrollText size={16} />日志</button>
           <button onClick={() => setShowSettings(true)}><Settings size={16} />设置</button>
         </div>
       </aside>
@@ -969,7 +970,7 @@ function App() {
           {servers.length === 0 ? (
             <EmptyState onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
           ) : mainView === 'idle' ? (
-            <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} currentReservation={currentIdleReservation} onFiltersChange={setIdleFilters} onReserve={() => setReservationEditor({ filters: { ...idleFilters }, reservation: currentIdleReservation })} sortRevision={manualRefreshRevision} onSelect={(serverId, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu'); setMainView('server') }} onQuickTerminal={(server, gpu) => setQuickTerminal({ server, gpu })} onReserveGpu={(server, gpu) => setReservationEditor({ filters: { ...idleFilters, duration: 0, targetServerId: server.id, targetGpuUuid: gpu.uuid } })} />
+            <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} currentReservation={currentIdleReservation} onFiltersChange={setIdleFilters} onReserve={() => setReservationEditor({ filters: { ...idleFilters }, reservation: currentIdleReservation })} sortRevision={manualRefreshRevision} onSelect={(serverId) => { setSelectedServerId(serverId); setSelectedGpuUuid(null); setSelectedTab('overview'); setMainView('server') }} onQuickTerminal={(server, gpu) => setQuickTerminal({ server, gpu })} onReserveGpu={(server, gpu) => setReservationEditor({ filters: { ...idleFilters, duration: 0, targetServerId: server.id, targetGpuUuid: gpu.uuid } })} />
           ) : mainView === 'mine' ? (
             <MineProcessView servers={servers} snapshots={snapshots} warnings={mineProcessWarnings} onRequestTerminate={(serverId, target) => { const server = servers.find((item) => item.id === serverId); if (server) setProcessPendingTermination({ serverId, serverName: server.name, ...target }) }} />
           ) : mainView === 'fleet' ? (
@@ -1002,7 +1003,7 @@ function App() {
 
       {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultSamplingInterval={settings?.defaultSamplingIntervalSeconds} defaultHistoryRetentionDays={settings?.historyRetentionDays} defaultRemoteHistoryEnabled showGuide={settings?.showAddServerGuide ?? true} onGuideDismiss={() => { if (settings) void api.saveSettings({ ...settings, showAddServerGuide: false }).then(setSettings) }} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
       {showSettings && settings && <SettingsSheet settings={settings} onClose={() => setShowSettings(false)} onSave={async (value) => { setSettings(await api.saveSettings(value)); setShowSettings(false); setToast('设置已保存') }} />}
-      {showActivityLog && <ActivityLogSheet onClose={() => setShowActivityLog(false)} />}
+      {showActivityLog && <ActivityLogSheet servers={servers} snapshots={snapshots} onClose={() => setShowActivityLog(false)} />}
       {showAbout && <AboutSheet onClose={() => setShowAbout(false)} onNotice={setToast} />}
       {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setImportDrafts(null); setToast(`已导入 ${selected.length} 台服务器`) }} />}
       {pendingHostKey && <HostKeyDialog info={pendingHostKey} onClose={() => setPendingHostKey(null)} onTrust={async () => { const serverId = pendingHostKey.serverId; await api.trustHostKey(pendingHostKey); setPendingHostKey(null); setToast('已信任服务器指纹'); await refreshServer(serverId) }} />}
@@ -1598,32 +1599,55 @@ function SettingsSheet({ settings, onClose, onSave }: { settings: AppSettings; o
   </div>
 }
 
-function ActivityLogSheet({ onClose }: { onClose: () => void }) {
-  const [entries, setEntries] = useState<InteractionLogEntry[]>([])
+function ActivityLogSheet({ servers, snapshots, onClose }: { servers: Server[]; snapshots: Record<string, Snapshot>; onClose: () => void }) {
+  const [summary, setSummary] = useState<InteractionLogSummary>({ sentBytes: 0, responseBytes: 0, storedBytes: 0, localStorageBytes: 0, failureCount: 0, servers: [] })
   const [error, setError] = useState<string | null>(null)
+  const [now, setNow] = useState(Date.now())
   useEffect(() => {
     let active = true
     const refresh = async () => {
       try {
-        const next = await api.listInteractionLogs()
-        if (active) { setEntries(next); setError(null) }
+        const next = await api.getInteractionLogSummary()
+        if (active) { setSummary(next); setNow(Date.now()); setError(null) }
       } catch (reason) {
         if (active) setError(String(reason))
       }
     }
     void refresh()
-    const timer = window.setInterval(() => void refresh(), 750)
+    const timer = window.setInterval(() => void refresh(), 1_000)
     return () => { active = false; window.clearInterval(timer) }
   }, [])
+  const serverById = useMemo(() => new Map(servers.map((server) => [server.id, server])), [servers])
   return <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <section className="sheet activity-log-sheet" role="dialog" aria-modal="true" aria-labelledby="activity-log-title">
-      <header className="sheet__header"><div><p className="eyebrow">仅当前运行周期 · 实时刷新</p><h2 id="activity-log-title">服务器交互日志</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
-      <div className="activity-log-list">
-        {error && <p className="form-error" role="alert">无法读取实时日志：{error}</p>}
-        {entries.map((entry) => <article className={`activity-log-entry activity-log-entry--${entry.status}`} key={entry.id}><header><span className="activity-log-entry__state" aria-hidden="true" /><div><strong>{entry.serverName}</strong><time>{new Date(entry.startedAt).toLocaleTimeString('zh-CN', { hour12: false })}</time></div><dl><div><dt>返回</dt><dd>{formatDataBytes(entry.responseBytes)}</dd></div><div><dt>保存</dt><dd>{formatDataBytes(entry.storedBytes)}</dd></div></dl><span className="activity-log-entry__status">{entry.status === 'running' ? '执行中' : entry.status === 'success' ? '完成' : '失败'}</span></header><pre><code>{entry.command}</code></pre>{entry.error && <p>{entry.error}</p>}</article>)}
-        {!error && entries.length === 0 && <div className="activity-log-empty-state"><ScrollText size={24} /><strong>等待服务器交互</strong><p>保持此窗口打开即可实时查看 RackTop 发出的 SSH 命令和数据量。</p></div>}
+      <header className="sheet__header"><div><p className="eyebrow">当前运行周期 · 退出 App 后清空</p><h2 id="activity-log-title">日志</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
+      <div className="activity-log-body">
+        <dl className="activity-log-totals" aria-label="当前运行周期数据总量">
+          <div><dt>发送数据</dt><dd>{formatDataBytes(summary.sentBytes)}</dd></div>
+          <div><dt>接收数据</dt><dd>{formatDataBytes(summary.responseBytes)}</dd></div>
+          <div><dt>本次逻辑写入</dt><dd>{formatDataBytes(summary.storedBytes)}</dd></div>
+          <div><dt>本地历史占用</dt><dd>{formatDataBytes(summary.localStorageBytes)}</dd></div>
+          <div><dt>失败</dt><dd>{summary.failureCount}</dd></div>
+        </dl>
+        {error && <p className="form-error activity-log-error" role="alert">无法读取实时日志：{error}</p>}
+        <div className="activity-log-servers">
+          {summary.servers.map((entry) => {
+            const visualStatus = interactionVisualStatus(entry.status, entry.lastStartedAt, now)
+            const dataItems = acquiredDataItems(serverById.get(entry.serverId), snapshots[entry.serverId])
+            const latestTime = entry.lastFinishedAt ?? entry.lastStartedAt
+            const latestLabel = Math.max(0, now - latestTime) < 5_000 ? '刚刚' : new Date(latestTime).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+            return <article className={`activity-log-server activity-log-server--${visualStatus}`} key={entry.serverId}>
+              <header className="activity-log-server__header"><strong>{entry.serverName}</strong><span>{visualStatus === 'running' ? '处理中' : visualStatus === 'error' ? '失败' : '正常'}</span></header>
+              <p className="activity-log-server__traffic"><span>最后交互：{latestLabel}</span><span>发送 {formatDataBytes(entry.sentBytes)}</span><span>接收 {formatDataBytes(entry.responseBytes)}</span><span>本次写入 {formatDataBytes(entry.storedBytes)}</span></p>
+              <div className="activity-log-data"><h3>获得的数据</h3><dl>{dataItems.map((item) => <div key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl></div>
+              <details className="activity-log-command"><summary><span>最近命令</span><time>{latestLabel} · 耗时 {interactionDurationSeconds(entry.lastStartedAt, entry.lastFinishedAt, now).toFixed(2)} 秒</time><em>展开</em></summary><pre><code>{entry.lastCommand}</code></pre></details>
+              {entry.error && <p className="activity-log-server__error">{entry.error}</p>}
+            </article>
+          })}
+          {!error && summary.servers.length === 0 && <div className="activity-log-empty-state"><ScrollText size={24} /><strong>等待首次服务器交互</strong><p>发送、接收和本地写入数据会在这里按服务器汇总。</p></div>}
+        </div>
       </div>
-      <footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>完成</button></footer>
+      <footer className="sheet__footer"><span>日志仅保存在内存中，不写入历史数据库。</span><button className="button button--secondary" onClick={onClose}>关闭</button></footer>
     </section>
   </div>
 }

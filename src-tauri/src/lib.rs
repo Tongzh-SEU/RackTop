@@ -6,8 +6,8 @@ mod ssh_config;
 pub mod storage;
 mod terminal;
 
-use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogEntry, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
-use std::collections::VecDeque;
+use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,7 +18,30 @@ use tauri::{image::Image, menu::{Menu, MenuBuilder, MenuItemBuilder}, tray::Tray
 #[derive(Default)]
 struct InteractionLogStore {
     next_id: AtomicU64,
-    entries: Mutex<VecDeque<InteractionLogEntry>>,
+    state: Mutex<InteractionLogState>,
+}
+
+#[derive(Default)]
+struct InteractionLogState {
+    sent_bytes: u64,
+    response_bytes: u64,
+    stored_bytes: u64,
+    failure_count: u64,
+    servers: HashMap<String, InteractionServerState>,
+    interactions: HashMap<u64, String>,
+}
+
+struct InteractionServerState {
+    id: u64,
+    server_name: String,
+    sent_bytes: u64,
+    response_bytes: u64,
+    stored_bytes: u64,
+    last_started_at: i64,
+    last_finished_at: Option<i64>,
+    last_command: String,
+    status: String,
+    error: Option<String>,
 }
 
 impl InteractionLogStore {
@@ -28,33 +51,131 @@ impl InteractionLogStore {
 
     fn begin(&self, server: &Server, command: String) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        if let Ok(mut entries) = self.entries.lock() {
-            entries.push_front(InteractionLogEntry { id, server_id: server.id.clone(), server_name: server.name.clone(), started_at: Self::now_millis(), finished_at: None, command, response_bytes: 0, stored_bytes: 0, status: "running".into(), error: None });
-            entries.truncate(200);
+        let sent_bytes = command.len() as u64;
+        if let Ok(mut state) = self.state.lock() {
+            state.sent_bytes = state.sent_bytes.saturating_add(sent_bytes);
+            state.interactions.insert(id, server.id.clone());
+            let entry = state.servers.entry(server.id.clone()).or_insert_with(|| InteractionServerState {
+                id,
+                server_name: server.name.clone(),
+                sent_bytes: 0,
+                response_bytes: 0,
+                stored_bytes: 0,
+                last_started_at: 0,
+                last_finished_at: None,
+                last_command: String::new(),
+                status: "success".into(),
+                error: None,
+            });
+            entry.id = id;
+            entry.server_name = server.name.clone();
+            entry.sent_bytes = entry.sent_bytes.saturating_add(sent_bytes);
+            entry.last_started_at = Self::now_millis();
+            entry.last_finished_at = None;
+            entry.last_command = command;
+            entry.status = "running".into();
+            entry.error = None;
         }
         id
     }
 
     fn finish(&self, id: u64, response_bytes: u64, stored_bytes: u64, error: Option<String>) {
-        if let Ok(mut entries) = self.entries.lock() {
-            if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
-                entry.finished_at = Some(Self::now_millis());
-                entry.response_bytes = response_bytes;
-                entry.stored_bytes = stored_bytes;
-                entry.status = if error.is_some() { "error".into() } else { "success".into() };
-                entry.error = error;
+        if let Ok(mut state) = self.state.lock() {
+            state.response_bytes = state.response_bytes.saturating_add(response_bytes);
+            state.stored_bytes = state.stored_bytes.saturating_add(stored_bytes);
+            if error.is_some() {
+                state.failure_count = state.failure_count.saturating_add(1);
+            }
+            if let Some(server_id) = state.interactions.remove(&id)
+                && let Some(entry) = state.servers.get_mut(&server_id)
+            {
+                entry.response_bytes = entry.response_bytes.saturating_add(response_bytes);
+                entry.stored_bytes = entry.stored_bytes.saturating_add(stored_bytes);
+                if entry.id == id {
+                    entry.last_finished_at = Some(Self::now_millis());
+                    entry.status = if error.is_some() { "error".into() } else { "success".into() };
+                    entry.error = error;
+                }
             }
         }
     }
 
-    fn list(&self) -> Result<Vec<InteractionLogEntry>, String> {
-        self.entries.lock().map(|entries| entries.iter().cloned().collect()).map_err(|error| error.to_string())
+    fn summary(&self, local_storage_bytes: u64) -> Result<InteractionLogSummary, String> {
+        let state = self.state.lock().map_err(|error| error.to_string())?;
+        let mut servers: Vec<_> = state.servers.iter().map(|(server_id, entry)| InteractionServerSummary {
+            server_id: server_id.clone(),
+            server_name: entry.server_name.clone(),
+            sent_bytes: entry.sent_bytes,
+            response_bytes: entry.response_bytes,
+            stored_bytes: entry.stored_bytes,
+            last_started_at: entry.last_started_at,
+            last_finished_at: entry.last_finished_at,
+            last_command: entry.last_command.clone(),
+            status: entry.status.clone(),
+            error: entry.error.clone(),
+        }).collect();
+        servers.sort_by(|left, right| left.server_name.cmp(&right.server_name));
+        Ok(InteractionLogSummary { sent_bytes: state.sent_bytes, response_bytes: state.response_bytes, stored_bytes: state.stored_bytes, local_storage_bytes, failure_count: state.failure_count, servers })
+    }
+}
+
+#[cfg(test)]
+mod interaction_log_tests {
+    use super::*;
+
+    fn server(id: &str, name: &str) -> Server {
+        Server {
+            id: id.into(), name: name.into(), location: None, host: "10.0.0.1".into(), port: 22,
+            username: "test".into(), ssh_alias: None, identity_file: None, proxy_jump: None, tags: vec![],
+            sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
+            remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(),
+            status: "online".into(), last_error: None, last_seen_at: None,
+        }
+    }
+
+    #[test]
+    fn aggregates_session_traffic_and_latest_state_per_server() {
+        let logs = InteractionLogStore::default();
+        let first = server("a", "Alpha");
+        let second = server("b", "Beta");
+        let first_id = logs.begin(&first, "abc".into());
+        logs.finish(first_id, 20, 7, None);
+        let second_id = logs.begin(&second, "hello".into());
+        logs.finish(second_id, 4, 0, Some("offline".into()));
+
+        let summary = logs.summary(512).unwrap();
+        assert_eq!(summary.sent_bytes, 8);
+        assert_eq!(summary.response_bytes, 24);
+        assert_eq!(summary.stored_bytes, 7);
+        assert_eq!(summary.local_storage_bytes, 512);
+        assert_eq!(summary.failure_count, 1);
+        assert_eq!(summary.servers.len(), 2);
+        assert_eq!(summary.servers[0].server_name, "Alpha");
+        assert_eq!(summary.servers[1].status, "error");
+    }
+
+    #[test]
+    fn overlapping_interactions_keep_all_bytes_without_overwriting_newer_state() {
+        let logs = InteractionLogStore::default();
+        let target = server("a", "Alpha");
+        let old_id = logs.begin(&target, "old".into());
+        let new_id = logs.begin(&target, "new".into());
+        logs.finish(old_id, 11, 3, Some("old failure".into()));
+        assert_eq!(logs.summary(0).unwrap().servers[0].status, "running");
+        logs.finish(new_id, 7, 2, None);
+
+        let summary = logs.summary(0).unwrap();
+        assert_eq!(summary.response_bytes, 18);
+        assert_eq!(summary.stored_bytes, 5);
+        assert_eq!(summary.failure_count, 1);
+        assert_eq!(summary.servers[0].response_bytes, 18);
+        assert_eq!(summary.servers[0].status, "success");
     }
 }
 
 #[tauri::command]
-fn list_interaction_logs(logs: State<'_, InteractionLogStore>) -> Result<Vec<InteractionLogEntry>, String> {
-    logs.list()
+fn get_interaction_log_summary(database: State<'_, Database>, logs: State<'_, InteractionLogStore>) -> Result<InteractionLogSummary, String> {
+    logs.summary(database.storage_size_bytes())
 }
 
 #[tauri::command]
@@ -362,7 +483,7 @@ pub fn run() {
                 .build(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, list_interaction_logs, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }

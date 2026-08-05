@@ -70,17 +70,28 @@ pub struct RemoteCleanupSweepResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InteractionLogEntry {
-    pub id: u64,
+pub struct InteractionServerSummary {
     pub server_id: String,
     pub server_name: String,
-    pub started_at: i64,
-    pub finished_at: Option<i64>,
-    pub command: String,
+    pub sent_bytes: u64,
     pub response_bytes: u64,
     pub stored_bytes: u64,
+    pub last_started_at: i64,
+    pub last_finished_at: Option<i64>,
+    pub last_command: String,
     pub status: String,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionLogSummary {
+    pub sent_bytes: u64,
+    pub response_bytes: u64,
+    pub stored_bytes: u64,
+    pub local_storage_bytes: u64,
+    pub failure_count: u64,
+    pub servers: Vec<InteractionServerSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
