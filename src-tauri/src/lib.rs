@@ -6,7 +6,7 @@ mod ssh_config;
 mod storage;
 mod terminal;
 
-use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
+use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::Database;
@@ -24,8 +24,21 @@ fn save_server(database: State<'_, Database>, draft: ServerDraft) -> Result<Serv
 }
 
 #[tauri::command]
-fn delete_server(database: State<'_, Database>, server_id: String) -> Result<(), String> {
-    database.delete_server(&server_id)
+async fn delete_server(database: State<'_, Database>, server_id: String) -> Result<RemoteCleanupResult, String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
+    match remote_history::remove(&server, password.as_deref()).await {
+        Ok(()) => {
+            database.delete_server(&server_id)?;
+            Ok(RemoteCleanupResult { remote_cleaned: true, cleanup_pending: false, message: format!("已删除“{}”及其本地与远端 RackTop 数据", server.name) })
+        }
+        Err(error) => {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|reason| reason.to_string())?.as_secs() as i64;
+            database.enqueue_remote_cleanup(&server, now, &error)?;
+            database.delete_server_record(&server_id, false)?;
+            Ok(RemoteCleanupResult { remote_cleaned: false, cleanup_pending: true, message: format!("已删除“{}”的本地记录；远端清理将在重新连接后自动重试 24 小时", server.name) })
+        }
+    }
 }
 
 #[tauri::command]
@@ -118,6 +131,31 @@ async fn sync_remote_history(database: State<'_, Database>, server_id: String) -
     let imported_count = database.import_remote_history(&server_id, &points)?;
     let usage_imported = database.import_remote_usage(&server_id, &usage_points, now)?;
     Ok(RemoteHistorySyncResult { imported_count: imported_count + usage_imported, latest_timestamp })
+}
+
+#[tauri::command]
+async fn retry_remote_cleanups(database: State<'_, Database>) -> Result<RemoteCleanupSweepResult, String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
+    let mut result = RemoteCleanupSweepResult { cleaned_names: Vec::new(), pending_names: Vec::new(), expired_names: Vec::new() };
+    for task in database.list_remote_cleanup_tasks()? {
+        if task.expires_at <= now {
+            database.finish_remote_cleanup(&task.server.id)?;
+            result.expired_names.push(task.server.name);
+            continue;
+        }
+        let password = if task.server.auth_method == "password" { database.get_password(&task.server.id)? } else { None };
+        match remote_history::remove(&task.server, password.as_deref()).await {
+            Ok(()) => {
+                database.finish_remote_cleanup(&task.server.id)?;
+                result.cleaned_names.push(task.server.name);
+            }
+            Err(error) => {
+                database.update_remote_cleanup_error(&task.server.id, &error)?;
+                result.pending_names.push(task.server.name);
+            }
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -252,7 +290,7 @@ pub fn run() {
                 .build(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }

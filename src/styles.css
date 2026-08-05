@@ -323,6 +323,21 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .history-heatmap .is-level-5 { background: color-mix(in srgb, var(--heat-color) 92%, var(--surface)); }
 .history-heatmap__legend { display: flex; align-items: center; justify-content: flex-end; gap: 4px; margin-top: 8px; color: var(--text-tertiary); font-size: 8px; }
 .history-heatmap__legend i { display: block; width: 9px; height: 9px; border: 1px solid color-mix(in srgb, var(--border) 70%, transparent); border-radius: 2px; background: var(--surface-muted); }
+.history-view-stack { display: grid; gap: 10px; }
+.storage-waffle-panel { min-width: 0; padding: 14px 15px 13px; }
+.storage-waffle-panel .history-heatmap__header { margin-bottom: 12px; }
+.storage-waffle__icon { color: var(--blue) !important; background: color-mix(in srgb, var(--blue) 8%, var(--surface-subtle)) !important; }
+.storage-waffle-list { display: grid; gap: 14px; }
+.storage-waffle-row { min-width: 0; }
+.storage-waffle-row__mount { display: block; overflow: hidden; margin-bottom: 6px; color: var(--text-secondary); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.storage-waffle-grid { display: grid; grid-template-columns: repeat(50, minmax(0, 1fr)); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: 3px; width: 100%; }
+.storage-waffle-grid i { display: block; aspect-ratio: 1; min-width: 0; border: 1px solid color-mix(in srgb, var(--border) 65%, transparent); border-radius: 2px; background: var(--surface-muted); }
+.storage-waffle-grid i.is-used { border-color: color-mix(in srgb, var(--blue) 20%, var(--border)); background: color-mix(in srgb, var(--blue) 55%, var(--surface)); }
+.storage-waffle-row__footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 7px; color: var(--text-tertiary); font-size: 9px; font-variant-numeric: tabular-nums; }
+.storage-waffle-row__footer span { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.storage-waffle-row__footer i { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 2px; background: color-mix(in srgb, var(--blue) 55%, var(--surface)); }
+.storage-waffle-row__footer strong { color: var(--text-secondary); font-weight: 600; }
+.storage-waffle__empty { margin: 0; padding: 20px 0 8px; color: var(--text-tertiary); font-size: 10px; }
 .history-heatmap__legend small { margin-left: 8px; font-size: 8px; }
 .resource-bars { display: grid; gap: 10px; padding: 16px; }
 .system-resource-panel { overflow: hidden; }.system-resource-panel > .panel__header { padding: 16px 16px 0; }

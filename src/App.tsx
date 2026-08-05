@@ -224,6 +224,7 @@ function App() {
   const lastHistoryRecordedAt = useRef<Record<string, number>>({})
   const remoteHistoryServersRef = useRef<Server[]>([])
   const remoteSyncInFlight = useRef(new Set<string>())
+  const remoteCleanupNoticeKeys = useRef(new Set<string>())
   const nextRetryAt = useRef<Record<string, number>>({})
   const inFlightServers = useRef(new Set<string>())
   const deletedServerIds = useRef(new Set<string>())
@@ -340,6 +341,34 @@ function App() {
       setIdleReservations(loadedReservations)
       setSelectedServerId((current) => current ?? loadedServers[0]?.id ?? null)
     })
+  }, [])
+
+  useEffect(() => {
+    if (!api.isDesktop) return
+    let cancelled = false
+    const retryRemoteCleanups = async () => {
+      try {
+        const result = await api.retryRemoteCleanups()
+        if (cancelled) return
+        if (result.pendingNames.length > 0 && !remoteCleanupNoticeKeys.current.has('pending')) {
+          remoteCleanupNoticeKeys.current.add('pending')
+          const names = result.pendingNames.join('、')
+          void api.notify(`${names} 远端清理等待重连`, '已从服务器列表移除；RackTop 将在 24 小时内继续自动重试。')
+          setToast(`${names} 的远端数据清理等待重连，自动重试最多 24 小时`)
+        }
+        if (result.expiredNames.length > 0 && !remoteCleanupNoticeKeys.current.has('expired')) {
+          remoteCleanupNoticeKeys.current.add('expired')
+          const names = result.expiredNames.join('、')
+          void api.notify(`${names} 远端数据需要手动清理`, `自动清理已超过 24 小时。请 SSH 登录后执行：if [ -f ~/.racktop/.daemon.pid ]; then kill "$(cat ~/.racktop/.daemon.pid)" 2>/dev/null || true; fi; rm -rf -- ~/.racktop`)
+          setToast(`${names} 的远端自动清理已超过 24 小时，请查看系统通知并手动清理`)
+        }
+      } catch (error) {
+        if (!cancelled) setToast(`远端删除任务检查失败：${String(error)}`)
+      }
+    }
+    void retryRemoteCleanups()
+    const interval = window.setInterval(() => void retryRemoteCleanups(), 5 * 60 * 1000)
+    return () => { cancelled = true; window.clearInterval(interval) }
   }, [])
 
   useEffect(() => {
@@ -598,7 +627,7 @@ function App() {
   async function removeServer(server: Server) {
     deletedServerIds.current.add(server.id)
     try {
-      await api.deleteServer(server.id)
+      const deletion = await api.deleteServer(server.id)
       const nextSelectedId = servers.find((item) => item.id !== server.id)?.id ?? null
       setServers((current) => current.filter((item) => item.id !== server.id))
       setSelectedServerId((current) => current === server.id ? nextSelectedId : current)
@@ -621,7 +650,10 @@ function App() {
       for (const key of Object.keys(conditionSince.current)) if (key.includes(`:${server.id}:`)) delete conditionSince.current[key]
       for (const key of notifiedConditions.current) if (key.includes(`:${server.id}:`) || key === `offline:${server.id}`) notifiedConditions.current.delete(key)
       setServerPendingDelete(null)
-      setToast(`已删除“${server.name}”及其本地历史数据`)
+      setToast(deletion.message)
+      if (deletion.cleanupPending) {
+        void api.notify(`${server.name} 远端清理等待重连`, '本地记录已删除，远端数据会自动重试清理 24 小时；超过期限将通知手动清理方式。')
+      }
     } catch (error) {
       deletedServerIds.current.delete(server.id)
       throw error
@@ -1035,7 +1067,7 @@ function LogsView({ server, snapshot }: { server: Server; snapshot: Snapshot }) 
 }
 
 function ConnectionView({ server, onRefresh, onDelete, onEdit, isRefreshing }: { server: Server; onRefresh: () => void; onDelete: () => void; onEdit: () => void; isRefreshing: boolean }) {
-  return <div className="content-stack"><section className="panel connection-panel"><PanelHeader icon={<KeyRound />} title="SSH 连接" subtitle="认证信息仅在本机使用" /><dl className="definition-list"><div><dt>物理位置</dt><dd>{server.location || '未填写'}</dd></div><div><dt>连接地址</dt><dd className="mono">{server.username}@{server.host}:{server.port}</dd></div><div><dt>认证</dt><dd>{server.authMethod === 'sshAgent' ? 'SSH Agent / 默认密钥' : server.authMethod}</dd></div><div><dt>SSH Config</dt><dd>{server.sshAlias || '未使用别名'}</dd></div><div><dt>私钥</dt><dd className="mono">{server.identityFile || '由 OpenSSH 自动选择'}</dd></div><div><dt>ProxyJump</dt><dd className="mono">{server.proxyJump || '无'}</dd></div><div><dt>远端历史</dt><dd>{server.remoteHistoryEnabled ? `已启用 · ${server.remoteHistoryLastSyncAt ? `同步于 ${relativeTime(server.remoteHistoryLastSyncAt)}` : '等待首次同步'}` : '未启用'}</dd></div></dl><div className="panel__actions"><button className="button button--primary" onClick={onRefresh} disabled={isRefreshing}><RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />测试并重新连接</button><button className="button button--secondary" onClick={onEdit}><Settings size={16} />编辑配置</button></div></section><section className="panel danger-zone"><div><strong>删除服务器</strong><p>同时移除该服务器在本机保存的历史数据；远端采集任务和文件保持不变。</p></div><button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除</button></section></div>
+  return <div className="content-stack"><section className="panel connection-panel"><PanelHeader icon={<KeyRound />} title="SSH 连接" subtitle="认证信息仅在本机使用" /><dl className="definition-list"><div><dt>物理位置</dt><dd>{server.location || '未填写'}</dd></div><div><dt>连接地址</dt><dd className="mono">{server.username}@{server.host}:{server.port}</dd></div><div><dt>认证</dt><dd>{server.authMethod === 'sshAgent' ? 'SSH Agent / 默认密钥' : server.authMethod}</dd></div><div><dt>SSH Config</dt><dd>{server.sshAlias || '未使用别名'}</dd></div><div><dt>私钥</dt><dd className="mono">{server.identityFile || '由 OpenSSH 自动选择'}</dd></div><div><dt>ProxyJump</dt><dd className="mono">{server.proxyJump || '无'}</dd></div><div><dt>远端历史</dt><dd>{server.remoteHistoryEnabled ? `已启用 · ${server.remoteHistoryLastSyncAt ? `同步于 ${relativeTime(server.remoteHistoryLastSyncAt)}` : '等待首次同步'}` : '未启用'}</dd></div></dl><div className="panel__actions"><button className="button button--primary" onClick={onRefresh} disabled={isRefreshing}><RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />测试并重新连接</button><button className="button button--secondary" onClick={onEdit}><Settings size={16} />编辑配置</button></div></section><section className="panel danger-zone"><div><strong>删除服务器</strong><p>删除本机记录、历史数据、远端采集进程和服务器用户目录中的 RackTop 数据。</p></div><button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除</button></section></div>
 }
 
 function NvidiaWarning({ snapshot, onRefresh }: { snapshot: Snapshot; onRefresh: () => void }) {
@@ -1407,7 +1439,7 @@ function TerminateProcessDialog({ target, onClose, onTerminate }: { target: Proc
 function DeleteServerDialog({ server, onClose, onDelete }: { server: Server; onClose: () => void; onDelete: () => Promise<void> }) {
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  return <div className="scrim"><section className="sheet delete-server-sheet" role="alertdialog" aria-modal="true" aria-labelledby="delete-server-title"><header className="sheet__header"><div><p className="eyebrow">删除服务器</p><h2 id="delete-server-title">确认删除“{server.name}”？</h2></div><button className="icon-button" onClick={onClose} disabled={deleting} aria-label="关闭"><X size={18} /></button></header><div className="delete-server-body"><span className="delete-server-icon"><Trash2 size={24} /></span><div><p>将从 RackTop 移除 <strong>{server.username}@{server.host}:{server.port}</strong>，并删除这台服务器保存在本机的历史数据。</p><small>服务器本身及远程文件不会受到影响。</small></div>{error && <p className="form-error" role="alert">删除失败：{error}</p>}</div><footer className="sheet__footer"><button className="button button--secondary" onClick={onClose} disabled={deleting}>取消</button><button className="button button--danger" disabled={deleting} onClick={async () => { setDeleting(true); setError(null); try { await onDelete() } catch (reason) { setError(String(reason)); setDeleting(false) } }}>{deleting ? '删除中…' : '删除服务器'}</button></footer></section></div>
+  return <div className="scrim"><section className="sheet delete-server-sheet" role="alertdialog" aria-modal="true" aria-labelledby="delete-server-title"><header className="sheet__header"><div><p className="eyebrow">删除服务器</p><h2 id="delete-server-title">确认删除“{server.name}”？</h2></div><button className="icon-button" onClick={onClose} disabled={deleting} aria-label="关闭"><X size={18} /></button></header><div className="delete-server-body"><span className="delete-server-icon"><Trash2 size={24} /></span><div><p>将从 RackTop 移除 <strong>{server.username}@{server.host}:{server.port}</strong>，并删除本机历史、远端采集进程及 <code>~/.racktop</code> 中的 RackTop 数据。</p><small>服务器上的其他文件不会受到影响；远端暂时不可达时会在 24 小时内自动重试。</small></div>{error && <p className="form-error" role="alert">删除失败：{error}</p>}</div><footer className="sheet__footer"><button className="button button--secondary" onClick={onClose} disabled={deleting}>取消</button><button className="button button--danger" disabled={deleting} onClick={async () => { setDeleting(true); setError(null); try { await onDelete() } catch (reason) { setError(String(reason)); setDeleting(false) } }}>{deleting ? '删除中…' : '删除全部数据'}</button></footer></section></div>
 }
 
 function HostKeyDialog({ info, onClose, onTrust }: { info: HostKeyInfo; onClose: () => void; onTrust: () => Promise<void> }) {

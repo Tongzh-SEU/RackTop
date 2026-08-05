@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
+import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
 import { clampPercent, gpuMemoryPercent } from '../utils/gpu'
 
 const isTauri = '__TAURI_INTERNALS__' in window
@@ -82,6 +82,9 @@ const demoSnapshot: Snapshot = {
     { index: 0, uuid: 'GPU-9e1c', name: 'NVIDIA GeForce RTX 4090 D', utilization: 0, memoryUtilization: 0, memoryUsedMb: 3, memoryTotalMb: 24564, temperatureCelsius: 48, powerWatts: 11.75 },
     { index: 1, uuid: 'GPU-d3f2', name: 'NVIDIA GeForce RTX 4090 D', utilization: 0, memoryUtilization: 0, memoryUsedMb: 15, memoryTotalMb: 24564, temperatureCelsius: 45, powerWatts: 18.81 },
   ],
+  disks: [
+    { mountPoint: '/', usedBytes: 386 * 1024 ** 3, totalBytes: 1024 * 1024 ** 3, availableBytes: 638 * 1024 ** 3 },
+  ],
   processes: [],
   cpuProcesses: [],
   processesSampled: true,
@@ -112,6 +115,10 @@ const a100Snapshot: Snapshot = {
     { index: 0, uuid: 'GPU-f689', name: 'NVIDIA A100-PCIE-40GB', utilization: 100, memoryUtilization: 81, memoryUsedMb: 37705, memoryTotalMb: 40960, temperatureCelsius: 67, powerWatts: 252.58 },
     { index: 1, uuid: 'GPU-4b25', name: 'NVIDIA A100-PCIE-40GB', utilization: 0, memoryUtilization: 0, memoryUsedMb: 11943, memoryTotalMb: 40960, temperatureCelsius: 35, powerWatts: 40.83 },
     { index: 2, uuid: 'GPU-86d3', name: 'NVIDIA A100-PCIE-40GB', utilization: 0, memoryUtilization: 0, memoryUsedMb: 14, memoryTotalMb: 40960, temperatureCelsius: 34, powerWatts: 34.92 },
+  ],
+  disks: [
+    { mountPoint: '/', usedBytes: 428 * 1024 ** 3, totalBytes: 2 * 1024 ** 4, availableBytes: 1620 * 1024 ** 3 },
+    { mountPoint: '/data', usedBytes: 3.4 * 1024 ** 4, totalBytes: 8 * 1024 ** 4, availableBytes: 4.6 * 1024 ** 4 },
   ],
   processes: [
     { gpuUuid: 'GPU-f689', gpuIndex: 0, pid: 2146705, parentPid: 1, username: 'zxy', command: 'VLLM::EngineCore', memoryUsedMb: 37682, smUtilization: 99, cpuPercent: 27, elapsed: '13:15:10', isCurrentUser: false, isGroupLeader: true },
@@ -162,9 +169,14 @@ export const api = {
     browserServers = [...browserServers.filter((item) => item.id !== server.id), server]
     return server
   },
-  async deleteServer(serverId: string): Promise<void> {
+  async deleteServer(serverId: string): Promise<RemoteCleanupResult> {
     if (isTauri) return invoke('delete_server', { serverId })
     browserServers = browserServers.filter((server) => server.id !== serverId)
+    return { remoteCleaned: true, cleanupPending: false, message: '服务器已删除' }
+  },
+  async retryRemoteCleanups(): Promise<RemoteCleanupSweepResult> {
+    if (isTauri) return invoke('retry_remote_cleanups')
+    return { cleanedNames: [], pendingNames: [], expiredNames: [] }
   },
   async reorderServers(serverIds: string[]): Promise<void> {
     if (isTauri) return invoke('reorder_servers', { serverIds })

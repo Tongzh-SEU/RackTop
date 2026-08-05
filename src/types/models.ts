@@ -86,11 +86,19 @@ export interface Snapshot {
   status: ServerStatus
   system: SystemMetric
   gpus: GpuMetric[]
+  disks?: DiskMetric[]
   processes: ProcessMetric[]
   cpuProcesses: CpuProcessMetric[]
   processesSampled: boolean
   nvidiaSmi: 'available' | 'missing' | 'permissionDenied' | 'failed'
   nvidiaMessage?: string | null
+}
+
+export interface DiskMetric {
+  mountPoint: string
+  usedBytes: number
+  totalBytes: number
+  availableBytes: number
 }
 
 export interface HistoryPoint {
@@ -201,4 +209,16 @@ export interface ServerDraft {
   authMethod: AuthMethod
   password?: string
   savePassword?: boolean
+}
+
+export interface RemoteCleanupResult {
+  remoteCleaned: boolean
+  cleanupPending: boolean
+  message: string
+}
+
+export interface RemoteCleanupSweepResult {
+  cleanedNames: string[]
+  pendingNames: string[]
+  expiredNames: string[]
 }
