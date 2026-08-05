@@ -145,8 +145,8 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .button--small { min-height: 28px; padding: 4px 9px; font-size: 11px; }
 .icon-button { position: relative; display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border-radius: 8px; color: var(--text-secondary); }
 .notification-dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border: 1.5px solid var(--surface-solid); border-radius: 50%; background: var(--red); }
-.reservation-row--warning { border-color: color-mix(in srgb, var(--orange) 35%, var(--border)); background: color-mix(in srgb, var(--orange) 6%, var(--surface)); }
-.reservation-row__status--warning { color: var(--orange); background: color-mix(in srgb, var(--orange) 12%, var(--surface)); }
+.reservation-row--warning { border-color: var(--border); background: transparent; }
+.reservation-row--warning .reservation-row__content em { color: color-mix(in srgb, var(--orange) 78%, var(--text-secondary)); background: color-mix(in srgb, var(--orange) 7%, var(--surface-solid)); }
 .activity-log-sheet { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(940px, calc(100vw - 32px)); max-height: min(86vh, 820px); overflow: hidden; }
 .activity-log-body { min-height: 360px; overflow: auto; }
 .activity-log-totals { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; padding: 15px 20px 16px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); }
@@ -189,9 +189,12 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .mine-process-summary { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 26px; color: var(--text-tertiary); font-size: 10px; }
 .mine-process-summary span { padding-right: 8px; border-right: 1px solid var(--border); }
 .mine-process-summary strong { color: var(--text-secondary); font-size: 10px; }
+.mine-process-successes { position: fixed; z-index: 12; top: 78px; right: 20px; display: grid; gap: 7px; width: min(420px, calc(100vw - 40px)); pointer-events: none; }
+.mine-process-success { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--border)); border-radius: 8px; color: var(--blue); background: var(--surface-solid); box-shadow: 0 8px 24px rgba(0,0,0,.12); font-size: 11px; }
+.mine-process-success svg { flex: 0 0 auto; }
+.mine-process-success span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mine-process-warnings { display: grid; gap: 7px; }
 .mine-process-warning { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--orange) 35%, var(--border)); border-radius: 8px; color: var(--orange); background: color-mix(in srgb, var(--orange) 9%, var(--surface)); font-size: 12px; }
-.mine-process-warning--info { border-color: color-mix(in srgb, var(--blue) 35%, var(--border)); color: var(--blue); background: color-mix(in srgb, var(--blue) 8%, var(--surface)); }
 .mine-process-warning__dismiss { display: grid; width: 24px; height: 24px; flex: 0 0 auto; margin-left: auto; place-items: center; border: 0; border-radius: 50%; color: currentColor; background: transparent; }
 .mine-process-warning__dismiss:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
 .mine-process-list { display: grid; gap: 18px; }
@@ -573,6 +576,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
 .copy-pid-button.is-copied { border-color: color-mix(in srgb, var(--green) 35%, var(--border)); color: var(--green); }
 .copy-pid-button code { color: inherit; font-size: 11px; font-weight: 650; }
 .terminate-process-copy .form-error { margin: 0; }
+.reservation-row--warning .reservation-row__status--warning { color: color-mix(in srgb, var(--orange) 78%, var(--text-secondary)); background: color-mix(in srgb, var(--orange) 9%, var(--surface-solid)); }
 .spin { animation: spin .8s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (hover: hover) and (pointer: fine) {
