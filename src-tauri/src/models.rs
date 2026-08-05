@@ -253,7 +253,7 @@ impl Default for AppSettings {
             process_interval_seconds: 5,
             realtime_window_minutes: 30,
             history_enabled: true,
-            history_retention_days: 30,
+            history_retention_days: 90,
             idle_gpu_threshold: 10.0,
             idle_memory_threshold_mb: 40960.0,
             idle_duration_minutes: 10,
@@ -263,5 +263,17 @@ impl Default for AppSettings {
             reduce_motion: false,
             show_add_server_guide: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppSettings;
+
+    #[test]
+    fn new_install_keeps_local_history_for_ninety_days_by_default() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.history_retention_days, 90);
+        assert!(settings.history_enabled);
     }
 }

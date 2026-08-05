@@ -33,7 +33,7 @@ pub async fn fetch_usage(server: &Server, password: Option<&str>, since_timestam
     let since = since_timestamp.max(0);
     let script = format!("usage={REMOTE_DIRECTORY}/.usage-v1.tsv; if [ -r \"$usage\" ]; then awk -F '|' -v since={since} '$1 == \"v1\" && $2 >= since' \"$usage\"; fi");
     let output = run_remote_command(server, password, &script, Duration::from_secs(20)).await?;
-    output.lines().filter(|line| !line.trim().is_empty()).map(parse_usage_line).collect()
+    Ok(output.lines().filter(|line| !line.trim().is_empty()).filter_map(|line| parse_usage_line(line).ok()).collect())
 }
 
 async fn install(server: &Server, password: Option<&str>) -> Result<(), String> {
@@ -46,6 +46,7 @@ chmod 700 "$state"
 printf '%s' '{encoded}' | base64 -d > "$state/.collector.sh"
 printf '%s' '{daemon_encoded}' | base64 -d > "$state/.daemon.sh"
 chmod 700 "$state/.collector.sh" "$state/.daemon.sh"
+touch "$state/.client-heartbeat"
 running=0
 if [ -r "$state/.daemon.pid" ]; then
   pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
@@ -101,7 +102,7 @@ async fn run_remote_command(server: &Server, password: Option<&str>, script: &st
 }
 
 fn parse_history(output: &str) -> Result<Vec<HistoryPoint>, String> {
-    output.lines().filter(|line| !line.trim().is_empty()).map(parse_history_line).collect()
+    Ok(output.lines().filter(|line| !line.trim().is_empty()).filter_map(|line| parse_history_line(line).ok()).collect())
 }
 
 fn parse_history_line(line: &str) -> Result<HistoryPoint, String> {
@@ -157,16 +158,29 @@ mod tests {
     }
 
     #[test]
+    fn skips_legacy_rows_with_blank_percentages_without_losing_valid_history() {
+        let points = parse_history(
+            "v1|1722700740||||GPU-a,0.00,0.06\nv1|1722700800|12.50|40.25|3.00|GPU-a,80.00,50.00\n",
+        ).unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].timestamp, 1_722_700_800);
+    }
+
+    #[test]
     fn collector_keeps_thirty_days_and_avoids_sensitive_process_data() {
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("2592000"));
+        assert!(REMOTE_COLLECTOR_SCRIPT.contains("value=(total > 0 ?"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("umask 077"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("$HOME/.racktop"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains(".history-v1.tsv"));
         assert!(REMOTE_DAEMON_SCRIPT.contains(".daemon.pid"));
+        assert!(REMOTE_DAEMON_SCRIPT.contains(".client-heartbeat"));
+        assert!(REMOTE_DAEMON_SCRIPT.contains("-gt 90"));
         assert!(REMOTE_DAEMON_SCRIPT.contains("sleep 60"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used,memory.total"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("--query-compute-apps=gpu_uuid,pid,used_memory"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains(".usage-v1.tsv"));
+        assert!(REMOTE_COLLECTOR_SCRIPT.contains("__racktop_coverage__"));
         assert!(!REMOTE_COLLECTOR_SCRIPT.contains("command="));
         assert!(!REMOTE_COLLECTOR_SCRIPT.contains("args="));
     }

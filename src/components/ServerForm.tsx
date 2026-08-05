@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
-import { AlertTriangle, Check, Copy, Database, KeyRound, MapPin, ShieldCheck, UserRound, X } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Check, ChevronRight, Copy, Database, KeyRound, ShieldCheck, Terminal, X } from 'lucide-react'
 import type { ServerDraft } from '../types/models'
-import { unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
+import { sshSetupTargetValidationMessage, unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
 
 interface ServerFormProps {
   initial?: Partial<ServerDraft>
@@ -14,7 +14,7 @@ interface ServerFormProps {
   onSave: (draft: ServerDraft) => Promise<void>
 }
 
-export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistoryRetentionDays = 30, defaultRemoteHistoryEnabled = true, showGuide = true, onGuideDismiss, onClose, onSave }: ServerFormProps) {
+export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistoryRetentionDays = 90, defaultRemoteHistoryEnabled = true, showGuide = true, onGuideDismiss, onClose, onSave }: ServerFormProps) {
   const [draft, setDraft] = useState<ServerDraft>({
     id: initial?.id,
     name: initial?.name ?? '',
@@ -35,16 +35,26 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
   const [error, setError] = useState<string | null>(null)
   const [passwordAcknowledged, setPasswordAcknowledged] = useState(false)
   const [setupCopied, setSetupCopied] = useState(false)
+  const [setupCopyAttempted, setSetupCopyAttempted] = useState(false)
   const [dismissGuide, setDismissGuide] = useState(false)
+  const [guideOpen, setGuideOpen] = useState(!initial?.id && showGuide)
 
   const set = <K extends keyof ServerDraft>(key: K, value: ServerDraft[K]) => setDraft((current) => ({ ...current, [key]: value }))
   const setupPlatform = /Windows/i.test(navigator.userAgent) ? 'windows' : 'unix'
   const setupTarget = { username: draft.username, host: draft.host, port: draft.port }
   const setupScript = setupPlatform === 'unix' ? unixSshSetupScript(setupTarget) : windowsSshSetupScript(setupTarget)
+  const setupValidationMessage = setupCopyAttempted ? sshSetupTargetValidationMessage(setupTarget) : null
 
   async function copySetupScript() {
+    const validationMessage = sshSetupTargetValidationMessage(setupTarget)
+    if (validationMessage) {
+      setSetupCopyAttempted(true)
+      setSetupCopied(false)
+      return
+    }
     try {
       await navigator.clipboard.writeText(setupScript)
+      setSetupCopyAttempted(false)
       setSetupCopied(true)
       window.setTimeout(() => setSetupCopied(false), 1600)
     } catch {
@@ -67,6 +77,29 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
     }
   }
 
+  if (guideOpen) {
+    return (
+      <div className="scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+        <section className="sheet ssh-onboarding-sheet" role="dialog" aria-modal="true" aria-labelledby="ssh-onboarding-title">
+          <header className="sheet__header">
+            <div><p className="eyebrow">首次连接</p><h2 id="ssh-onboarding-title">推荐使用 SSH 密钥</h2></div>
+            <button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button>
+          </header>
+          <div className="ssh-onboarding__body">
+            <div className="ssh-onboarding__lead"><span><KeyRound size={22} /></span><div><strong>Ed25519 密钥 + SSH Agent</strong><p>不在 RackTop 中保存服务器密码，终端和监控连接可复用同一份系统 SSH 凭据。</p></div><em>推荐</em></div>
+            <ol className="ssh-onboarding__steps">
+              <li><span>1</span><div><strong>填写连接地址</strong><p>输入服务器 IP、端口和用户名；物理位置只用于现场查找机器。</p></div></li>
+              <li><span>2</span><div><strong>复制快速配置</strong><p>在认证方式下展开“SSH 密钥快速配置”，复制为当前服务器生成的整段命令。</p></div></li>
+              <li><span>3</span><div><strong>在本机终端执行</strong><p>命令会在缺少密钥时创建 Ed25519 密钥、写入服务器并测试免密连接，再返回 RackTop 保存。</p></div></li>
+            </ol>
+            <div className="ssh-onboarding__notes"><span><Terminal size={16} /><p><strong>已有 SSH 配置？</strong>可直接选择 SSH Agent、私钥或 SSH Config。首次连接仍需核对 Host Key 指纹。</p></span><label><input type="checkbox" checked={dismissGuide} onChange={(event) => setDismissGuide(event.target.checked)} />以后新增服务器时直接进入表单</label></div>
+          </div>
+          <footer className="sheet__footer"><button type="button" className="button button--secondary" onClick={() => setGuideOpen(false)}>已有配置，直接填写</button><button type="button" className="button button--primary" onClick={() => setGuideOpen(false)}>开始配置<ArrowRight size={16} /></button></footer>
+        </section>
+      </div>
+    )
+  }
+
   return (
     <div className="scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="sheet server-form-sheet" role="dialog" aria-modal="true" aria-labelledby="server-form-title">
@@ -79,15 +112,14 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
         </header>
         <form onSubmit={submit} className="server-form">
           <div className="server-form__body">
-            {!initial?.id && showGuide && <aside className="server-onboarding" aria-label="添加服务器说明"><header><div><KeyRound size={17} /><span><strong>第一次连接</strong><small>按现有 SSH 配置填写即可</small></span></div><em>SSH Agent 推荐</em></header><div><span><MapPin size={14} /><p><strong>地址</strong>服务器 IP 或域名；位置用于现场重启时查找机器。</p></span><span><UserRound size={14} /><p><strong>用户名与认证</strong>SSH Agent 可安全复用系统凭据，也支持持久终端。</p></span><span><ShieldCheck size={14} /><p><strong>Host Key</strong>首次连接会要求核对指纹，RackTop 不会自动信任未知主机。</p></span><span><Database size={14} /><p><strong>远端历史</strong>关闭 App 后继续采样 30 天，打开后增量同步到本机。</p></span></div><label><input type="checkbox" checked={dismissGuide} onChange={(event) => setDismissGuide(event.target.checked)} />保存成功后不再提醒</label></aside>}
             <div className="form-grid form-grid--2">
               <label>显示名称<input value={draft.name} onChange={(event) => set('name', event.target.value)} placeholder="训练服务器 A" /></label>
               <label>服务器位置<input value={draft.location ?? ''} onChange={(event) => set('location', event.target.value)} placeholder="例如：实验室 301 / R2 机架 / U18" /></label>
             </div>
             <div className="form-grid form-grid--host">
-              <label>主机地址<input required value={draft.host} onChange={(event) => set('host', event.target.value)} placeholder="10.0.0.10" /></label>
+              <label>主机地址<input required aria-invalid={setupCopyAttempted && !draft.host.trim()} value={draft.host} onChange={(event) => set('host', event.target.value)} placeholder="10.0.0.10" /></label>
               <label>端口<input required type="number" min="1" max="65535" value={draft.port} onChange={(event) => set('port', Number(event.target.value))} /></label>
-              <label>用户名<input required value={draft.username} onChange={(event) => set('username', event.target.value)} placeholder="researcher" /></label>
+              <label>用户名<input required aria-invalid={setupCopyAttempted && !draft.username.trim()} value={draft.username} onChange={(event) => set('username', event.target.value)} placeholder="researcher" /></label>
             </div>
             <fieldset>
               <legend>认证方式</legend>
@@ -128,6 +160,19 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
                 <label className="checkbox-card"><input type="checkbox" checked={draft.savePassword ?? false} onChange={(event) => set('savePassword', event.target.checked)} /><ShieldCheck size={18} /><span>保存到系统钥匙串</span></label>
               </div>
             )}
+            <details className="key-guide">
+              <summary>
+                <span className="key-guide__summary-icon"><KeyRound size={17} /></span>
+                <span className="key-guide__summary-copy"><strong>SSH 密钥快速配置</strong><small>生成并复制当前服务器的免密登录命令</small></span>
+                <ChevronRight className="key-guide__chevron" size={16} aria-hidden="true" />
+              </summary>
+              <div className="key-guide__toolbar">
+                <span className="key-guide__platform-label">已检测：{setupPlatform === 'windows' ? '本机 Windows PowerShell → 远程 Linux' : '本机 macOS Terminal → 远程 Linux'}</span>
+                <button type="button" className="button button--secondary button--small" onClick={() => void copySetupScript()}>{setupCopied ? <Check size={13} /> : <Copy size={13} />}{setupCopied ? '已复制' : '复制整段'}</button>
+              </div>
+              {setupValidationMessage && <p className="key-guide__validation" role="alert"><AlertTriangle size={14} />{setupValidationMessage}</p>}
+              <pre><code>{setupScript}</code></pre>
+            </details>
             <div className="form-grid form-grid--2">
               <label>跳板机 ProxyJump<input value={draft.proxyJump ?? ''} onChange={(event) => set('proxyJump', event.target.value)} placeholder="可选" /></label>
               <label>标签<input value={draft.tags.join(', ')} onChange={(event) => set('tags', event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean))} placeholder="lab, h100" /></label>
@@ -137,14 +182,6 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
               <label>此服务器历史保存<select value={draft.historyRetentionDays} onChange={(event) => set('historyRetentionDays', Number(event.target.value))}><option value="1">1 天</option><option value="7">7 天</option><option value="30">30 天</option><option value="90">90 天</option></select><small>独立覆盖全局默认保存时间。</small></label>
             </div>
             <label className="switch-row remote-history-row"><Database size={18} /><span><strong>远端持续保存 30 天</strong><small>启动用户级隐藏常驻采集进程；RackTop 关闭期间继续记录，重新打开后自动同步。不保存进程和命令。</small></span><input type="checkbox" checked={draft.remoteHistoryEnabled} onChange={(event) => set('remoteHistoryEnabled', event.target.checked)} /></label>
-            <details className="key-guide">
-              <summary><KeyRound size={17} />SSH 密钥快速配置</summary>
-              <div className="key-guide__toolbar">
-                <span className="key-guide__platform-label">已检测：{setupPlatform === 'windows' ? '本机 Windows PowerShell → 远程 Linux' : '本机 macOS Terminal → 远程 Linux'}</span>
-                <button type="button" className="button button--secondary button--small" onClick={() => void copySetupScript()}>{setupCopied ? <Check size={13} /> : <Copy size={13} />}{setupCopied ? '已复制' : '复制整段'}</button>
-              </div>
-              <pre><code>{setupScript}</code></pre>
-            </details>
             {error && <p className="form-error" role="alert">{error}</p>}
           </div>
           <footer className="sheet__footer">

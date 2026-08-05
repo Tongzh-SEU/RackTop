@@ -15,6 +15,10 @@ describe('ProcessBlocks', () => {
   it('renders the CPU block below the GPU block with their relationship', () => {
     const markup = renderToStaticMarkup(<ProcessBlocks snapshot={snapshot} compact onRequestTerminate={() => {}} />)
     expect(markup.indexOf('GPU 进程')).toBeLessThan(markup.indexOf('CPU 进程'))
+    expect(markup).toContain('<th>GPU</th><th>PID</th>')
+    expect(markup).not.toContain('<th>GPU · PID</th>')
+    expect(markup).toContain('<th>用户</th>')
+    expect(markup).toContain('tongzh')
     expect(markup).toContain('CPU 子进程 PID 2212')
     expect(markup).toContain('GPU 0 · PID 21312 的子进程')
   })

@@ -1,15 +1,45 @@
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import * as echarts from 'echarts/core'
 import { LineChart } from 'echarts/charts'
-import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
+import { GridComponent, LegendComponent, MarkAreaComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { HistoryPoint, Snapshot } from '../types/models'
-import { clampPercent, gpuMemoryPercent } from '../utils/gpu'
+import { clampPercent } from '../utils/gpu'
 import { formatFiveMinuteTimeLabel, MINUTE_MS, minuteTickSplitNumber } from '../utils/timeAxis'
 
-echarts.use([LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
+echarts.use([LineChart, GridComponent, LegendComponent, MarkAreaComponent, TooltipComponent, CanvasRenderer])
 
 const BYTES_PER_GB = 1024 ** 3
+const MAX_CONTINUOUS_GAP_MS = 5 * MINUTE_MS
+
+export function trendSeriesData(points: HistoryPoint[], valueOf: (point: HistoryPoint) => number | null) {
+  const data: Array<[number, number | null]> = []
+  points.forEach((point, index) => {
+    const timestamp = point.timestamp * 1000
+    const previous = points[index - 1]
+    if (previous && timestamp - previous.timestamp * 1000 > MAX_CONTINUOUS_GAP_MS) {
+      data.push([Math.floor((timestamp + previous.timestamp * 1000) / 2), null])
+    }
+    const value = valueOf(point)
+    data.push([timestamp, value === null ? null : clampPercent(value)])
+  })
+  return data
+}
+
+export function missingTimeRanges(points: HistoryPoint[]) {
+  const data: Array<[{ xAxis: number }, { xAxis: number }]> = []
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1]
+    const point = points[index]
+    if ((point.timestamp - previous.timestamp) * 1000 <= MAX_CONTINUOUS_GAP_MS) continue
+    data.push([
+      { xAxis: (previous.timestamp + 60) * 1000 },
+      { xAxis: (point.timestamp - 60) * 1000 },
+    ])
+  }
+  return data
+}
+
 function percentTooltip(value: number) {
   return `${Number(value).toFixed(1)}%`
 }
@@ -36,13 +66,18 @@ interface TrendChartProps {
   height?: number
   animate?: boolean
   gpuUuid?: string
+  seriesOpacity?: number
 }
 
-export function TrendChart({ points, snapshot, mode = 'all', height = 260, animate = false, gpuUuid }: TrendChartProps) {
+export function TrendChart({ points, snapshot, mode = 'all', height = 260, animate = false, gpuUuid, seriesOpacity = 1 }: TrendChartProps) {
   const series = []
+  const opacity = Math.min(1, Math.max(0, seriesOpacity))
   const timestamps = points.map((point) => point.timestamp * 1000)
   const axisInterval = timeAxisInterval(timestamps)
+  const missingRanges = missingTimeRanges(points)
+  const missingArea = missingRanges.length ? { silent: true, label: { show: false }, itemStyle: { color: 'rgba(142, 145, 152, 0.08)' }, data: missingRanges } : undefined
   if (mode === 'all' || mode === 'cpu') {
+    const valueOf = (point: HistoryPoint) => point.cpuUtilization
     series.push({
       id: 'cpu-utilization',
       name: 'CPU',
@@ -50,14 +85,17 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
       showSymbol: false,
       smooth: false,
       clip: true,
-      data: points.map((point) => [point.timestamp * 1000, clampPercent(point.cpuUtilization)]),
+      connectNulls: false,
+      data: trendSeriesData(points, valueOf),
       tooltip: { valueFormatter: percentTooltip },
       lineStyle: { width: 2, color: '#0a84ff' },
       itemStyle: { color: '#0a84ff' },
       areaStyle: { color: 'rgba(10, 132, 255, 0.08)' },
+      markArea: missingArea,
     })
   }
   if (mode === 'systemMemory') {
+    const memoryValueOf = (point: HistoryPoint) => point.memoryUtilization
     series.push({
       id: 'system-memory-utilization',
       name: '系统内存',
@@ -65,12 +103,15 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
       showSymbol: false,
       smooth: false,
       clip: true,
-      data: points.map((point) => [point.timestamp * 1000, clampPercent(point.memoryUtilization)]),
+      connectNulls: false,
+      data: trendSeriesData(points, memoryValueOf),
       tooltip: { valueFormatter: (value: number) => capacityTooltip(value, (snapshot?.system.memoryTotalBytes ?? 0) / BYTES_PER_GB) },
       lineStyle: { width: 2, color: '#af52de' },
       itemStyle: { color: '#af52de' },
       areaStyle: { color: 'rgba(175, 82, 222, 0.08)' },
+      markArea: missingArea,
     })
+    const swapValueOf = (point: HistoryPoint) => point.swapUtilization ?? null
     series.push({
       id: 'swap-utilization',
       name: 'SWP',
@@ -78,7 +119,8 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
       showSymbol: false,
       smooth: false,
       clip: true,
-      data: points.map((point) => [point.timestamp * 1000, clampPercent(point.swapUtilization ?? 0)]),
+      connectNulls: false,
+      data: trendSeriesData(points, swapValueOf),
       tooltip: { valueFormatter: (value: number) => capacityTooltip(value, (snapshot?.system.swapTotalBytes ?? 0) / BYTES_PER_GB) },
       lineStyle: { width: 2, color: '#ff9f0a' },
       itemStyle: { color: '#ff9f0a' },
@@ -89,17 +131,22 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
     snapshot?.gpus.filter((gpu) => !gpuUuid || gpu.uuid === gpuUuid).forEach((gpu, index) => {
       const colors = ['#30d158', '#bf5af2', '#ff9f0a', '#64d2ff']
       const isMemory = mode === 'gpuMemory'
+      const id = `${isMemory ? 'gpu-memory' : 'gpu-utilization'}:${gpu.uuid}`
+      const color = colors[index % colors.length]
+      const valueOf = (point: HistoryPoint) => isMemory ? point.gpuMemoryUtilizations?.[gpu.uuid] ?? null : point.gpuUtilizations[gpu.uuid] ?? null
       series.push({
-        id: `${isMemory ? 'gpu-memory' : 'gpu-utilization'}:${gpu.uuid}`,
+        id,
         name: `GPU ${gpu.index}`,
         type: 'line',
         showSymbol: false,
         smooth: false,
         clip: true,
-        data: points.map((point) => [point.timestamp * 1000, clampPercent(isMemory ? point.gpuMemoryUtilizations?.[gpu.uuid] ?? gpuMemoryPercent(gpu) : point.gpuUtilizations[gpu.uuid] ?? 0)]),
+        connectNulls: false,
+        data: trendSeriesData(points, valueOf),
         tooltip: { valueFormatter: isMemory ? (value: number) => capacityTooltip(value, gpu.memoryTotalMb / 1024) : percentTooltip },
-        lineStyle: { width: 2, color: colors[index % colors.length] },
-        itemStyle: { color: colors[index % colors.length] },
+        lineStyle: { width: 2, color, opacity },
+        itemStyle: { color, opacity },
+        markArea: index === 0 ? missingArea : undefined,
       })
     })
   }

@@ -4,6 +4,15 @@ type SshSetupTarget = {
   port: number
 }
 
+export function sshSetupTargetValidationMessage({ username, host }: SshSetupTarget) {
+  const missingUsername = !username.trim()
+  const missingHost = !host.trim()
+  if (missingUsername && missingHost) return '请先填写用户名和主机地址，再复制快速配置命令。'
+  if (missingUsername) return '请先填写用户名，再复制快速配置命令。'
+  if (missingHost) return '请先填写主机地址，再复制快速配置命令。'
+  return null
+}
+
 function shellQuote(value: string) {
   return `'${value.replaceAll("'", `'"'"'`)}'`
 }

@@ -123,6 +123,14 @@ impl Database {
         if !reservation_columns.contains("pending_confirmation_gpu_keys_json") {
             connection.execute("ALTER TABLE idle_reservations ADD COLUMN pending_confirmation_gpu_keys_json TEXT NOT NULL DEFAULT '[]'", []).map_err(|error| error.to_string())?;
         }
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS local_usage_minutes (
+                server_id TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                PRIMARY KEY(server_id,timestamp),
+                FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+             );"
+        ).map_err(|error| error.to_string())?;
         connection.execute(
             "DELETE FROM snapshots WHERE id NOT IN (SELECT MAX(id) FROM snapshots GROUP BY server_id,timestamp)",
             [],
@@ -302,7 +310,8 @@ impl Database {
         {
             let mut statement = transaction.prepare(
                 "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7)
+                 SELECT ?1,?2,?3,?4,?5,?6,?7
+                 WHERE NOT EXISTS (SELECT 1 FROM local_usage_minutes WHERE server_id=?1 AND timestamp=?2)
                  ON CONFLICT(server_id,timestamp,gpu_uuid,username) DO UPDATE SET active_seconds=excluded.active_seconds,memory_mb_seconds=excluded.memory_mb_seconds,coverage_seconds=excluded.coverage_seconds"
             ).map_err(|error| error.to_string())?;
             for point in points.iter().filter(|point| point.timestamp >= cutoff && point.timestamp <= now + 300) {
@@ -310,16 +319,62 @@ impl Database {
             }
         }
         transaction.execute("DELETE FROM usage_buckets WHERE server_id=?1 AND timestamp < ?2", params![server_id, cutoff]).map_err(|error| error.to_string())?;
+        transaction.execute("DELETE FROM local_usage_minutes WHERE server_id=?1 AND timestamp < ?2", params![server_id, cutoff]).map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(imported)
+    }
+
+    pub fn save_local_usage(&self, snapshot: &Snapshot) -> Result<usize, String> {
+        if !self.get_settings()?.history_enabled || snapshot.gpus.is_empty() { return Ok(0); }
+        let timestamp = snapshot.timestamp - snapshot.timestamp.rem_euclid(60);
+        let cutoff = timestamp - 90 * 86_400;
+        let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let claimed = transaction.execute(
+            "INSERT OR IGNORE INTO local_usage_minutes(server_id,timestamp) VALUES(?1,?2)",
+            params![snapshot.server_id, timestamp],
+        ).map_err(|error| error.to_string())?;
+        if claimed == 0 {
+            transaction.commit().map_err(|error| error.to_string())?;
+            return Ok(0);
+        }
+
+        transaction.execute(
+            "DELETE FROM usage_buckets WHERE server_id=?1 AND timestamp=?2",
+            params![snapshot.server_id, timestamp],
+        ).map_err(|error| error.to_string())?;
+        let gpu_uuids: HashSet<&str> = snapshot.gpus.iter().map(|gpu| gpu.uuid.as_str()).collect();
+        let mut memory_by_user: HashMap<(&str, &str), f64> = HashMap::new();
+        for process in snapshot.processes.iter().filter(|process| {
+            gpu_uuids.contains(process.gpu_uuid.as_str()) && is_attributable_gpu_process(&process.username, &process.command)
+        }) {
+            *memory_by_user.entry((process.gpu_uuid.as_str(), process.username.as_str())).or_default() += process.memory_used_mb.max(0.0);
+        }
+        let mut inserted = 0usize;
+        {
+            let mut statement = transaction.prepare(
+                "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds)
+                 VALUES(?1,?2,?3,?4,?5,?6,60)"
+            ).map_err(|error| error.to_string())?;
+            for gpu in &snapshot.gpus {
+                inserted += statement.execute(params![snapshot.server_id, timestamp, gpu.uuid, USAGE_COVERAGE_USER, 0, 0.0]).map_err(|error| error.to_string())?;
+            }
+            for ((gpu_uuid, username), memory_mb) in memory_by_user {
+                inserted += statement.execute(params![snapshot.server_id, timestamp, gpu_uuid, username, 60, memory_mb * 60.0]).map_err(|error| error.to_string())?;
+            }
+        }
+        transaction.execute("DELETE FROM usage_buckets WHERE server_id=?1 AND timestamp < ?2", params![snapshot.server_id, cutoff]).map_err(|error| error.to_string())?;
+        transaction.execute("DELETE FROM local_usage_minutes WHERE server_id=?1 AND timestamp < ?2", params![snapshot.server_id, cutoff]).map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(inserted)
     }
 
     pub fn get_usage_distribution(&self, server_id: &str, from_timestamp: i64, requested_days: i64) -> Result<UsageDistribution, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection.prepare(
-            "SELECT username,SUM(active_seconds),SUM(memory_mb_seconds) FROM usage_buckets WHERE server_id=?1 AND timestamp>=?2 GROUP BY username ORDER BY SUM(active_seconds) DESC"
+            "SELECT username,SUM(active_seconds),SUM(memory_mb_seconds) FROM usage_buckets WHERE server_id=?1 AND timestamp>=?2 AND username<>?3 GROUP BY username ORDER BY SUM(active_seconds) DESC"
         ).map_err(|error| error.to_string())?;
-        let users = statement.query_map(params![server_id, from_timestamp], |row| Ok(UsageUserAggregate { username: row.get(0)?, active_seconds: row.get(1)?, memory_mb_seconds: row.get(2)? }))
+        let users = statement.query_map(params![server_id, from_timestamp, USAGE_COVERAGE_USER], |row| Ok(UsageUserAggregate { username: row.get(0)?, active_seconds: row.get(1)?, memory_mb_seconds: row.get(2)? }))
             .map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
         let covered_days = connection.query_row(
             "SELECT COUNT(DISTINCT date(timestamp,'unixepoch')) FROM usage_buckets WHERE server_id=?1 AND timestamp>=?2",
@@ -465,10 +520,24 @@ fn blank_to_none(value: Option<String>) -> Option<String> {
     value.and_then(|text| { let trimmed = text.trim().to_string(); (!trimmed.is_empty()).then_some(trimmed) })
 }
 
+const USAGE_COVERAGE_USER: &str = "__racktop_coverage__";
+
+fn is_attributable_gpu_process(username: &str, command: &str) -> bool {
+    const SYSTEM_USERS: &[&str] = &["root", "unknown", "gdm", "lightdm", "sddm"];
+    const SERVICE_PATTERNS: &[&str] = &[
+        "xorg", "xwayland", "gnome-shell", "nvidia-persistenced", "nvidia-powerd", "nvitop", "nvtop",
+        ".vscode-server", "code-server", ".cursor-server", "cursor-server", "codex", "claude",
+        "tailscale", "zerotier", "openvpn", "openconnect", "wireguard", "clash", "mihomo", "sing-box", "v2ray", "xray", "cloudflared",
+    ];
+    let username = username.trim().to_ascii_lowercase();
+    let command = command.to_ascii_lowercase();
+    !username.is_empty() && !SYSTEM_USERS.contains(&username.as_str()) && !SERVICE_PATTERNS.iter().any(|pattern| command.contains(pattern))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{GpuMetric, SystemMetric};
+    use crate::models::{GpuMetric, ProcessMetric, SystemMetric};
 
     fn draft(name: &str, retention_days: u32) -> ServerDraft {
         ServerDraft {
@@ -507,6 +576,23 @@ mod tests {
             processes_sampled: true,
             nvidia_smi: "available".into(),
             nvidia_message: None,
+        }
+    }
+
+    fn gpu_process(gpu_uuid: &str, username: &str, command: &str, memory_used_mb: f64) -> ProcessMetric {
+        ProcessMetric {
+            gpu_uuid: gpu_uuid.into(),
+            gpu_index: 0,
+            pid: 100,
+            parent_pid: 1,
+            username: username.into(),
+            command: command.into(),
+            memory_used_mb,
+            sm_utilization: None,
+            cpu_percent: 1.0,
+            elapsed: "00:01".into(),
+            is_current_user: true,
+            is_group_leader: true,
         }
     }
 
@@ -606,6 +692,52 @@ mod tests {
         assert_eq!(db.get_history(&server.id, 0).unwrap().len(), 1);
         assert_eq!(db.get_server(&server.id).unwrap().remote_history_last_sync_at, Some(point.timestamp));
         assert_eq!(db.remote_history_cursor(&server.id, point.timestamp + 120).unwrap(), point.timestamp - 60);
+    }
+
+    #[test]
+    fn local_usage_is_recorded_once_per_minute_and_wins_over_remote_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let server = db.save_server(draft("Usage", 30)).unwrap();
+        let mut sample = snapshot(&server.id, 1_000_019);
+        sample.gpus = vec![
+            GpuMetric { index: 0, name: "GPU 0".into(), uuid: "GPU-a".into(), utilization: 50.0, memory_utilization: 0.0, memory_used_mb: 0.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0 },
+            GpuMetric { index: 1, name: "GPU 1".into(), uuid: "GPU-b".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 0.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0 },
+        ];
+        sample.processes = vec![
+            gpu_process("GPU-a", "alice", "python train.py", 2_000.0),
+            gpu_process("GPU-a", "alice", "python worker.py", 1_000.0),
+            gpu_process("GPU-a", "root", "python service.py", 10_000.0),
+            gpu_process("GPU-a", "bob", "/opt/codex service", 10_000.0),
+        ];
+
+        assert_eq!(db.save_local_usage(&sample).unwrap(), 3);
+        assert_eq!(db.save_local_usage(&sample).unwrap(), 0);
+        let distribution = db.get_usage_distribution(&server.id, 0, 30).unwrap();
+        assert_eq!(distribution.coverage_gpu_seconds, 120);
+        assert_eq!(distribution.users.len(), 1);
+        assert_eq!(distribution.users[0].username, "alice");
+        assert_eq!(distribution.users[0].active_seconds, 60);
+        assert_eq!(distribution.users[0].memory_mb_seconds, 180_000.0);
+
+        let remote = UsagePoint { timestamp: 999_960, gpu_uuid: "GPU-a".into(), username: "remote-user".into(), active_seconds: 60, memory_mb_seconds: 60_000.0, coverage_seconds: 60 };
+        assert_eq!(db.import_remote_usage(&server.id, &[remote], 1_000_019).unwrap(), 0);
+        assert_eq!(db.get_usage_distribution(&server.id, 0, 30).unwrap().users.len(), 1);
+    }
+
+    #[test]
+    fn local_usage_cleanup_keeps_only_ninety_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let server = db.save_server(draft("Usage retention", 30)).unwrap();
+        let mut old = snapshot(&server.id, 1_000_000);
+        old.gpus.push(GpuMetric { index: 0, name: "GPU".into(), uuid: "GPU-a".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 0.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0 });
+        db.save_local_usage(&old).unwrap();
+        let mut current = old.clone();
+        current.timestamp += 91 * 86_400;
+        db.save_local_usage(&current).unwrap();
+        let distribution = db.get_usage_distribution(&server.id, 0, 90).unwrap();
+        assert_eq!(distribution.coverage_gpu_seconds, 60);
     }
 
     #[test]

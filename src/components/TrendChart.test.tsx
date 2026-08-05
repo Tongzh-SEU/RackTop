@@ -2,16 +2,20 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { HistoryPoint, Snapshot } from '../types/models'
 
-const captured = vi.hoisted(() => ({ option: null as { series: Array<{ id?: string }> } | null }))
+const captured = vi.hoisted(() => ({ option: null as { series: Array<{ id?: string; data?: Array<[number, number | null]>; lineStyle?: { opacity?: number } }> } | null }))
 
 vi.mock('echarts-for-react/lib/core', () => ({
-  default: (props: { option: { series: Array<{ id?: string }> } }) => {
+  default: (props: { option: { series: Array<{ id?: string; data?: Array<[number, number | null]>; lineStyle?: { opacity?: number } }> } }) => {
     captured.option = props.option
     return null
   },
 }))
+vi.mock('echarts/core', () => ({ use: vi.fn() }))
+vi.mock('echarts/charts', () => ({ LineChart: {} }))
+vi.mock('echarts/components', () => ({ GridComponent: {}, LegendComponent: {}, MarkAreaComponent: {}, TooltipComponent: {} }))
+vi.mock('echarts/renderers', () => ({ CanvasRenderer: {} }))
 
-import { TrendChart } from './TrendChart'
+import { missingTimeRanges, TrendChart, trendSeriesData } from './TrendChart'
 
 const points: HistoryPoint[] = [{
   timestamp: 1,
@@ -43,5 +47,28 @@ describe('TrendChart series identity', () => {
   it('uses separate stable identities for GPU utilization and memory', () => {
     expect(renderSeriesIds('gpu')).toEqual(['gpu-utilization:GPU-a'])
     expect(renderSeriesIds('gpuMemory')).toEqual(['gpu-memory:GPU-a'])
+  })
+
+  it('supports ten percent transparency for overview GPU lines', () => {
+    renderToStaticMarkup(<TrendChart points={points} snapshot={snapshot} mode="gpu" seriesOpacity={0.9} />)
+    expect(captured.option?.series[0].lineStyle?.opacity).toBe(0.9)
+  })
+
+  it('breaks the line across unsampled periods instead of drawing a zero or continuous segment', () => {
+    const separated = [points[0], { ...points[0], timestamp: points[0].timestamp + 10 * 60, cpuUtilization: 40 }]
+    expect(trendSeriesData(separated, (point) => point.cpuUtilization)).toEqual([
+      [1_000, 12],
+      [301_000, null],
+      [601_000, 40],
+    ])
+    expect(missingTimeRanges(separated)).toEqual([
+      [{ xAxis: 61_000 }, { xAxis: 541_000 }],
+    ])
+  })
+
+  it('keeps missing GPU metrics null instead of substituting zero or the current snapshot', () => {
+    const missingGpuPoint = { ...points[0], gpuUtilizations: {}, gpuMemoryUtilizations: {} }
+    renderToStaticMarkup(<TrendChart points={[missingGpuPoint]} snapshot={snapshot} mode="gpuMemory" />)
+    expect(captured.option?.series[0].data).toEqual([[1_000, null]])
   })
 })
