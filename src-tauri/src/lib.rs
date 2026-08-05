@@ -416,7 +416,7 @@ async fn terminate_process(database: State<'_, Database>, server_id: String, pid
     if !confirmed { return Err("必须在界面完成二次确认后才能结束进程".into()); }
     let server = database.get_server(&server_id)?;
     let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
-    collector::terminate_process_group(&server, password.as_deref(), pid).await
+    collector::terminate_process_tree(&server, password.as_deref(), pid).await
 }
 
 fn tray_image() -> Image<'static> {

@@ -23,11 +23,13 @@ describe('ServerForm onboarding', () => {
     expect(markup).not.toContain('第一次连接')
   })
 
-  it('defaults new servers to 90 local days with 30-day remote retention enabled', () => {
+  it('hides fixed per-server collection defaults from the form', () => {
     const markup = renderToStaticMarkup(<ServerForm {...handlers} showGuide={false} />)
 
-    expect(markup).toContain('<option value="90" selected="">90 天</option>')
-    expect(markup).toContain('远端持续保存 30 天')
+    expect(markup).not.toContain('此服务器采样间隔')
+    expect(markup).not.toContain('本机历史保存')
+    expect(markup).toContain('服务器远端缓存 30 天')
+    expect(markup).toContain('同步到本机 90 天历史')
     expect(markup).toContain('type="checkbox" checked=""')
   })
 })

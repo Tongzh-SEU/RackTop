@@ -421,7 +421,7 @@ tr.is-current-user:not(.is-selected) td { background: color-mix(in srgb, var(--o
 .process-table .process-col--select { width: 42px; }
 .process-table .process-col--gpu { width: 68px; }
 .process-table .process-col--pid { width: 92px; }
-.process-table .process-col--relation { width: 172px; }
+.process-table .process-col--relation { width: 132px; }
 .process-table .process-col--user { width: 104px; }
 .process-table .process-col--command { width: auto; }
 .process-table .process-col--gpu-memory { width: 100px; }
@@ -429,17 +429,22 @@ tr.is-current-user:not(.is-selected) td { background: color-mix(in srgb, var(--o
 .process-table .process-col--system-memory { width: 150px; }
 .process-table .process-col--elapsed { width: 112px; }
 .process-select-cell { padding-right: 5px; padding-left: 16px; }
-.process-select-cell input { display: block; width: 14px; height: 14px; margin: 0; accent-color: var(--red); }
-.process-select-cell > span { display: block; width: 14px; height: 14px; }
+.process-select-cell > span { display: block; width: 28px; height: 28px; }
+.process-terminate-button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 1px solid color-mix(in srgb, var(--red) 22%, var(--border)); border-radius: 6px; color: color-mix(in srgb, var(--red) 78%, var(--text-secondary)); background: transparent; cursor: default; }
+.process-terminate-button:focus-visible { outline: 2px solid color-mix(in srgb, var(--red) 45%, transparent); outline-offset: 1px; }
+.process-terminate-button.is-terminating, .process-terminate-button.is-terminating:disabled { border-color: color-mix(in srgb, var(--red) 38%, var(--border)); color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); opacity: 1; }
 .process-command { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; }
 .process-relation { display: inline-flex; align-items: center; gap: 5px; min-height: 20px; padding: 3px 7px; border-radius: 5px; color: var(--text-secondary); background: var(--surface-subtle); font-size: 9px; }
 .process-relation > span + span { padding-left: 5px; border-left: 1px solid var(--border); }.process-relation small { color: var(--text-tertiary); font-size: 8px; }
+.process-task-group { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.process-task-group__marker { width: 8px; height: 8px; flex: 0 0 auto; border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: 2px; background: currentColor; }
+.process-task-group__marker--0 { color: var(--blue); }.process-task-group__marker--1 { color: var(--green); }.process-task-group__marker--2 { color: var(--orange); }.process-task-group__marker--3 { color: var(--purple); }.process-task-group__marker--4 { color: var(--red); }
 .process-blocks--compact table { min-width: 780px; font-size: 10px; }
 .process-blocks--compact th, .process-blocks--compact td { padding-right: 9px; padding-left: 9px; }
 .process-blocks--compact .process-select-cell { padding-right: 4px; padding-left: 16px; }
 .process-blocks--compact .process-col--gpu { width: 64px; }
 .process-blocks--compact .process-col--pid { width: 84px; }
-.process-blocks--compact .process-col--relation { width: 168px; }
+.process-blocks--compact .process-col--relation { width: 128px; }
 .process-blocks--compact .process-col--user { width: 96px; }
 .process-blocks--compact .process-col--gpu-memory, .process-blocks--compact .process-col--cpu { width: 78px; }
 .process-blocks--compact .process-command { padding-right: 18px; }
@@ -451,7 +456,7 @@ tr.is-current-user:not(.is-selected) td { background: color-mix(in srgb, var(--o
 .process-inspector__collapse:focus-visible { outline: 2px solid color-mix(in srgb, var(--blue) 45%, transparent); outline-offset: 1px; }
 .process-inspector__facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 10px 0 0; border-top: 1px solid var(--border); }.process-inspector__facts > div { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 8px; padding: 9px 12px 9px 0; }.process-inspector__facts dt, .process-inspector__command > span { color: var(--text-tertiary); font-size: 9px; }.process-inspector__facts dd { min-width: 0; margin: 0; overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .process-inspector__command { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 8px; padding: 10px 0 2px; border-top: 1px solid var(--border); }.process-inspector__command code { color: var(--text); line-height: 1.55; overflow-wrap: anywhere; white-space: normal; }
-@media (hover: hover) and (pointer: fine) { .process-inspector__collapse:hover { color: var(--text); background: var(--surface-subtle); } }
+@media (hover: hover) and (pointer: fine) { .process-inspector__collapse:hover { color: var(--text); background: var(--surface-subtle); }.process-terminate-button:hover { border-color: color-mix(in srgb, var(--red) 45%, var(--border)); color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); } }
 .mono, code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: .94em; }
 .inline-empty { display: grid; place-items: center; padding: 44px; color: var(--text-tertiary); text-align: center; }
 .inline-empty strong { margin: 9px 0 2px; color: var(--text); }

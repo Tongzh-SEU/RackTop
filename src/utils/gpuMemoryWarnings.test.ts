@@ -18,4 +18,18 @@ describe('deriveGpuMemoryStallWarnings', () => {
     expect(deriveGpuMemoryStallWarnings([server], { s1: snapshot(1100, 5) }, since, new Set(), 1100).since).toEqual({})
     expect(deriveGpuMemoryStallWarnings([server], { s1: snapshot(1000 + GPU_MEMORY_STALL_SECONDS, 0) }, since, new Set(['gpu-memory-stall:s1:gpu-0']), 1000 + GPU_MEMORY_STALL_SECONDS).warnings).toHaveLength(0)
   })
+
+  it('warns even when the driver cannot attribute occupied memory to a process', () => {
+    const withoutProcesses = { ...snapshot(1000 + GPU_MEMORY_STALL_SECONDS, 0, 9216), processes: [] }
+    const result = deriveGpuMemoryStallWarnings([server], { s1: withoutProcesses }, { 'gpu-memory-stall:s1:gpu-0': 1000 }, new Set(), 1000 + GPU_MEMORY_STALL_SECONDS)
+    expect(result.warnings[0]).toMatchObject({ memoryUsedMb: 9216, usernames: [] })
+  })
+
+  it('uses each server snapshot time instead of another server latest time', () => {
+    const other = { ...server, id: 's2', name: '新鲜服务器' }
+    const stale = snapshot(1100, 0)
+    const fresh = { ...snapshot(5000, 0), serverId: 's2' }
+    const result = deriveGpuMemoryStallWarnings([server, other], { s1: stale, s2: fresh }, { 'gpu-memory-stall:s1:gpu-0': 1000 }, new Set(), 5000)
+    expect(result.warnings.some((warning) => warning.serverId === 's1')).toBe(false)
+  })
 })

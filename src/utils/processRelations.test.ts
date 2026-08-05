@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Snapshot } from '../types/models'
-import { cpuChildrenOfGpu, cpuProcessRelation, gpuProcessRelation } from './processRelations'
+import { cpuChildrenOfGpu, cpuProcessRelation, currentUserProcessCount, gpuProcessRelation, processTaskRootPid } from './processRelations'
 
 const snapshot: Snapshot = {
   serverId: 'server-1', hostname: 'gpu-box', username: 'tongzh', osId: 'ubuntu', osName: 'Ubuntu', timestamp: 1, status: 'online', processesSampled: true, nvidiaSmi: 'available',
@@ -22,5 +22,12 @@ describe('process relationships', () => {
 
   it('links nested CPU processes to their CPU parent', () => {
     expect(cpuProcessRelation(snapshot.cpuProcesses[1], snapshot)).toBe('CPU PID 2212 的子进程')
+    expect(processTaskRootPid(snapshot.cpuProcesses[1], snapshot)).toBe(21_312)
+  })
+
+  it('counts one process once when it is reported on multiple GPUs or CPU telemetry', () => {
+    const duplicateGpu = { ...snapshot.processes[0], gpuUuid: 'gpu-1', gpuIndex: 1 }
+    const duplicateCpu = { ...snapshot.cpuProcesses[0], pid: snapshot.processes[0].pid, isGroupLeader: true }
+    expect(currentUserProcessCount({ ...snapshot, processes: [...snapshot.processes, duplicateGpu], cpuProcesses: [...snapshot.cpuProcesses, duplicateCpu] })).toBe(3)
   })
 })

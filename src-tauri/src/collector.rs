@@ -68,12 +68,17 @@ fi;
 if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = "1" ]; then
   printf '__RACKTOP_GPUPROC__\n';
   gpu_proc="";
-  if command -v nvidia-smi >/dev/null 2>&1; then gpu_proc="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits 2>/dev/null || true)"; printf '%s\n' "$gpu_proc"; fi;
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    if ! gpu_proc="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits 2>/dev/null)"; then
+      gpu_proc="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits 2>/dev/null || true)";
+    fi;
+    printf '%s\n' "$gpu_proc";
+  fi;
   printf '__RACKTOP_GPUPMON__\n';
   if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi pmon -c 1 -s um 2>/dev/null || true; fi;
   printf '__RACKTOP_PS__\n';
   gpu_pids="$(printf '%s\n' "$gpu_proc" | cut -d, -f2 | tr -d ' ' | paste -sd, -)";
-  ps -eo user=,uid=,pid=,ppid=,pgid=,pcpu=,pmem=,rss=,etime=,args= --sort=-pcpu 2>/dev/null | awk -v gpu_pids="$gpu_pids" -v uid_min="$uid_min" 'BEGIN { n=split(gpu_pids, ids, ","); for (i=1; i<=n; i++) if (ids[i] != "") gpu[ids[i]]=1 } { is_gpu=($3 in gpu); is_child=($4 in gpu); is_user=($2 >= uid_min); is_main=($3 == $5 && $6 > 0); has_memory=($8 > 1048576); if (is_gpu || (is_user && has_memory && (is_child || (is_main && main_count < 64)))) { print; if (!is_gpu && is_main && !is_child) main_count++ } }' || true;
+  ps -eo user:64=,uid=,pid=,ppid=,pgid=,pcpu=,pmem=,rss=,etime=,args= --sort=-pcpu 2>/dev/null | awk -v gpu_pids="$gpu_pids" -v uid_min="$uid_min" 'BEGIN { n=split(gpu_pids, ids, ","); for (i=1; i<=n; i++) if (ids[i] != "") gpu[ids[i]]=1 } { is_gpu=($3 in gpu); is_child=($4 in gpu); is_user=($2 >= uid_min); is_main=($3 == $5 && $6 > 0); has_memory=($8 > 1048576); if (is_gpu || (is_user && has_memory && (is_child || (is_main && main_count < 64)))) { print; if (!is_gpu && is_main && !is_child) main_count++ } }' || true;
 fi;
 printf '__RACKTOP_END__\n';"#;
 
@@ -426,41 +431,64 @@ fn parse_cpu_processes(ps: &HashMap<u32, PsInfo>, gpu_processes: &[ProcessMetric
 fn termination_script(pid: u32) -> Result<String, String> {
     if pid <= 1 { return Err("不能结束 PID 0 或 PID 1".into()); }
     Ok(format!(r#"pid={pid}
-current_user="$(id -un)"
-process_user="$(ps -o user= -p "$pid" 2>/dev/null | awk '{{print $1; exit}}')"
-process_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
-if [ -z "$process_user" ] || [ -z "$process_pgid" ]; then printf '__RACKTOP_TERMINATE_NOT_FOUND__\n'; exit 44; fi
-if [ "$process_user" != "$current_user" ]; then printf '__RACKTOP_TERMINATE_OWNER_MISMATCH__\n'; exit 45; fi
-if [ "$process_pgid" != "$pid" ]; then printf '__RACKTOP_TERMINATE_NOT_LEADER__\n'; exit 46; fi
-child_pids="$(pgrep -P "$pid" 2>/dev/null || true)"
-kill -TERM -- "-$process_pgid" 2>/dev/null || true
-sleep 3
-remaining_user="$(ps -o user= -p "$pid" 2>/dev/null | awk '{{print $1; exit}}')"
-remaining_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
-if [ "$remaining_user" = "$current_user" ] && [ "$remaining_pgid" = "$process_pgid" ]; then kill -KILL -- "-$process_pgid" 2>/dev/null || true; fi
-pkill -TERM -P "$pid" 2>/dev/null || true
-for child_pid in $child_pids; do kill -TERM "$child_pid" 2>/dev/null || true; done
-sleep 2
-pkill -KILL -P "$pid" 2>/dev/null || true
-for child_pid in $child_pids; do
-  child_user="$(ps -o user= -p "$child_pid" 2>/dev/null | awk '{{print $1; exit}}')"
-  if [ "$child_user" = "$current_user" ]; then kill -KILL "$child_pid" 2>/dev/null || true; fi
+current_uid="$(id -u)"
+process_uid="$(ps -o uid= -p "$pid" 2>/dev/null | tr -d ' ')"
+process_start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//')"
+if [ -z "$process_uid" ] || [ -z "$process_start" ]; then printf '__RACKTOP_TERMINATE_NOT_FOUND__\n'; exit 44; fi
+if [ "$process_uid" != "$current_uid" ]; then printf '__RACKTOP_TERMINATE_OWNER_MISMATCH__\n'; exit 45; fi
+tree_pids="$pid"
+frontier="$pid"
+while [ -n "$frontier" ]; do
+  next_frontier=""
+  for parent_pid in $frontier; do
+    children="$(pgrep -P "$parent_pid" 2>/dev/null || true)"
+    if [ -n "$children" ]; then next_frontier="$next_frontier $children"; fi
+  done
+  frontier="$next_frontier"
+  if [ -n "$frontier" ]; then tree_pids="$tree_pids $frontier"; fi
 done
+target_records=""
+for target_pid in $tree_pids; do
+  target_uid="$(ps -o uid= -p "$target_pid" 2>/dev/null | tr -d ' ')"
+  target_start="$(ps -o lstart= -p "$target_pid" 2>/dev/null | sed 's/^ *//;s/ *$//')"
+  if [ "$target_uid" = "$current_uid" ] && [ -n "$target_start" ]; then target_records="$target_records$target_pid|$target_uid|$target_start
+"; fi
+done
+printf '%s' "$target_records" | while IFS='|' read -r target_pid target_uid target_start; do
+  if [ -n "$target_pid" ]; then kill -TERM "$target_pid" 2>/dev/null || true; fi
+done
+sleep 3
+printf '%s' "$target_records" | while IFS='|' read -r target_pid target_uid target_start; do
+  [ -n "$target_pid" ] || continue
+  remaining_uid="$(ps -o uid= -p "$target_pid" 2>/dev/null | tr -d ' ')"
+  remaining_start="$(ps -o lstart= -p "$target_pid" 2>/dev/null | sed 's/^ *//;s/ *$//')"
+  if [ "$remaining_uid" = "$target_uid" ] && [ "$remaining_start" = "$target_start" ]; then kill -KILL "$target_pid" 2>/dev/null || true; fi
+done
+sleep 1
+if ! printf '%s' "$target_records" | while IFS='|' read -r target_pid target_uid target_start; do
+  [ -n "$target_pid" ] || continue
+  remaining_uid="$(ps -o uid= -p "$target_pid" 2>/dev/null | tr -d ' ')"
+  remaining_start="$(ps -o lstart= -p "$target_pid" 2>/dev/null | sed 's/^ *//;s/ *$//')"
+  if [ "$remaining_uid" = "$target_uid" ] && [ "$remaining_start" = "$target_start" ]; then exit 46; fi
+done; then
+  printf '__RACKTOP_TERMINATE_REMAINING__\n'
+  exit 46
+fi
 printf '__RACKTOP_TERMINATE_OK__\n'"#))
 }
 
-pub async fn terminate_process_group(server: &Server, password: Option<&str>, pid: u32) -> Result<String, String> {
+pub async fn terminate_process_tree(server: &Server, password: Option<&str>, pid: u32) -> Result<String, String> {
     let script = termination_script(pid)?;
     let (mut command, target) = configured_ssh_command(server, password)?;
     command.arg(target).arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = timeout(Duration::from_secs(12), command.output()).await.map_err(|_| format!("结束 PID {pid} 超时（12 秒）"))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if output.status.success() && stdout.contains("__RACKTOP_TERMINATE_OK__") {
-        return Ok(format!("已结束 PID {pid} 的进程组及残留子进程"));
+        return Ok(format!("已结束 PID {pid} 的进程树"));
     }
     if stdout.contains("__RACKTOP_TERMINATE_NOT_FOUND__") { return Err(format!("PID {pid} 已不存在，请刷新后重试")); }
     if stdout.contains("__RACKTOP_TERMINATE_OWNER_MISMATCH__") { return Err(format!("PID {pid} 不属于当前 SSH 用户，操作已阻止")); }
-    if stdout.contains("__RACKTOP_TERMINATE_NOT_LEADER__") { return Err(format!("PID {pid} 不是进程组主进程，操作已阻止")); }
+    if stdout.contains("__RACKTOP_TERMINATE_REMAINING__") { return Err(format!("PID {pid} 的部分进程仍在运行，请在终端中检查进程状态")); }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     Err(if stderr.is_empty() { format!("无法结束 PID {pid}") } else { classify_ssh_error(&stderr) })
 }
@@ -568,11 +596,20 @@ mod tests {
     fn termination_only_accepts_safe_process_ids() {
         assert!(termination_script(1).is_err());
         let script = termination_script(4242).unwrap();
-        assert!(script.contains("process_user"));
-        assert!(script.contains("process_pgid"));
-        assert!(script.contains("[ \"$process_pgid\" != \"$pid\" ]"));
-        assert!(script.contains("kill -TERM -- \"-$process_pgid\""));
-        assert!(script.contains("child_pids=\"$(pgrep -P \"$pid\""));
-        assert!(script.contains("pkill -KILL -P \"$pid\""));
+        assert!(script.contains("process_uid"));
+        assert!(script.contains("process_start"));
+        assert!(script.contains("frontier=\"$pid\""));
+        assert!(script.contains("pgrep -P \"$parent_pid\""));
+        assert!(script.contains("target_records"));
+        assert!(script.contains("kill -TERM \"$target_pid\""));
+        assert!(script.contains("remaining_start"));
+        assert!(script.contains("__RACKTOP_TERMINATE_REMAINING__"));
+        assert!(!script.contains("kill -TERM -- \"-$process_pgid\""));
+    }
+
+    #[test]
+    fn collector_prefers_standard_gpu_process_memory_field_with_legacy_fallback() {
+        assert!(REMOTE_SCRIPT.contains("used_gpu_memory"));
+        assert!(REMOTE_SCRIPT.contains("used_memory"));
     }
 }
