@@ -32,4 +32,19 @@ describe('deriveGpuMemoryStallWarnings', () => {
     const result = deriveGpuMemoryStallWarnings([server, other], { s1: stale, s2: fresh }, { 'gpu-memory-stall:s1:gpu-0': 1000 }, new Set(), 5000)
     expect(result.warnings.some((warning) => warning.serverId === 's1')).toBe(false)
   })
+
+  it('warns immediately for a defunct process that still occupies GPU memory', () => {
+    const withDefunct = { ...snapshot(1000, 0), processes: [{ ...snapshot(1000, 0).processes[0], pid: 4242, command: '[python] <defunct>' }] }
+    const result = deriveGpuMemoryStallWarnings([server], { s1: withDefunct }, {}, new Set(), 1000)
+    expect(result.warnings[0]).toMatchObject({
+      defunctProcesses: [{ pid: 4242, username: 'alice' }],
+      durationSeconds: 0,
+    })
+  })
+
+  it('does not time negligible driver memory as a stalled workload', () => {
+    const result = deriveGpuMemoryStallWarnings([server], { s1: snapshot(1000, 0, 4) }, {}, new Set(), 1000 + GPU_MEMORY_STALL_SECONDS)
+    expect(result.warnings).toEqual([])
+    expect(result.since).toEqual({})
+  })
 })

@@ -69,8 +69,18 @@ if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = "1" ]; then
   printf '__RACKTOP_GPUPROC__\n';
   gpu_proc="";
   if command -v nvidia-smi >/dev/null 2>&1; then
-    if ! gpu_proc="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits 2>/dev/null)"; then
-      gpu_proc="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits 2>/dev/null || true)";
+    query_gpu_processes() {
+      selector="$1";
+      if nvidia_smi_processes="$(nvidia-smi $selector --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits 2>/dev/null)"; then
+        printf '%s\n' "$nvidia_smi_processes"; return 0;
+      fi;
+      if nvidia_smi_processes="$(nvidia-smi $selector --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits 2>/dev/null)"; then
+        printf '%s\n' "$nvidia_smi_processes"; return 0;
+      fi;
+      return 1;
+    }
+    if ! gpu_proc="$(query_gpu_processes '')"; then
+      gpu_proc="$(printf '%s\n' "$nvidia_list" | sed -n 's/^GPU \([0-9][0-9]*\):.*/\1/p' | while read -r gpu_index; do query_gpu_processes "-i $gpu_index" || true; done)";
     fi;
     printf '%s\n' "$gpu_proc";
   fi;
@@ -611,5 +621,20 @@ mod tests {
     fn collector_prefers_standard_gpu_process_memory_field_with_legacy_fallback() {
         assert!(REMOTE_SCRIPT.contains("used_gpu_memory"));
         assert!(REMOTE_SCRIPT.contains("used_memory"));
+        assert!(REMOTE_SCRIPT.contains("query_gpu_processes \"-i $gpu_index\""));
+    }
+
+    #[test]
+    fn keeps_driver_reported_gpu_process_when_ps_cannot_see_the_pid() {
+        let output = SAMPLE.replace(
+            "tongzh 1000 4242 1 4242 12.5 2.0 204800 01:20 python train.py\n",
+            "",
+        );
+        let snapshot = parse_snapshot("server-1", &output).unwrap();
+        assert_eq!(snapshot.processes.len(), 1);
+        assert_eq!(snapshot.processes[0].pid, 4242);
+        assert_eq!(snapshot.processes[0].username, "unknown");
+        assert_eq!(snapshot.processes[0].command, "python");
+        assert_eq!(snapshot.processes[0].memory_used_mb, 2048.0);
     }
 }

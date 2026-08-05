@@ -28,6 +28,18 @@ export function SshTerminal({ serverId, serverName, gpuIndex, onNotice }: { serv
     terminal.open(containerRef.current)
     fit.fit()
     terminal.focus()
+    let fitFrame: number | null = null
+
+    const fitAndResize = () => {
+      if (fitFrame !== null) cancelAnimationFrame(fitFrame)
+      fitFrame = requestAnimationFrame(() => {
+        fitFrame = null
+        if (disposed) return
+        fit.fit()
+        const id = sessionRef.current
+        if (id) void api.resizeTerminal(id, terminal.cols, terminal.rows)
+      })
+    }
 
     const decode = (value: string) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0))
     const outputListener = listen<TerminalEvent>('terminal-output', ({ payload }) => {
@@ -51,21 +63,21 @@ export function SshTerminal({ serverId, serverName, gpuIndex, onNotice }: { serv
       send(data)
     })
 
-    const resize = new ResizeObserver(() => {
-      fit.fit()
-      const id = sessionRef.current
-      if (id) void api.resizeTerminal(id, terminal.cols, terminal.rows)
-    })
+    const resize = new ResizeObserver(fitAndResize)
     resize.observe(containerRef.current)
     void api.startTerminal(serverId, terminal.cols, terminal.rows, gpuIndex).then((id) => {
       if (disposed) { void api.closeTerminal(id); return }
       sessionRef.current = id
       setStatus('connected')
+      fit.fit()
+      void api.resizeTerminal(id, terminal.cols, terminal.rows)
+      fitAndResize()
       terminal.focus()
     }).catch((reason) => { setStatus('error'); setError(String(reason)) })
 
     return () => {
       disposed = true
+      if (fitFrame !== null) cancelAnimationFrame(fitFrame)
       resize.disconnect()
       dataDisposable.dispose()
       void outputListener.then((unlisten) => unlisten())

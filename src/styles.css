@@ -191,6 +191,9 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .mine-process-summary strong { color: var(--text-secondary); font-size: 10px; }
 .mine-process-warnings { display: grid; gap: 7px; }
 .mine-process-warning { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--orange) 35%, var(--border)); border-radius: 8px; color: var(--orange); background: color-mix(in srgb, var(--orange) 9%, var(--surface)); font-size: 12px; }
+.mine-process-warning--info { border-color: color-mix(in srgb, var(--blue) 35%, var(--border)); color: var(--blue); background: color-mix(in srgb, var(--blue) 8%, var(--surface)); }
+.mine-process-warning__dismiss { display: grid; width: 24px; height: 24px; flex: 0 0 auto; margin-left: auto; place-items: center; border: 0; border-radius: 50%; color: currentColor; background: transparent; }
+.mine-process-warning__dismiss:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
 .mine-process-list { display: grid; gap: 18px; }
 .mine-process-server { display: grid; gap: 9px; min-width: 0; }
 .mine-process-server > .panel__header { min-height: 0; padding: 0 2px; }
@@ -229,7 +232,8 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .terminal-status--connected { background: #4fb477; }.terminal-status--connecting { background: #6b9fea; }.terminal-status--error { background: #e26767; }
 .terminal-canvas { min-width: 0; min-height: 0; overflow: hidden; padding: 0 8px; }
 .terminal-canvas .xterm { width: 100%; height: 100%; }
-.terminal-canvas .xterm-viewport { overflow-y: hidden !important; }
+.terminal-canvas .xterm-viewport { overflow-y: auto !important; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.2) transparent; }
+.terminal-canvas .xterm-viewport::-webkit-scrollbar { width: 7px; }.terminal-canvas .xterm-viewport::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 5px; background: rgba(255,255,255,.2); background-clip: padding-box; }
 .terminal-error { display: flex; align-items: center; gap: 7px; padding: 7px 11px; color: #ffc0bd; background: #532321; font-size: 10px; }
 .terminal-error button { margin-left: auto; border: 0; color: inherit; background: transparent; }
 .terminal-confirm { position: absolute; z-index: 3; right: 14px; bottom: 14px; left: 14px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 12px; border: 1px solid rgba(255,255,255,.13); border-radius: 8px; color: #e7e8ea; background: rgba(34,35,40,.96); box-shadow: 0 12px 30px rgba(0,0,0,.34); }
@@ -289,6 +293,9 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .gpu-card--active { border-color: color-mix(in srgb, var(--blue) 10%, var(--border)); background: color-mix(in srgb, var(--blue) 0.8%, var(--surface)); }
 .gpu-card--high { border-color: color-mix(in srgb, var(--orange) 10%, var(--border)); background: color-mix(in srgb, var(--orange) 0.8%, var(--surface)); }
 .gpu-card--critical { border-color: color-mix(in srgb, var(--red) 10%, var(--border)); background: color-mix(in srgb, var(--red) 0.8%, var(--surface)); }
+.gpu-card--warning { border-color: color-mix(in srgb, var(--orange) 48%, var(--border)); background: color-mix(in srgb, var(--orange) 3%, var(--surface)); }
+.gpu-card__header-actions { display: inline-flex; align-items: center; gap: 9px; }
+.gpu-card__warning { display: inline-grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; color: var(--orange); background: color-mix(in srgb, var(--orange) 11%, transparent); }
 .gpu-card--unavailable, .gpu-detail--unavailable { border-color: var(--border-strong); background: var(--surface-solid); }
 .gpu-unavailable { display: flex; align-items: flex-start; gap: 10px; min-height: 84px; padding: 15px; border: 1px solid var(--border); border-radius: 8px; color: var(--text-secondary); background: var(--surface-subtle); }
 .gpu-card .gpu-unavailable { min-height: 112px; align-items: center; }
@@ -426,7 +433,6 @@ tr.is-current-user:not(.is-selected) td { background: color-mix(in srgb, var(--o
 .process-table .process-col--select { width: 42px; }
 .process-table .process-col--gpu { width: 68px; }
 .process-table .process-col--pid { width: 92px; }
-.process-table .process-col--relation { width: 132px; }
 .process-table .process-col--user { width: 104px; }
 .process-table .process-col--command { width: auto; }
 .process-table .process-col--gpu-memory { width: 100px; }
@@ -442,15 +448,14 @@ tr.is-current-user:not(.is-selected) td { background: color-mix(in srgb, var(--o
 .process-command { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; }
 .process-relation { display: inline-flex; align-items: center; gap: 5px; min-height: 20px; padding: 3px 7px; border-radius: 5px; color: var(--text-secondary); background: var(--surface-subtle); font-size: 9px; }
 .process-relation > span + span { padding-left: 5px; border-left: 1px solid var(--border); }.process-relation small { color: var(--text-tertiary); font-size: 8px; }
-.process-task-group { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
-.process-task-group__marker { width: 8px; height: 8px; flex: 0 0 auto; border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: 2px; background: currentColor; }
-.process-task-group__marker--0 { color: var(--blue); }.process-task-group__marker--1 { color: var(--green); }.process-task-group__marker--2 { color: var(--orange); }.process-task-group__marker--3 { color: var(--purple); }.process-task-group__marker--4 { color: var(--red); }
+.process-pid { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.process-task-marker { width: 5px; height: 12px; flex: 0 0 auto; border-radius: 1.5px; background: currentColor; }
+.process-task-marker--0 { color: var(--blue); }.process-task-marker--1 { color: var(--green); }.process-task-marker--2 { color: var(--orange); }.process-task-marker--3 { color: var(--purple); }.process-task-marker--4 { color: var(--red); }
 .process-blocks--compact table { min-width: 780px; font-size: 10px; }
 .process-blocks--compact th, .process-blocks--compact td { padding-right: 9px; padding-left: 9px; }
 .process-blocks--compact .process-select-cell { padding-right: 4px; padding-left: 16px; }
 .process-blocks--compact .process-col--gpu { width: 64px; }
 .process-blocks--compact .process-col--pid { width: 84px; }
-.process-blocks--compact .process-col--relation { width: 128px; }
 .process-blocks--compact .process-col--user { width: 96px; }
 .process-blocks--compact .process-col--gpu-memory, .process-blocks--compact .process-col--cpu { width: 78px; }
 .process-blocks--compact .process-command { padding-right: 18px; }

@@ -25,10 +25,9 @@ describe('ProcessBlocks', () => {
     expect(markup).not.toContain('<th>GPU · PID</th>')
     expect(markup).toContain('<th>用户</th>')
     expect(markup).toContain('tongzh')
-    expect(markup).not.toContain('任务 / 关系')
-    expect(markup).toContain('<th>任务</th>')
-    expect(markup.match(/任务组 PID 21312/g)).toHaveLength(2)
-    expect(markup).not.toContain('任务 21312')
+    expect(markup).not.toContain('<th>任务</th>')
+    expect(markup.match(/aria-label="PID (?:21312|2212)，任务根 PID 21312"/g)).toHaveLength(2)
+    expect(markup).toContain('process-task-marker')
   })
 
   it('offers a direct termination action for every current-user process', () => {

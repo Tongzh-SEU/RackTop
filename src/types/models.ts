@@ -209,6 +209,7 @@ export interface GpuMemoryStallWarning {
   gpuIndex: number
   gpuName: string
   usernames: string[]
+  defunctProcesses: Array<{ pid: number; username: string }>
   memoryUsedMb: number
   memoryTotalMb: number
   startedAt: number
