@@ -120,9 +120,8 @@ function startWindowDrag(event: MouseEvent<HTMLElement>) {
 async function toggleWindowMaximize(event: MouseEvent<HTMLElement>) {
   if (!api.isDesktop || event.button !== 0) return
   if ((event.target as HTMLElement).closest('button, input, select, textarea, a, [role="button"]')) return
-  const window = getCurrentWindow()
-  if (await window.isMaximized()) await window.unmaximize()
-  else await window.maximize()
+  event.preventDefault()
+  await getCurrentWindow().toggleMaximize()
 }
 
 function serverToDraft(server: Server): Partial<ServerDraft> {
@@ -248,6 +247,7 @@ function App() {
     } catch { return new Set() }
   })())
   const ignoredNvidiaWarningsRef = useRef(ignoredNvidiaWarnings)
+  const mineProcessInfoTimersRef = useRef(new Map<string, number>())
   const failureCounts = useRef<Record<string, number>>({})
   const lastAttemptAt = useRef<Record<string, number>>({})
   const lastProcessAttemptAt = useRef<Record<string, number>>({})
@@ -563,6 +563,28 @@ function App() {
     const timeout = window.setTimeout(() => setToast(null), 5000)
     return () => window.clearTimeout(timeout)
   }, [toast])
+
+  useEffect(() => {
+    const activeInfoIds = new Set(mineProcessWarnings.filter((warning) => warning.tone === 'info').map((warning) => warning.id))
+    for (const warningId of activeInfoIds) {
+      if (mineProcessInfoTimersRef.current.has(warningId)) continue
+      const timeout = window.setTimeout(() => {
+        mineProcessInfoTimersRef.current.delete(warningId)
+        setMineProcessWarnings((current) => current.filter((warning) => warning.id !== warningId))
+      }, 3_000)
+      mineProcessInfoTimersRef.current.set(warningId, timeout)
+    }
+    for (const [warningId, timeout] of mineProcessInfoTimersRef.current) {
+      if (activeInfoIds.has(warningId)) continue
+      window.clearTimeout(timeout)
+      mineProcessInfoTimersRef.current.delete(warningId)
+    }
+  }, [mineProcessWarnings])
+
+  useEffect(() => () => {
+    for (const timeout of mineProcessInfoTimersRef.current.values()) window.clearTimeout(timeout)
+    mineProcessInfoTimersRef.current.clear()
+  }, [])
 
   useEffect(() => {
     if (!settings) return
@@ -1444,7 +1466,9 @@ function MineProcessView({ servers, snapshots, warnings, terminatingProcess, onD
     return mineSnapshot.processes.length || mineSnapshot.cpuProcesses.length ? [{ server, snapshot: mineSnapshot }] : []
   })
   const mineCount = mineServers.reduce((sum, item) => sum + currentUserProcessCount(item.snapshot), 0)
-  return <div className="detail-page mine-process-page">{mineServers.length > 0 && <section className="mine-process-summary" aria-label="我的进程摘要"><span>{mineServers.length} 台服务器</span><strong>{mineCount} 个进程</strong></section>}{warnings.length > 0 && <section className="mine-process-warnings" aria-live="polite">{warnings.map((warning) => <div className={`mine-process-warning mine-process-warning--${warning.tone}`} key={warning.id}><AlertCircle size={17} /><span>{warning.message}</span><button type="button" className="mine-process-warning__dismiss" onClick={() => onDismissWarning(warning.id)} aria-label="忽略这条提示" title="忽略"><X size={13} /></button></div>)}</section>}{mineServers.length > 0 ? <div className="mine-process-list">{mineServers.map(({ server, snapshot }) => <section className="mine-process-server" key={server.id}><PanelHeader icon={<ServerIcon />} title={server.name} subtitle={`${server.host} · 最近采集 ${relativeTime(snapshot.timestamp)}`} action={<button className="icon-button" aria-label={`打开 ${server.name} 终端`} title="打开终端" onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={16} /></button>} /><ProcessBlocks snapshot={snapshot} hideEmptyBlocks terminatingPid={terminatingProcess?.serverId === server.id ? terminatingProcess.pid : undefined} onRequestTerminate={(target) => onRequestTerminate(server.id, target)} /></section>)}</div> : <div className="mine-process-empty" role="status"><UserRound size={28} /><strong>没有我的进程</strong><p>当前已连接的服务器上没有检测到你的 GPU 或 CPU 进程。</p></div>}</div>
+  const successNotices = warnings.filter((warning) => warning.tone === 'info')
+  const persistentWarnings = warnings.filter((warning) => warning.tone === 'warning')
+  return <div className="detail-page mine-process-page">{successNotices.length > 0 && <section className="mine-process-successes" aria-live="polite" aria-label="进程状态">{successNotices.map((notice) => <div className="mine-process-success" role="status" key={notice.id}><CheckCircle2 size={16} /><span>{notice.message}</span></div>)}</section>}{mineServers.length > 0 && <section className="mine-process-summary" aria-label="我的进程摘要"><span>{mineServers.length} 台服务器</span><strong>{mineCount} 个进程</strong></section>}{persistentWarnings.length > 0 && <section className="mine-process-warnings" aria-live="polite">{persistentWarnings.map((warning) => <div className="mine-process-warning mine-process-warning--warning" key={warning.id}><AlertCircle size={17} /><span>{warning.message}</span><button type="button" className="mine-process-warning__dismiss" onClick={() => onDismissWarning(warning.id)} aria-label="忽略这条提示" title="忽略"><X size={13} /></button></div>)}</section>}{mineServers.length > 0 ? <div className="mine-process-list">{mineServers.map(({ server, snapshot }) => <section className="mine-process-server" key={server.id}><PanelHeader icon={<ServerIcon />} title={server.name} subtitle={`${server.host} · 最近采集 ${relativeTime(snapshot.timestamp)}`} action={<button className="icon-button" aria-label={`打开 ${server.name} 终端`} title="打开终端" onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={16} /></button>} /><ProcessBlocks snapshot={snapshot} hideEmptyBlocks terminatingPid={terminatingProcess?.serverId === server.id ? terminatingProcess.pid : undefined} onRequestTerminate={(target) => onRequestTerminate(server.id, target)} /></section>)}</div> : <div className="mine-process-empty" role="status"><UserRound size={28} /><strong>没有我的进程</strong><p>当前已连接的服务器上没有检测到你的 GPU 或 CPU 进程。</p></div>}</div>
 }
 
 function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentReservation, onFiltersChange, onReserve, sortRevision, onSelect, onQuickTerminal, onReserveGpu }: { servers: Server[]; snapshots: Record<string, Snapshot>; items: IdleGpuItem[]; filters: IdleFilters; currentReservation?: IdleReservation; onFiltersChange: (filters: IdleFilters) => void; onReserve: () => void; sortRevision: number; onSelect: (serverId: string, gpuUuid: string) => void; onQuickTerminal: (server: Server, gpu: Snapshot['gpus'][number]) => void; onReserveGpu: (server: Server, gpu: Snapshot['gpus'][number]) => void }) {
@@ -1595,11 +1619,11 @@ function IdleReservationCenter({ reservations, warnings, onClose, onEdit, onStat
   }
   return <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <section className="sheet reservation-center-sheet" role="dialog" aria-modal="true" aria-labelledby="reservation-center-title">
-      <header className="sheet__header"><div><p className="eyebrow">预约与通知</p><h2 id="reservation-center-title">{activeCount} 个预约正在监测{warnings.length ? ` · ${warnings.length} 个预警` : ''}</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
+      <header className="sheet__header"><div><p className="eyebrow">预约与通知</p><h2 id="reservation-center-title">{activeCount} 个预约正在监测{warnings.length ? ` · ${warnings.length} 个预警` : ''}</h2></div></header>
       <div className="reservation-list">
         {warnings.map((warning) => <div className="reservation-row reservation-row--warning" key={warning.id}>
           <span className="reservation-row__status reservation-row__status--warning"><AlertCircle size={15} /></span>
-          <div className="reservation-row__content"><div><strong>{warning.serverName} · GPU {warning.gpuIndex} · {warning.gpuName.replace('NVIDIA ', '')}</strong><em>显存占用预警</em></div><p>{warning.defunctProcesses.length ? `检测到僵尸 GPU 进程，仍占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} / ${(warning.memoryTotalMb / 1024).toFixed(1)} GB 显存` : `GPU MEM 已占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} / ${(warning.memoryTotalMb / 1024).toFixed(1)} GB，但 UTL 为 0，已持续 ${Math.floor(warning.durationSeconds / 3600)} 小时`}</p><small>{warning.defunctProcesses.length ? `进程：${warning.defunctProcesses.map((process) => `${process.username}（PID ${process.pid}）`).join('、')}` : warning.usernames.length ? `用户：${warning.usernames.join('、')}` : '未识别到对应进程'} · 允许系统通知时会同步提醒</small></div>
+          <div className="reservation-row__content"><div><strong>{warning.serverName} · GPU {warning.gpuIndex} · {warning.gpuName.replace('NVIDIA ', '')}</strong><em>显存占用预警</em></div><p>{warning.defunctProcesses.length ? `检测到僵尸 GPU 进程，仍占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} / ${(warning.memoryTotalMb / 1024).toFixed(1)} GB 显存` : `GPU MEM 已占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} / ${(warning.memoryTotalMb / 1024).toFixed(1)} GB，但 UTL 为 0，已持续 ${Math.floor(warning.durationSeconds / 3600)} 小时`}</p><small>{warning.defunctProcesses.length ? `进程：${warning.defunctProcesses.map((process) => `${process.username}（PID ${process.pid}）`).join('、')}` : warning.usernames.length ? `用户：${warning.usernames.join('、')}` : '未识别到对应进程'}</small></div>
           <div className="reservation-row__actions"><button className="button button--secondary button--small" onClick={() => onIgnoreWarning(warning)}>忽略</button></div>
         </div>)}
         {reservations.map((reservation) => <div className="reservation-row" key={reservation.id}>
