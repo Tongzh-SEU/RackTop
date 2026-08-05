@@ -37,7 +37,7 @@ function ResourceHeatmap({ title, subtitle, resource, points, days, defaultMetri
         </div>
       </header>
       <div className="history-heatmap__scroll">
-        <div className="history-heatmap__grid" style={{ gridTemplateColumns: `42px repeat(${days.length}, var(--heat-cell-size))` }} role="img" aria-label={`${title} ${metricLabel} 每 3 小时平均值热力图`}>
+        <div className="history-heatmap__grid" data-columns={days.length} data-rows={HEATMAP_ROWS_PER_DAY} style={{ gridTemplateColumns: `42px repeat(${days.length}, minmax(var(--heat-cell-size), 1fr))`, minWidth: `${42 + days.length * 13}px` }} role="img" aria-label={`${title} ${metricLabel} 每 3 小时平均值热力图`}>
           <span aria-hidden="true" />
           {days.map((day, index) => <span className="history-heatmap__day" key={day.key} title={day.fullLabel}>{index === 0 || index === days.length - 1 || (index % labelStep === 0 && days.length - index > 2) ? day.label : ''}</span>)}
           {Array.from({ length: HEATMAP_ROWS_PER_DAY }, (_, row) => {

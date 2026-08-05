@@ -37,12 +37,33 @@ printf '__RACKTOP_USERCPU__\n'; ps -u "$(id -un)" -o pcpu= 2>/dev/null | awk -v 
 printf '__RACKTOP_NVIDIA__\n';
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   printf 'missing\n';
-elif ! nvidia-smi -L >/dev/null 2>&1; then
-  printf 'failed\n'; nvidia-smi -L 2>&1 || true;
 else
-  printf 'available\n';
-  printf '__RACKTOP_GPU__\n';
-  nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits;
+  nvidia_list="$(nvidia-smi -L 2>&1)"; nvidia_status=$?;
+  if [ "$nvidia_status" -eq 0 ]; then nvidia_state=available;
+  elif printf '%s\n' "$nvidia_list" | grep -q '^GPU [0-9][0-9]*:'; then nvidia_state=degraded;
+  elif printf '%s\n' "$nvidia_list" | grep -qi 'permission denied'; then nvidia_state=permissionDenied;
+  else nvidia_state=failed; fi;
+  printf '%s\n' "$nvidia_state";
+  if [ "$nvidia_state" != available ]; then printf '%s\n' "$nvidia_list"; fi;
+  if [ "$nvidia_state" = available ] || [ "$nvidia_state" = degraded ]; then
+    printf '__RACKTOP_GPU__\n';
+    if [ "$nvidia_state" = available ]; then
+      nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null || true;
+    else
+      printf '%s\n' "$nvidia_list" | sed -n 's/^GPU \([0-9][0-9]*\):.*/\1/p' | while read -r gpu_index; do
+        nvidia-smi -i "$gpu_index" --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null || true;
+      done;
+      printf '%s\n' "$nvidia_list" | awk '
+        /^GPU [0-9][0-9]*:/ {
+          value=$0; sub(/^GPU /, "", value); sub(/:.*/, "", value); next_index=value+1; next
+        }
+        /Unable to determine the device handle for gpu / {
+          match($0, /gpu [0-9A-Fa-f:.]+/); bus=substr($0, RSTART+4, RLENGTH-4); sub(/:$/, "", bus);
+          uuid=bus; gsub(/[^0-9A-Za-z]/, "_", uuid);
+          printf "%d, Unavailable GPU (%s), unavailable-%s, 0, 0, 0, 0, 0, 0\n", next_index, bus, uuid; next_index++
+        }';
+    fi;
+  fi;
 fi;
 if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = "1" ]; then
   printf '__RACKTOP_GPUPROC__\n';
@@ -61,6 +82,15 @@ pub async fn collect(server: &Server) -> Result<Snapshot, String> {
 }
 
 pub async fn collect_with_password(server: &Server, password: Option<&str>, include_processes: bool, include_disks: bool) -> Result<Snapshot, String> {
+    collect_with_password_detailed(server, password, include_processes, include_disks).await.map(|result| result.snapshot)
+}
+
+pub struct CollectionResult {
+    pub snapshot: Snapshot,
+    pub response_bytes: u64,
+}
+
+pub async fn collect_with_password_detailed(server: &Server, password: Option<&str>, include_processes: bool, include_disks: bool) -> Result<CollectionResult, String> {
     let (mut command, target) = configured_ssh_command(server, password)?;
     command.arg(target).arg(format!(
         "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{REMOTE_SCRIPT}",
@@ -73,7 +103,54 @@ pub async fn collect_with_password(server: &Server, password: Option<&str>, incl
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(classify_ssh_error(&stderr));
     }
-    parse_snapshot(&server.id, &String::from_utf8_lossy(&output.stdout))
+    let snapshot = parse_snapshot(&server.id, &String::from_utf8_lossy(&output.stdout))?;
+    Ok(CollectionResult { snapshot, response_bytes: output.stdout.len() as u64 })
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+pub fn collection_display_command(server: &Server, include_processes: bool, include_disks: bool) -> String {
+    let mut arguments = vec![
+        "-o ConnectTimeout=8".to_string(),
+        "-o ServerAliveInterval=5".to_string(),
+        "-o ServerAliveCountMax=2".to_string(),
+        "-o StrictHostKeyChecking=yes".to_string(),
+    ];
+    if server.auth_method == "password" {
+        arguments.extend([
+            "-o BatchMode=no".to_string(),
+            "-o PreferredAuthentications=password,keyboard-interactive".to_string(),
+            "-o PubkeyAuthentication=no".to_string(),
+            "-o NumberOfPasswordPrompts=1".to_string(),
+        ]);
+    } else {
+        arguments.push("-o BatchMode=yes".to_string());
+    }
+    #[cfg(unix)]
+    arguments.extend([
+        "-o ControlMaster=auto".to_string(),
+        "-o ControlPersist=600".to_string(),
+        "-o ControlPath=/tmp/racktop-%C".to_string(),
+    ]);
+    if let Some(identity) = server.identity_file.as_deref().filter(|value| !value.is_empty()) {
+        arguments.push(format!("-i {}", shell_quote(identity)));
+    }
+    if let Some(proxy) = server.proxy_jump.as_deref().filter(|value| !value.is_empty()) {
+        arguments.push(format!("-J {}", shell_quote(proxy)));
+    }
+    let target = server.ssh_alias.as_deref().filter(|value| !value.is_empty()).map(str::to_string).unwrap_or_else(|| {
+        arguments.push(format!("-p {}", server.port));
+        format!("{}@{}", server.username, server.host)
+    });
+    let remote_command = format!(
+        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{REMOTE_SCRIPT}",
+        if include_processes { 1 } else { 0 },
+        if include_disks { 1 } else { 0 },
+        if server.remote_history_enabled { 1 } else { 0 },
+    );
+    format!("ssh {} {} {}", arguments.join(" "), shell_quote(&target), shell_quote(&remote_command))
 }
 
 pub(crate) fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<(Command, String), String> {
@@ -427,6 +504,24 @@ mod tests {
         assert!(!snapshot.cpu_processes.iter().any(|process| process.pid == 5900));
         assert_eq!(snapshot.system.memory_used_bytes, 25_000 * 1024);
         assert!((snapshot.system.cpu_utilization - 30.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn keeps_healthy_gpus_when_one_device_handle_fails() {
+        let output = SAMPLE.replacen(
+            "available\n__RACKTOP_GPU__\n0, NVIDIA GeForce RTX 4090 D, GPU-abc, 25, 10, 2048, 24564, 48, 110.5",
+            "degraded\nGPU 0: NVIDIA GeForce RTX 4090 (UUID: GPU-abc)\nUnable to determine the device handle for gpu 0000:D1:00.0: Unknown Error\n__RACKTOP_GPU__\n0, NVIDIA GeForce RTX 4090 D, GPU-abc, 25, 10, 2048, 24564, 48, 110.5\n1, Unavailable GPU (0000:D1:00.0), unavailable-0000_D1_00_0, 0, 0, 0, 0, 0, 0",
+            1,
+        );
+        let snapshot = parse_snapshot("server-1", &output).unwrap();
+        assert_eq!(snapshot.nvidia_smi, "degraded");
+        assert_eq!(snapshot.status, "warning");
+        assert_eq!(snapshot.gpus.len(), 2);
+        assert_eq!(snapshot.gpus[0].uuid, "GPU-abc");
+        assert_eq!(snapshot.gpus[1].uuid, "unavailable-0000_D1_00_0");
+        assert_eq!(snapshot.gpus[1].index, 1);
+        assert!(snapshot.nvidia_message.as_deref().unwrap_or_default().contains("0000:D1:00.0"));
+        assert!(REMOTE_SCRIPT.contains("nvidia_state=degraded"));
     }
 
     #[test]

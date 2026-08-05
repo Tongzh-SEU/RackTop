@@ -32,6 +32,12 @@ describe('HistoryHeatmaps', () => {
     expect(markup).toContain('GPU 1 MEM 每 3 小时平均值热力图')
   })
 
+  it('uses a full-width responsive grid while preserving minimum cell size', () => {
+    const markup = renderToStaticMarkup(<HistoryHeatmaps snapshot={snapshot} points={points} retentionDays={30} />)
+    expect(markup).toContain('data-columns="30" data-rows="8"')
+    expect(markup).toContain('repeat(30, minmax(var(--heat-cell-size), 1fr))')
+  })
+
   it('swaps UTL and MEM colors for CPU and GPU heatmaps', () => {
     expect(historyHeatmapTone('utilization', 'blue')).toBe('purple')
     expect(historyHeatmapTone('memory', 'blue')).toBe('blue')

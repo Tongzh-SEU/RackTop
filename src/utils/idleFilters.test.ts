@@ -43,4 +43,14 @@ describe('idle filters', () => {
     expect(rankIdleGpuItems([server], snapshots, {}, { ...DEFAULT_IDLE_FILTERS, gpuMemoryGb: 40 })[0].available).toBe(true)
     expect(rankIdleGpuItems([server], snapshots, {}, { ...DEFAULT_IDLE_FILTERS, gpuMemoryGb: 40.1 })[0].available).toBe(false)
   })
+
+  it('excludes unreadable GPU placeholders from idle and reservation results', () => {
+    const unavailableSnapshot = {
+      ...snapshot,
+      nvidiaSmi: 'degraded' as const,
+      gpus: [...snapshot.gpus, { ...snapshot.gpus[0], index: 1, uuid: 'unavailable-0000_D1_00_0', name: 'Unavailable GPU (0000:D1:00.0)', memoryUsedMb: 0, memoryTotalMb: 0 }],
+    }
+    const items = rankIdleGpuItems([server], { [server.id]: unavailableSnapshot }, {}, DEFAULT_IDLE_FILTERS)
+    expect(items.map((item) => item.gpu.uuid)).toEqual(['gpu-0'])
+  })
 })

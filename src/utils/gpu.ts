@@ -24,6 +24,10 @@ export function gpuMemoryPercent(gpu: GpuMetric): number {
   return clampPercent(gpu.memoryUsedMb / gpu.memoryTotalMb * 100)
 }
 
+export function isGpuAvailable(gpu: GpuMetric): boolean {
+  return !gpu.uuid.startsWith('unavailable-')
+}
+
 export function aggregateGpuMemoryPercent(gpus: GpuMetric[]): number {
   const totals = gpus.reduce((result, gpu) => ({
     used: result.used + (Number.isFinite(gpu.memoryUsedMb) ? Math.max(0, gpu.memoryUsedMb) : 0),
@@ -54,7 +58,7 @@ export function gpuMemoryLevel(memoryPercent: number): GpuLevel {
 }
 
 export function isGpuIdle(gpu: GpuMetric, utilizationThreshold: number): boolean {
-  return gpu.utilization < utilizationThreshold && gpuMemoryPercent(gpu) < 1
+  return isGpuAvailable(gpu) && gpu.utilization < utilizationThreshold && gpuMemoryPercent(gpu) < 1
 }
 
 export function hasEnoughFreeGpuMemory(gpu: GpuMetric, minimumFreeMemoryMb: number): boolean {

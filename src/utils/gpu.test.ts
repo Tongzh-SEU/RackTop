@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GpuMetric, ProcessMetric } from '../types/models'
-import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, countOtherUserGpuWorkloads, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
+import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, countOtherUserGpuWorkloads, displayedGpuMemoryPercent, formatGpuProcessMemory, gpuMemoryLevel, gpuMemoryPercent, hasEnoughFreeGpuMemory, hasOtherUserGpuWorkload, isGpuAvailable, isGpuIdle, isIgnoredSystemGpuProcess } from './gpu'
 
 function gpu(memoryUsedMb: number, memoryTotalMb = 40_960, utilization = 0): GpuMetric {
   return {
@@ -48,6 +48,12 @@ describe('GPU memory display semantics', () => {
   it('keeps core utilization as an independent idle condition', () => {
     expect(isGpuIdle(gpu(14, 40_960, 10), 10)).toBe(false)
     expect(isGpuIdle(gpu(14, 40_960, 9.9), 10)).toBe(true)
+  })
+
+  it('never treats an unreadable GPU placeholder as idle capacity', () => {
+    const unavailable = { ...gpu(0, 0, 0), uuid: 'unavailable-0000_D1_00_0', name: 'Unavailable GPU (0000:D1:00.0)' }
+    expect(isGpuAvailable(unavailable)).toBe(false)
+    expect(isGpuIdle(unavailable, 10)).toBe(false)
   })
 
   it('weights aggregate GPU memory usage by device capacity', () => {

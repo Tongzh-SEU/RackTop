@@ -12,12 +12,20 @@ echarts.use([LineChart, GridComponent, LegendComponent, MarkAreaComponent, Toolt
 const BYTES_PER_GB = 1024 ** 3
 const MAX_CONTINUOUS_GAP_MS = 5 * MINUTE_MS
 
+function continuousGapThreshold(points: HistoryPoint[]) {
+  const intervals = points.slice(1).map((point, index) => (point.timestamp - points[index].timestamp) * 1000).filter((value) => value > 0).sort((a, b) => a - b)
+  if (intervals.length < 3) return MAX_CONTINUOUS_GAP_MS
+  const typical = intervals[Math.floor(intervals.length / 2)] ?? 0
+  return Math.max(MAX_CONTINUOUS_GAP_MS, typical * 2.5)
+}
+
 export function trendSeriesData(points: HistoryPoint[], valueOf: (point: HistoryPoint) => number | null) {
   const data: Array<[number, number | null]> = []
+  const gapThreshold = continuousGapThreshold(points)
   points.forEach((point, index) => {
     const timestamp = point.timestamp * 1000
     const previous = points[index - 1]
-    if (previous && timestamp - previous.timestamp * 1000 > MAX_CONTINUOUS_GAP_MS) {
+    if (previous && timestamp - previous.timestamp * 1000 > gapThreshold) {
       data.push([Math.floor((timestamp + previous.timestamp * 1000) / 2), null])
     }
     const value = valueOf(point)
@@ -28,16 +36,22 @@ export function trendSeriesData(points: HistoryPoint[], valueOf: (point: History
 
 export function missingTimeRanges(points: HistoryPoint[]) {
   const data: Array<[{ xAxis: number }, { xAxis: number }]> = []
+  const gapThreshold = continuousGapThreshold(points)
   for (let index = 1; index < points.length; index += 1) {
     const previous = points[index - 1]
     const point = points[index]
-    if ((point.timestamp - previous.timestamp) * 1000 <= MAX_CONTINUOUS_GAP_MS) continue
+    if ((point.timestamp - previous.timestamp) * 1000 <= gapThreshold) continue
     data.push([
       { xAxis: (previous.timestamp + 60) * 1000 },
       { xAxis: (point.timestamp - 60) * 1000 },
     ])
   }
   return data
+}
+
+function peakRangeSeries(id: string, points: HistoryPoint[], averageOf: (point: HistoryPoint) => number | null, minOf: (point: HistoryPoint) => number | null, maxOf: (point: HistoryPoint) => number | null, color: string) {
+  const stack = `${id}:range`
+  return [{ id: `${id}:range-min`, type: 'line', stack, silent: true, showSymbol: false, connectNulls: false, data: trendSeriesData(points, (point) => minOf(point) ?? averageOf(point)), lineStyle: { width: 0, opacity: 0 }, areaStyle: { opacity: 0 }, tooltip: { show: false } }, { id: `${id}:range-span`, type: 'line', stack, silent: true, showSymbol: false, connectNulls: false, data: trendSeriesData(points, (point) => { const average = averageOf(point); const min = minOf(point) ?? average; const max = maxOf(point) ?? average; return min == null || max == null ? null : Math.max(0, max - min) }), lineStyle: { width: 0, opacity: 0 }, areaStyle: { color, opacity: 0.1 }, tooltip: { show: false } }]
 }
 
 function percentTooltip(value: number) {
@@ -78,6 +92,7 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
   const missingArea = missingRanges.length ? { silent: true, label: { show: false }, itemStyle: { color: 'rgba(142, 145, 152, 0.08)' }, data: missingRanges } : undefined
   if (mode === 'all' || mode === 'cpu') {
     const valueOf = (point: HistoryPoint) => point.cpuUtilization
+    series.push(...peakRangeSeries('cpu-utilization', points, valueOf, (point) => point.cpuMin ?? null, (point) => point.cpuMax ?? null, '#0a84ff'))
     series.push({
       id: 'cpu-utilization',
       name: 'CPU',
@@ -96,6 +111,7 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
   }
   if (mode === 'systemMemory') {
     const memoryValueOf = (point: HistoryPoint) => point.memoryUtilization
+    series.push(...peakRangeSeries('system-memory-utilization', points, memoryValueOf, (point) => point.memoryMin ?? null, (point) => point.memoryMax ?? null, '#af52de'))
     series.push({
       id: 'system-memory-utilization',
       name: '系统内存',
@@ -112,6 +128,7 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
       markArea: missingArea,
     })
     const swapValueOf = (point: HistoryPoint) => point.swapUtilization ?? null
+    series.push(...peakRangeSeries('swap-utilization', points, swapValueOf, (point) => point.swapMin ?? null, (point) => point.swapMax ?? null, '#ff9f0a'))
     series.push({
       id: 'swap-utilization',
       name: 'SWP',
@@ -134,6 +151,9 @@ export function TrendChart({ points, snapshot, mode = 'all', height = 260, anima
       const id = `${isMemory ? 'gpu-memory' : 'gpu-utilization'}:${gpu.uuid}`
       const color = colors[index % colors.length]
       const valueOf = (point: HistoryPoint) => isMemory ? point.gpuMemoryUtilizations?.[gpu.uuid] ?? null : point.gpuUtilizations[gpu.uuid] ?? null
+      const minOf = (point: HistoryPoint) => isMemory ? point.gpuMemoryMins?.[gpu.uuid] ?? null : point.gpuMins?.[gpu.uuid] ?? null
+      const maxOf = (point: HistoryPoint) => isMemory ? point.gpuMemoryMaxes?.[gpu.uuid] ?? null : point.gpuMaxes?.[gpu.uuid] ?? null
+      series.push(...peakRangeSeries(id, points, valueOf, minOf, maxOf, color))
       series.push({
         id,
         name: `GPU ${gpu.index}`,

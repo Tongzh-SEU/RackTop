@@ -8,6 +8,11 @@ use std::{
 use uuid::Uuid;
 
 const REMOTE_CLEANUP_TTL_SECONDS: i64 = 86_400;
+const RAW_HISTORY_SECONDS: i64 = 90 * 60;
+const MID_HISTORY_SECONDS: i64 = 3 * 60 * 60;
+const TREND_HISTORY_SECONDS: i64 = 72 * 60 * 60;
+const MID_HISTORY_BUCKET_SECONDS: i64 = 3 * 60;
+const LONG_HISTORY_BUCKET_SECONDS: i64 = 10 * 60;
 
 #[derive(Debug, Clone)]
 pub struct RemoteCleanupTask {
@@ -47,8 +52,169 @@ struct StoredHistorySample {
     gpu_memory_utilizations: HashMap<String, f64>,
 }
 
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactedHistoryRange {
+    #[serde(default)]
+    history_range_version: u8,
+    #[serde(default)]
+    sample_count: i64,
+    #[serde(default)]
+    cpu_min: f64,
+    #[serde(default)]
+    cpu_max: f64,
+    #[serde(default)]
+    memory_min: f64,
+    #[serde(default)]
+    memory_max: f64,
+    #[serde(default)]
+    swap_min: f64,
+    #[serde(default)]
+    swap_max: f64,
+    #[serde(default)]
+    gpu_mins: HashMap<String, f64>,
+    #[serde(default)]
+    gpu_maxes: HashMap<String, f64>,
+    #[serde(default)]
+    gpu_memory_mins: HashMap<String, f64>,
+    #[serde(default)]
+    gpu_memory_maxes: HashMap<String, f64>,
+}
+
+#[derive(Default)]
+struct TrendHistoryBucket {
+    row_count: i64,
+    sample_count: i64,
+    cpu_sum: f64,
+    memory_sum: f64,
+    swap_sum: f64,
+    cpu_min: Option<f64>,
+    cpu_max: Option<f64>,
+    memory_min: Option<f64>,
+    memory_max: Option<f64>,
+    swap_min: Option<f64>,
+    swap_max: Option<f64>,
+    gpu_utilization_sums: HashMap<String, f64>,
+    gpu_utilization_counts: HashMap<String, i64>,
+    gpu_mins: HashMap<String, f64>,
+    gpu_maxes: HashMap<String, f64>,
+    gpu_memory_sums: HashMap<String, f64>,
+    gpu_memory_counts: HashMap<String, i64>,
+    gpu_memory_mins: HashMap<String, f64>,
+    gpu_memory_maxes: HashMap<String, f64>,
+}
+
 fn hour_start(timestamp: i64) -> i64 {
     timestamp - timestamp.rem_euclid(3_600)
+}
+
+fn bucket_start(timestamp: i64, bucket_seconds: i64) -> i64 {
+    timestamp - timestamp.rem_euclid(bucket_seconds)
+}
+
+fn merge_min(target: &mut Option<f64>, value: f64) { *target = Some(target.map_or(value, |current| current.min(value))); }
+fn merge_max(target: &mut Option<f64>, value: f64) { *target = Some(target.map_or(value, |current| current.max(value))); }
+fn merge_map_min(target: &mut HashMap<String, f64>, values: &HashMap<String, f64>) { for (key, value) in values { target.entry(key.clone()).and_modify(|current| *current = current.min(*value)).or_insert(*value); } }
+fn merge_map_max(target: &mut HashMap<String, f64>, values: &HashMap<String, f64>) { for (key, value) in values { target.entry(key.clone()).and_modify(|current| *current = current.max(*value)).or_insert(*value); } }
+
+fn add_trend_sample(bucket: &mut TrendHistoryBucket, cpu: f64, memory: f64, swap: f64, gpu_json: &str, gpu_memory_json: &str, payload_json: &str) {
+    let range: CompactedHistoryRange = serde_json::from_str(payload_json).unwrap_or_default();
+    let weight = if range.history_range_version == 1 { range.sample_count.max(1) } else { 1 };
+    let gpu_values: HashMap<String, f64> = serde_json::from_str(gpu_json).unwrap_or_default();
+    let gpu_memory_values: HashMap<String, f64> = serde_json::from_str(gpu_memory_json).unwrap_or_default();
+    bucket.row_count += 1;
+    bucket.sample_count += weight;
+    bucket.cpu_sum += cpu * weight as f64;
+    bucket.memory_sum += memory * weight as f64;
+    bucket.swap_sum += swap * weight as f64;
+    merge_min(&mut bucket.cpu_min, if range.history_range_version == 1 { range.cpu_min } else { cpu });
+    merge_max(&mut bucket.cpu_max, if range.history_range_version == 1 { range.cpu_max } else { cpu });
+    merge_min(&mut bucket.memory_min, if range.history_range_version == 1 { range.memory_min } else { memory });
+    merge_max(&mut bucket.memory_max, if range.history_range_version == 1 { range.memory_max } else { memory });
+    merge_min(&mut bucket.swap_min, if range.history_range_version == 1 { range.swap_min } else { swap });
+    merge_max(&mut bucket.swap_max, if range.history_range_version == 1 { range.swap_max } else { swap });
+    adjust_metric_totals(&mut bucket.gpu_utilization_sums, &mut bucket.gpu_utilization_counts, &gpu_values, weight);
+    adjust_metric_totals(&mut bucket.gpu_memory_sums, &mut bucket.gpu_memory_counts, &gpu_memory_values, weight);
+    merge_map_min(&mut bucket.gpu_mins, if range.history_range_version == 1 { &range.gpu_mins } else { &gpu_values });
+    merge_map_max(&mut bucket.gpu_maxes, if range.history_range_version == 1 { &range.gpu_maxes } else { &gpu_values });
+    merge_map_min(&mut bucket.gpu_memory_mins, if range.history_range_version == 1 { &range.gpu_memory_mins } else { &gpu_memory_values });
+    merge_map_max(&mut bucket.gpu_memory_maxes, if range.history_range_version == 1 { &range.gpu_memory_maxes } else { &gpu_memory_values });
+}
+
+fn insert_compacted_trend(connection: &Connection, server_id: &str, timestamp: i64, bucket: &TrendHistoryBucket) -> Result<(), String> {
+    let samples = bucket.sample_count.max(1) as f64;
+    let gpu_utilizations: HashMap<String, f64> = bucket.gpu_utilization_sums.iter().filter_map(|(uuid, sum)| {
+        let count = bucket.gpu_utilization_counts.get(uuid).copied().unwrap_or_default();
+        (count > 0).then_some((uuid.clone(), sum / count as f64))
+    }).collect();
+    let gpu_memory_utilizations: HashMap<String, f64> = bucket.gpu_memory_sums.iter().filter_map(|(uuid, sum)| {
+        let count = bucket.gpu_memory_counts.get(uuid).copied().unwrap_or_default();
+        (count > 0).then_some((uuid.clone(), sum / count as f64))
+    }).collect();
+    let range = CompactedHistoryRange { history_range_version: 1, sample_count: bucket.sample_count, cpu_min: bucket.cpu_min.unwrap_or_default(), cpu_max: bucket.cpu_max.unwrap_or_default(), memory_min: bucket.memory_min.unwrap_or_default(), memory_max: bucket.memory_max.unwrap_or_default(), swap_min: bucket.swap_min.unwrap_or_default(), swap_max: bucket.swap_max.unwrap_or_default(), gpu_mins: bucket.gpu_mins.clone(), gpu_maxes: bucket.gpu_maxes.clone(), gpu_memory_mins: bucket.gpu_memory_mins.clone(), gpu_memory_maxes: bucket.gpu_memory_maxes.clone() };
+    connection.execute(
+        "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![server_id, timestamp, bucket.cpu_sum / samples, bucket.memory_sum / samples, bucket.swap_sum / samples, serde_json::to_string(&gpu_utilizations).map_err(|error| error.to_string())?, serde_json::to_string(&gpu_memory_utilizations).map_err(|error| error.to_string())?, serde_json::to_string(&range).map_err(|error| error.to_string())?],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn compact_time_bucket(connection: &Connection, server_id: &str, start: i64, end: i64) -> Result<(), String> {
+    let mut bucket = TrendHistoryBucket::default();
+    {
+        let mut statement = connection.prepare("SELECT cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 AND timestamp<?3").map_err(|error| error.to_string())?;
+        let rows = statement.query_map(params![server_id, start, end], |row| Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?))).map_err(|error| error.to_string())?;
+        for row in rows {
+            let (cpu, memory, swap, gpu_json, gpu_memory_json, payload_json) = row.map_err(|error| error.to_string())?;
+            add_trend_sample(&mut bucket, cpu, memory, swap, &gpu_json, &gpu_memory_json, &payload_json);
+        }
+    }
+    if bucket.row_count > 1 {
+        connection.execute("DELETE FROM snapshots WHERE server_id=?1 AND timestamp>=?2 AND timestamp<?3", params![server_id, start, end]).map_err(|error| error.to_string())?;
+        insert_compacted_trend(connection, server_id, start, &bucket)?;
+    }
+    Ok(())
+}
+
+fn compact_completed_tiers(connection: &Connection, server_id: &str, latest: i64) -> Result<(), String> {
+    let mid_end = bucket_start(latest - RAW_HISTORY_SECONDS, MID_HISTORY_BUCKET_SECONDS);
+    compact_time_bucket(connection, server_id, mid_end - MID_HISTORY_BUCKET_SECONDS, mid_end)?;
+    let long_end = bucket_start(latest - MID_HISTORY_SECONDS, LONG_HISTORY_BUCKET_SECONDS);
+    compact_time_bucket(connection, server_id, long_end - LONG_HISTORY_BUCKET_SECONDS, long_end)?;
+    connection.execute("DELETE FROM snapshots WHERE server_id=?1 AND timestamp<?2", params![server_id, latest - TREND_HISTORY_SECONDS]).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn compact_server_snapshot_history(connection: &Connection, server_id: &str, latest: i64) -> Result<usize, String> {
+    let raw_cutoff = latest - RAW_HISTORY_SECONDS;
+    let mid_cutoff = latest - MID_HISTORY_SECONDS;
+    let trend_cutoff = latest - TREND_HISTORY_SECONDS;
+    let mut buckets: BTreeMap<i64, TrendHistoryBucket> = BTreeMap::new();
+    {
+        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 AND timestamp<?3 ORDER BY timestamp").map_err(|error| error.to_string())?;
+        let rows = statement.query_map(params![server_id, trend_cutoff, raw_cutoff], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?, row.get::<_, f64>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?))).map_err(|error| error.to_string())?;
+        for row in rows {
+            let (timestamp, cpu, memory, swap, gpu_json, gpu_memory_json, payload_json) = row.map_err(|error| error.to_string())?;
+            let bucket_seconds = if timestamp >= mid_cutoff { MID_HISTORY_BUCKET_SECONDS } else { LONG_HISTORY_BUCKET_SECONDS };
+            add_trend_sample(buckets.entry(bucket_start(timestamp, bucket_seconds)).or_default(), cpu, memory, swap, &gpu_json, &gpu_memory_json, &payload_json);
+        }
+    }
+    let removed = connection.execute("DELETE FROM snapshots WHERE server_id=?1 AND timestamp<?2", params![server_id, raw_cutoff]).map_err(|error| error.to_string())?;
+    for (timestamp, bucket) in buckets { insert_compacted_trend(connection, server_id, timestamp, &bucket)?; }
+    Ok(removed)
+}
+
+fn compact_existing_snapshot_history(connection: &mut Connection) -> Result<usize, String> {
+    let servers = {
+        let mut statement = connection.prepare("SELECT server_id,MAX(timestamp) FROM snapshots GROUP BY server_id").map_err(|error| error.to_string())?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))).map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+    };
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let mut removed = 0usize;
+    for (server_id, latest) in servers { removed += compact_server_snapshot_history(&transaction, &server_id, latest)?; }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(removed)
 }
 
 fn adjust_metric_totals(sums: &mut HashMap<String, f64>, counts: &mut HashMap<String, i64>, values: &HashMap<String, f64>, direction: i64) {
@@ -238,6 +404,7 @@ impl Database {
                 last_error TEXT
              );"
         ).map_err(|error| error.to_string())?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS storage_migrations (key TEXT PRIMARY KEY, applied_at INTEGER NOT NULL);").map_err(|error| error.to_string())?;
         let snapshot_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(snapshots)").map_err(|error| error.to_string())?;
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
@@ -294,6 +461,14 @@ impl Database {
         let snapshot_count: i64 = connection.query_row("SELECT COUNT(*) FROM snapshots", [], |row| row.get(0)).map_err(|error| error.to_string())?;
         if hourly_bucket_count == 0 && snapshot_count > 0 {
             rebuild_hourly_history_buckets(&mut connection)?;
+        }
+        let tier_migration_applied: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM storage_migrations WHERE key='snapshot-tier-v2')", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+        if !tier_migration_applied && snapshot_count > 0 {
+            let removed_snapshots = compact_existing_snapshot_history(&mut connection)?;
+            connection.execute("INSERT INTO storage_migrations(key,applied_at) VALUES('snapshot-tier-v2',unixepoch())", []).map_err(|error| error.to_string())?;
+            if removed_snapshots > 0 {
+                connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;").map_err(|error| error.to_string())?;
+            }
         }
         Ok(Self { connection: Mutex::new(connection), session_passwords: Mutex::new(HashMap::new()) })
     }
@@ -472,8 +647,8 @@ impl Database {
             params![snapshot.server_id, snapshot.timestamp, next_sample.cpu_utilization, next_sample.memory_utilization, swap_utilization, serde_json::to_string(&next_sample.gpu_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(&next_sample.gpu_memory_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(snapshot).map_err(|error| error.to_string())?],
         ).map_err(|error| error.to_string())?;
         update_hourly_history_bucket(&transaction, &snapshot.server_id, snapshot.timestamp, previous.as_ref(), &next_sample)?;
+        compact_completed_tiers(&transaction, &snapshot.server_id, snapshot.timestamp)?;
         let cutoff = snapshot.timestamp - i64::from(server.history_retention_days) * 86_400;
-        transaction.execute("DELETE FROM snapshots WHERE server_id=?1 AND timestamp < ?2", params![snapshot.server_id, cutoff]).map_err(|error| error.to_string())?;
         transaction.execute("DELETE FROM history_hourly_buckets WHERE server_id=?1 AND timestamp < ?2", params![snapshot.server_id, hour_start(cutoff)]).map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())
     }
@@ -522,7 +697,7 @@ impl Database {
             };
             update_hourly_history_bucket(&transaction, server_id, point.timestamp, None, &sample)?;
         }
-        transaction.execute("DELETE FROM snapshots WHERE server_id=?1 AND timestamp < ?2", params![server_id, cutoff]).map_err(|error| error.to_string())?;
+        compact_server_snapshot_history(&transaction, server_id, latest)?;
         transaction.execute("DELETE FROM history_hourly_buckets WHERE server_id=?1 AND timestamp < ?2", params![server_id, hour_start(cutoff)]).map_err(|error| error.to_string())?;
         transaction.execute(
             "UPDATE servers SET remote_history_last_sync_at=MAX(COALESCE(remote_history_last_sync_at,0),?2) WHERE id=?1",
@@ -620,11 +795,19 @@ impl Database {
 
     pub fn get_history(&self, server_id: &str, from_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
         let rows = statement.query_map(params![server_id, from_timestamp], |row| {
             let gpu_json: String = row.get(4)?;
             let gpu_memory_json: String = row.get(5)?;
-            Ok(HistoryPoint { timestamp: row.get(0)?, cpu_utilization: row.get(1)?, memory_utilization: row.get(2)?, swap_utilization: row.get(3)?, gpu_utilizations: serde_json::from_str(&gpu_json).unwrap_or_default(), gpu_memory_utilizations: serde_json::from_str(&gpu_memory_json).unwrap_or_default() })
+            let payload_json: String = row.get(6)?;
+            let cpu_utilization = row.get(1)?;
+            let memory_utilization = row.get(2)?;
+            let swap_utilization = row.get(3)?;
+            let gpu_utilizations: HashMap<String, f64> = serde_json::from_str(&gpu_json).unwrap_or_default();
+            let gpu_memory_utilizations: HashMap<String, f64> = serde_json::from_str(&gpu_memory_json).unwrap_or_default();
+            let range: CompactedHistoryRange = serde_json::from_str(&payload_json).unwrap_or_default();
+            let compacted = range.history_range_version == 1;
+            Ok(HistoryPoint { timestamp: row.get(0)?, cpu_utilization, memory_utilization, swap_utilization, cpu_min: if compacted { range.cpu_min } else { cpu_utilization }, cpu_max: if compacted { range.cpu_max } else { cpu_utilization }, memory_min: if compacted { range.memory_min } else { memory_utilization }, memory_max: if compacted { range.memory_max } else { memory_utilization }, swap_min: if compacted { range.swap_min } else { swap_utilization }, swap_max: if compacted { range.swap_max } else { swap_utilization }, gpu_mins: if compacted { range.gpu_mins } else { gpu_utilizations.clone() }, gpu_maxes: if compacted { range.gpu_maxes } else { gpu_utilizations.clone() }, gpu_memory_mins: if compacted { range.gpu_memory_mins } else { gpu_memory_utilizations.clone() }, gpu_memory_maxes: if compacted { range.gpu_memory_maxes } else { gpu_memory_utilizations.clone() }, gpu_utilizations, gpu_memory_utilizations })
         }).map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
@@ -869,10 +1052,13 @@ mod tests {
 
         let short_history = db.get_history(&short.id, 0).unwrap();
         let long_history = db.get_history(&long.id, 0).unwrap();
-        assert_eq!(short_history.len(), 1);
-        assert_eq!(short_history[0].timestamp, old_timestamp + 2 * 86_400);
+        assert_eq!(short_history.len(), 2);
         assert_eq!(long_history.len(), 1);
         assert_eq!(long_history[0].timestamp, old_timestamp);
+        let short_heatmap = db.get_history_heatmap(&short.id, 0, 0, &[]).unwrap();
+        let long_heatmap = db.get_history_heatmap(&long.id, 0, 0, &[]).unwrap();
+        assert_eq!(short_heatmap.len(), 1);
+        assert_eq!(long_heatmap.len(), 1);
     }
 
     #[test]
@@ -932,6 +1118,41 @@ mod tests {
     }
 
     #[test]
+    fn compacts_three_day_trends_by_tier_and_preserves_peaks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sqlite");
+        let server_id = {
+            let db = Database::open(&path).unwrap();
+            let server = db.save_server(draft("Tiered trend", 30)).unwrap();
+            let latest = 2_000_000;
+            let mid_bucket = bucket_start(latest - 2 * 3_600, MID_HISTORY_BUCKET_SECONDS);
+            for (offset, value) in [(10, 10.0), (70, 90.0), (130, 20.0)] {
+                let mut sample = snapshot(&server.id, mid_bucket + offset);
+                sample.system.cpu_utilization = value;
+                db.save_snapshot(&sample).unwrap();
+            }
+            let long_bucket = bucket_start(latest - 30 * 3_600, LONG_HISTORY_BUCKET_SECONDS);
+            for (offset, value) in [(10, 5.0), (310, 75.0)] {
+                let mut sample = snapshot(&server.id, long_bucket + offset);
+                sample.system.cpu_utilization = value;
+                db.save_snapshot(&sample).unwrap();
+            }
+            db.save_snapshot(&snapshot(&server.id, latest)).unwrap();
+            server.id
+        };
+
+        let reopened = Database::open(&path).unwrap();
+        let history = reopened.get_history(&server_id, 0).unwrap();
+        assert_eq!(history.len(), 3);
+        let mid = history.iter().find(|point| point.cpu_max == 90.0).unwrap();
+        assert!((mid.cpu_utilization - 40.0).abs() < 0.01);
+        assert_eq!(mid.cpu_min, 10.0);
+        let long = history.iter().find(|point| point.cpu_max == 75.0).unwrap();
+        assert!((long.cpu_utilization - 40.0).abs() < 0.01);
+        assert_eq!(long.cpu_min, 5.0);
+    }
+
+    #[test]
     fn backfills_hourly_buckets_when_opening_an_existing_database() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.sqlite");
@@ -964,6 +1185,9 @@ mod tests {
             swap_utilization: 3.0,
             gpu_utilizations: HashMap::from([("GPU-a".into(), 80.0)]),
             gpu_memory_utilizations: HashMap::from([("GPU-a".into(), 50.0)]),
+            cpu_min: 12.5, cpu_max: 12.5, memory_min: 40.0, memory_max: 40.0, swap_min: 3.0, swap_max: 3.0,
+            gpu_mins: HashMap::from([("GPU-a".into(), 80.0)]), gpu_maxes: HashMap::from([("GPU-a".into(), 80.0)]),
+            gpu_memory_mins: HashMap::from([("GPU-a".into(), 50.0)]), gpu_memory_maxes: HashMap::from([("GPU-a".into(), 50.0)]),
         };
 
         assert_eq!(db.import_remote_history(&server.id, std::slice::from_ref(&point)).unwrap(), 1);
