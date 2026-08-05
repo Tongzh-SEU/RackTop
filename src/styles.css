@@ -147,27 +147,41 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .notification-dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border: 1.5px solid var(--surface-solid); border-radius: 50%; background: var(--red); }
 .reservation-row--warning { border-color: color-mix(in srgb, var(--orange) 35%, var(--border)); background: color-mix(in srgb, var(--orange) 6%, var(--surface)); }
 .reservation-row__status--warning { color: var(--orange); background: color-mix(in srgb, var(--orange) 12%, var(--surface)); }
-.activity-log-sheet { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(940px, calc(100vw - 32px)); overflow: hidden; }
-.activity-log-list { display: grid; align-content: start; gap: 0; min-height: 360px; max-height: min(70vh, 700px); overflow: auto; padding: 0 20px 12px; }
-.activity-log-entry { padding: 13px 0 14px; border-bottom: 1px solid var(--border); }
-.activity-log-entry:last-child { border-bottom: 0; }
-.activity-log-entry > header { display: grid; grid-template-columns: 7px minmax(130px, .7fr) auto auto; align-items: center; gap: 10px; }
-.activity-log-entry__state { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); }
-.activity-log-entry--success .activity-log-entry__state { background: var(--green); }
-.activity-log-entry--error .activity-log-entry__state { background: var(--red); }
-.activity-log-entry > header > div { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
-.activity-log-entry strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.activity-log-entry time { color: var(--text-tertiary); font-size: 9px; font-variant-numeric: tabular-nums; }
-.activity-log-entry dl { display: flex; gap: 14px; margin: 0; }
-.activity-log-entry dl > div { display: flex; align-items: baseline; gap: 4px; }
-.activity-log-entry dt { color: var(--text-tertiary); font-size: 9px; }
-.activity-log-entry dd { margin: 0; color: var(--text-secondary); font-size: 10px; font-variant-numeric: tabular-nums; }
-.activity-log-entry__status { min-width: 38px; color: var(--text-tertiary); font-size: 9px; font-weight: 650; text-align: right; }
-.activity-log-entry--running .activity-log-entry__status { color: var(--blue); }
-.activity-log-entry--error .activity-log-entry__status { color: var(--red); }
-.activity-log-entry pre { max-height: 96px; margin: 9px 0 0 17px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
-.activity-log-entry code { display: block; padding: 8px 9px; color: var(--text-secondary); font: 9px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.activity-log-entry > p { margin: 7px 0 0 17px; color: var(--red); font-size: 10px; line-height: 1.45; }
+.activity-log-sheet { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(940px, calc(100vw - 32px)); max-height: min(86vh, 820px); overflow: hidden; }
+.activity-log-body { min-height: 360px; overflow: auto; }
+.activity-log-totals { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; padding: 15px 20px 16px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); }
+.activity-log-totals > div { min-width: 0; padding: 0 14px; border-right: 1px solid var(--border); }
+.activity-log-totals > div:first-child { padding-left: 0; }
+.activity-log-totals > div:last-child { padding-right: 0; border-right: 0; }
+.activity-log-totals dt { color: var(--text-tertiary); font-size: 9px; line-height: 1.3; }
+.activity-log-totals dd { margin: 5px 0 0; overflow: hidden; color: var(--text); font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.activity-log-error { margin: 12px 20px 0; }
+.activity-log-servers { padding: 0 20px 12px; }
+.activity-log-server { padding: 17px 0 18px; border-bottom: 1px solid var(--border); }
+.activity-log-server:last-child { border-bottom: 0; }
+.activity-log-server__header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.activity-log-server__header strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.activity-log-server__header span { color: var(--text-tertiary); font-size: 10px; font-weight: 650; }
+.activity-log-server--running .activity-log-server__header span { color: var(--blue); }
+.activity-log-server--error .activity-log-server__header span { color: var(--red); }
+.activity-log-server__traffic { display: flex; flex-wrap: wrap; gap: 5px 15px; margin: 7px 0 0; color: var(--text-tertiary); font-size: 10px; font-variant-numeric: tabular-nums; }
+.activity-log-data { margin-top: 16px; }
+.activity-log-data h3 { margin: 0 0 8px; font-size: 10px; font-weight: 650; }
+.activity-log-data dl { display: grid; grid-template-columns: minmax(95px, .35fr) minmax(0, 1fr); gap: 6px 12px; margin: 0; }
+.activity-log-data dl > div { display: contents; }
+.activity-log-data dt { color: var(--text-tertiary); font-size: 10px; }
+.activity-log-data dd { margin: 0; color: var(--text-secondary); font-size: 10px; overflow-wrap: anywhere; }
+.activity-log-command { margin-top: 15px; border-top: 1px solid var(--border); }
+.activity-log-command summary { display: grid; grid-template-columns: minmax(90px, 1fr) auto 46px; align-items: center; gap: 12px; min-height: 34px; color: var(--text-secondary); cursor: default; font-size: 10px; list-style: none; }
+.activity-log-command summary::-webkit-details-marker { display: none; }
+.activity-log-command summary time { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.activity-log-command summary em { color: var(--blue); font-style: normal; text-align: right; }
+.activity-log-command[open] summary em::after { content: '收起'; }
+.activity-log-command[open] summary em { font-size: 0; }
+.activity-log-command[open] summary em::after { font-size: 10px; }
+.activity-log-command pre { max-height: 150px; margin: 0; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
+.activity-log-command code { display: block; padding: 9px 10px; color: var(--text-secondary); font: 8px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.activity-log-server__error { margin: 8px 0 0; color: var(--red); font-size: 10px; line-height: 1.45; }
 .activity-log-empty-state { display: grid; place-items: center; align-content: center; min-height: 360px; color: var(--text-tertiary); text-align: center; }
 .activity-log-empty-state strong { margin-top: 10px; color: var(--text-secondary); font-size: 12px; }
 .activity-log-empty-state p { margin: 5px 0 0; font-size: 10px; }
@@ -183,7 +197,7 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .mine-process-empty { display: grid; place-items: center; align-content: center; min-height: min(480px, calc(100vh - 210px)); color: var(--text-tertiary); text-align: center; }
 .mine-process-empty strong { margin-top: 12px; color: var(--text-secondary); font-size: 13px; }
 .mine-process-empty p { margin: 5px 0 0; font-size: 10px; }
-@media (max-width: 700px) { .activity-log-entry > header { grid-template-columns: 7px minmax(0, 1fr) auto; } .activity-log-entry dl { grid-column: 2; } .activity-log-entry__status { grid-column: 3; grid-row: 1 / 3; } }
+@media (max-width: 700px) { .activity-log-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 14px; } .activity-log-totals > div { padding: 0; border-right: 0; } .activity-log-command summary { grid-template-columns: minmax(80px, 1fr) auto; } .activity-log-command summary time { display: none; } }
 .detail-page { container-type: inline-size; min-width: 0; width: min(1180px, calc(100% - 52px)); margin: 16px auto 40px; }
 .server-identity { display: flex; align-items: center; justify-content: space-between; min-height: 35px; }
 .server-identity > div { display: flex; align-items: center; gap: 9px; }

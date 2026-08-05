@@ -248,15 +248,24 @@ export interface RemoteCleanupSweepResult {
   expiredNames: string[]
 }
 
-export interface InteractionLogEntry {
-  id: number
+export interface InteractionServerSummary {
   serverId: string
   serverName: string
-  startedAt: number
-  finishedAt?: number | null
-  command: string
+  sentBytes: number
   responseBytes: number
   storedBytes: number
+  lastStartedAt: number
+  lastFinishedAt?: number | null
+  lastCommand: string
   status: 'running' | 'success' | 'error'
   error?: string | null
+}
+
+export interface InteractionLogSummary {
+  sentBytes: number
+  responseBytes: number
+  storedBytes: number
+  localStorageBytes: number
+  failureCount: number
+  servers: InteractionServerSummary[]
 }

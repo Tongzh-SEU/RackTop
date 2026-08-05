@@ -2,7 +2,7 @@ use crate::models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservat
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Mutex,
 };
 use uuid::Uuid;
@@ -23,6 +23,7 @@ pub struct RemoteCleanupTask {
 pub struct Database {
     connection: Mutex<Connection>,
     session_passwords: Mutex<HashMap<String, String>>,
+    path: PathBuf,
 }
 
 #[derive(Default)]
@@ -470,7 +471,22 @@ impl Database {
                 connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;").map_err(|error| error.to_string())?;
             }
         }
-        Ok(Self { connection: Mutex::new(connection), session_passwords: Mutex::new(HashMap::new()) })
+        Ok(Self { connection: Mutex::new(connection), session_passwords: Mutex::new(HashMap::new()), path: path.to_path_buf() })
+    }
+
+    pub fn storage_size_bytes(&self) -> u64 {
+        let sidecar = |suffix: &str| {
+            let mut value = self.path.as_os_str().to_os_string();
+            value.push(suffix);
+            PathBuf::from(value)
+        };
+        let wal_path = sidecar("-wal");
+        let shm_path = sidecar("-shm");
+        [&self.path, &wal_path, &shm_path]
+            .into_iter()
+            .filter_map(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .sum()
     }
 
     pub fn list_servers(&self) -> Result<Vec<Server>, String> {
@@ -996,6 +1012,21 @@ mod tests {
             nvidia_smi: "available".into(),
             nvidia_message: None,
         }
+    }
+
+    #[test]
+    fn reports_sqlite_database_and_sidecar_storage_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("size.sqlite");
+        let db = Database::open(&path).unwrap();
+        db.save_server(draft("Size", 90)).unwrap();
+        let expected = [path.clone(), PathBuf::from(format!("{}-wal", path.display())), PathBuf::from(format!("{}-shm", path.display()))]
+            .iter()
+            .filter_map(|file| std::fs::metadata(file).ok())
+            .map(|metadata| metadata.len())
+            .sum::<u64>();
+        assert!(expected > 0);
+        assert_eq!(db.storage_size_bytes(), expected);
     }
 
     fn gpu_process(gpu_uuid: &str, username: &str, command: &str, memory_used_mb: f64) -> ProcessMetric {
