@@ -36,7 +36,7 @@ describe('ProcessBlocks', () => {
     expect(markup).not.toContain('type="checkbox"')
     expect(markup).toContain('aria-label="结束 PID 21312"')
     expect(markup).toContain('aria-label="结束 PID 2212"')
-    expect(markup).toContain('lucide-x')
+    expect(markup).toContain('lucide-circle-x')
   })
 
   it('shows a red spinner while termination is running', () => {

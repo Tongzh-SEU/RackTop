@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react'
-import { CheckCircle2, ChevronUp, Cpu, LoaderCircle, TerminalSquare, X } from 'lucide-react'
+import { CheckCircle2, ChevronUp, CircleX, Cpu, LoaderCircle, TerminalSquare } from 'lucide-react'
 import type { CpuProcessMetric, ProcessMetric, Snapshot } from '../types/models'
 import { formatGpuProcessMemory } from '../utils/gpu'
 import { cpuProcessRelation, gpuProcessRelation, processTaskRootPid } from '../utils/processRelations'
@@ -41,7 +41,7 @@ function ProcessInlineDetails({ process, kind, snapshot, onClose }: { process: P
 
 function TerminateCell({ process, terminating, onTerminate }: { process: ProcessMetric | CpuProcessMetric; terminating: boolean; onTerminate?: () => void }) {
   const label = terminating ? `正在结束 PID ${process.pid}` : `结束 PID ${process.pid}`
-  return <td className="process-select-cell" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>{canTerminate(process) && onTerminate ? <button type="button" className={`process-terminate-button ${terminating ? 'is-terminating' : ''}`} title={label} aria-label={label} disabled={terminating} onClick={onTerminate}>{terminating ? <LoaderCircle className="spin" size={15} /> : <X size={13} strokeWidth={3} />}</button> : <span aria-hidden="true" />}</td>
+  return <td className="process-select-cell" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>{canTerminate(process) && onTerminate ? <button type="button" className={`process-terminate-button ${terminating ? 'is-terminating' : ''}`} title={label} aria-label={label} disabled={terminating} onClick={onTerminate}>{terminating ? <LoaderCircle className="spin" size={13} /> : <CircleX size={14} strokeWidth={1.7} />}</button> : <span aria-hidden="true" />}</td>
 }
 
 function ProcessRelation({ process, snapshot }: { process: ProcessMetric | CpuProcessMetric; snapshot: Snapshot }) {

@@ -435,9 +435,10 @@ tr.is-current-user:not(.is-selected) td { background: color-mix(in srgb, var(--o
 .process-table .process-col--elapsed { width: 112px; }
 .process-select-cell { padding-right: 5px; padding-left: 16px; }
 .process-select-cell > span { display: block; width: 24px; height: 24px; }
-.process-terminate-button { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 50%; color: white; background: var(--red); cursor: default; }
-.process-terminate-button:focus-visible { outline: 2px solid color-mix(in srgb, var(--red) 45%, transparent); outline-offset: 2px; }
-.process-terminate-button.is-terminating, .process-terminate-button.is-terminating:disabled { color: var(--red); background: color-mix(in srgb, var(--red) 10%, transparent); opacity: 1; }
+.process-terminate-button { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 50%; color: var(--text-tertiary); background: transparent; cursor: default; transition: color 120ms ease, background-color 120ms ease, transform 120ms var(--ease-out); }
+.process-terminate-button:focus-visible { outline: 2px solid color-mix(in srgb, var(--red) 32%, transparent); outline-offset: 1px; color: var(--red); background: color-mix(in srgb, var(--red) 7%, transparent); }
+.process-terminate-button:active { transform: scale(.92); }
+.process-terminate-button.is-terminating, .process-terminate-button.is-terminating:disabled { color: var(--red); background: color-mix(in srgb, var(--red) 7%, transparent); opacity: 1; transform: none; }
 .process-command { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; }
 .process-relation { display: inline-flex; align-items: center; gap: 5px; min-height: 20px; padding: 3px 7px; border-radius: 5px; color: var(--text-secondary); background: var(--surface-subtle); font-size: 9px; }
 .process-relation > span + span { padding-left: 5px; border-left: 1px solid var(--border); }.process-relation small { color: var(--text-tertiary); font-size: 8px; }
@@ -461,7 +462,7 @@ tr.is-current-user:not(.is-selected) td { background: color-mix(in srgb, var(--o
 .process-inspector__collapse:focus-visible { outline: 2px solid color-mix(in srgb, var(--blue) 45%, transparent); outline-offset: 1px; }
 .process-inspector__facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 10px 0 0; border-top: 1px solid var(--border); }.process-inspector__facts > div { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 8px; padding: 9px 12px 9px 0; }.process-inspector__facts dt, .process-inspector__command > span { color: var(--text-tertiary); font-size: 9px; }.process-inspector__facts dd { min-width: 0; margin: 0; overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .process-inspector__command { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 8px; padding: 10px 0 2px; border-top: 1px solid var(--border); }.process-inspector__command code { color: var(--text); line-height: 1.55; overflow-wrap: anywhere; white-space: normal; }
-@media (hover: hover) and (pointer: fine) { .process-inspector__collapse:hover { color: var(--text); background: var(--surface-subtle); }.process-terminate-button:hover { background: color-mix(in srgb, var(--red) 82%, black); } }
+@media (hover: hover) and (pointer: fine) { .process-inspector__collapse:hover { color: var(--text); background: var(--surface-subtle); }.process-terminate-button:hover { color: var(--red); background: color-mix(in srgb, var(--red) 7%, transparent); } }
 .mono, code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: .94em; }
 .inline-empty { display: grid; place-items: center; padding: 44px; color: var(--text-tertiary); text-align: center; }
 .inline-empty strong { margin: 9px 0 2px; color: var(--text); }
