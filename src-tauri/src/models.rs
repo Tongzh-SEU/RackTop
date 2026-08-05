@@ -54,6 +54,22 @@ pub struct ServerDraft {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RemoteCleanupResult {
+    pub remote_cleaned: bool,
+    pub cleanup_pending: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteCleanupSweepResult {
+    pub cleaned_names: Vec<String>,
+    pub pending_names: Vec<String>,
+    pub expired_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GpuMetric {
     pub index: u32,
     pub uuid: String,
@@ -64,6 +80,15 @@ pub struct GpuMetric {
     pub memory_total_mb: f64,
     pub temperature_celsius: f64,
     pub power_watts: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskMetric {
+    pub mount_point: String,
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +151,8 @@ pub struct Snapshot {
     pub status: String,
     pub system: SystemMetric,
     pub gpus: Vec<GpuMetric>,
+    #[serde(default)]
+    pub disks: Vec<DiskMetric>,
     pub processes: Vec<ProcessMetric>,
     #[serde(default)]
     pub cpu_processes: Vec<CpuProcessMetric>,

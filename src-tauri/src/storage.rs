@@ -7,6 +7,14 @@ use std::{
 };
 use uuid::Uuid;
 
+const REMOTE_CLEANUP_TTL_SECONDS: i64 = 86_400;
+
+#[derive(Debug, Clone)]
+pub struct RemoteCleanupTask {
+    pub server: Server,
+    pub expires_at: i64,
+}
+
 pub struct Database {
     connection: Mutex<Connection>,
     session_passwords: Mutex<HashMap<String, String>>,
@@ -84,6 +92,15 @@ impl Database {
                  CREATE INDEX IF NOT EXISTS idx_usage_lookup ON usage_buckets(server_id,timestamp);",
             )
             .map_err(|error| error.to_string())?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS remote_cleanup_queue (
+                server_id TEXT PRIMARY KEY,
+                server_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                last_error TEXT
+             );"
+        ).map_err(|error| error.to_string())?;
         let snapshot_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(snapshots)").map_err(|error| error.to_string())?;
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
@@ -215,11 +232,56 @@ impl Database {
     }
 
     pub fn delete_server(&self, id: &str) -> Result<(), String> {
+        self.delete_server_record(id, true)
+    }
+
+    pub fn delete_server_record(&self, id: &str, delete_credential: bool) -> Result<(), String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         connection.execute("DELETE FROM servers WHERE id=?1", [id]).map_err(|error| error.to_string())?;
-        if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", id) {
+        if delete_credential {
+            if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", id) {
+                let _ = entry.delete_credential();
+            }
+            self.session_passwords.lock().map_err(|error| error.to_string())?.remove(id);
+        }
+        Ok(())
+    }
+
+    pub fn enqueue_remote_cleanup(&self, server: &Server, now: i64, error: &str) -> Result<(), String> {
+        let server_json = serde_json::to_string(server).map_err(|error| error.to_string())?;
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection.execute(
+            "INSERT INTO remote_cleanup_queue (server_id,server_json,created_at,expires_at,last_error) VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(server_id) DO UPDATE SET server_json=excluded.server_json,expires_at=excluded.expires_at,last_error=excluded.last_error",
+            params![server.id, server_json, now, now + REMOTE_CLEANUP_TTL_SECONDS, error],
+        ).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn list_remote_cleanup_tasks(&self) -> Result<Vec<RemoteCleanupTask>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT server_json,expires_at,last_error FROM remote_cleanup_queue ORDER BY created_at").map_err(|error| error.to_string())?;
+        let rows = statement.query_map([], |row| {
+            let server_json: String = row.get(0)?;
+            Ok(RemoteCleanupTask { server: serde_json::from_str(&server_json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?, expires_at: row.get(1)? })
+        }).map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
+    pub fn update_remote_cleanup_error(&self, server_id: &str, error: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection.execute("UPDATE remote_cleanup_queue SET last_error=?2 WHERE server_id=?1", params![server_id, error]).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn finish_remote_cleanup(&self, server_id: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection.execute("DELETE FROM remote_cleanup_queue WHERE server_id=?1", [server_id]).map_err(|error| error.to_string())?;
+        drop(connection);
+        if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", server_id) {
             let _ = entry.delete_credential();
         }
+        self.session_passwords.lock().map_err(|error| error.to_string())?.remove(server_id);
         Ok(())
     }
 
@@ -571,6 +633,7 @@ mod tests {
             status: "online".into(),
             system: SystemMetric { cpu_model: "Test CPU".into(), memory_total_bytes: 1024, ..Default::default() },
             gpus: Vec::new(),
+            disks: Vec::new(),
             processes: Vec::new(),
             cpu_processes: Vec::new(),
             processes_sampled: true,
@@ -779,6 +842,23 @@ mod tests {
         db.delete_server(&saved.id).unwrap();
         assert!(db.list_servers().unwrap().is_empty());
         assert!(db.get_history(&saved.id, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remote_cleanup_queue_survives_local_delete_in_isolated_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("cleanup.sqlite")).unwrap();
+        let saved = db.save_server(ServerDraft { remote_history_enabled: true, ..draft("cleanup", 30) }).unwrap();
+        db.enqueue_remote_cleanup(&saved, 10_000, "offline").unwrap();
+        db.delete_server_record(&saved.id, false).unwrap();
+
+        let tasks = db.list_remote_cleanup_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].server.name, "cleanup");
+        assert_eq!(tasks[0].expires_at, 10_000 + 86_400);
+
+        db.finish_remote_cleanup(&saved.id).unwrap();
+        assert!(db.list_remote_cleanup_tasks().unwrap().is_empty());
     }
 
     #[test]

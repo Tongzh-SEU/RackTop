@@ -9,6 +9,19 @@ use tokio::time::{timeout, Duration};
 const REMOTE_DIRECTORY: &str = "$HOME/.racktop";
 const REMOTE_COLLECTOR_SCRIPT: &str = include_str!("../assets/remote-history-collector.sh");
 const REMOTE_DAEMON_SCRIPT: &str = include_str!("../assets/remote-history-daemon.sh");
+const REMOTE_REMOVE_SCRIPT: &str = r#"set -eu
+state=$HOME/.racktop
+if [ -r "$state/.daemon.pid" ]; then
+  pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "$state/.daemon.sh" >/dev/null 2>&1; then
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+  fi
+fi
+rm -rf -- "$state"
+printf '__RACKTOP_REMOTE_HISTORY_REMOVED__\n'
+"#;
 
 pub async fn configure(server: &Server, password: Option<&str>) -> Result<(), String> {
     if server.remote_history_enabled {
@@ -16,6 +29,11 @@ pub async fn configure(server: &Server, password: Option<&str>) -> Result<(), St
     } else {
         disable(server, password).await
     }
+}
+
+pub async fn remove(server: &Server, password: Option<&str>) -> Result<(), String> {
+    let output = run_remote_command(server, password, REMOTE_REMOVE_SCRIPT, Duration::from_secs(20)).await?;
+    if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_REMOVED__") { Ok(()) } else { Err("远端 RackTop 数据清理后未返回确认标记".into()) }
 }
 
 pub async fn fetch(server: &Server, password: Option<&str>, since_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
@@ -183,6 +201,15 @@ mod tests {
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("__racktop_coverage__"));
         assert!(!REMOTE_COLLECTOR_SCRIPT.contains("command="));
         assert!(!REMOTE_COLLECTOR_SCRIPT.contains("args="));
+    }
+
+    #[test]
+    fn remote_cleanup_script_targets_only_racktop_state() {
+        assert!(REMOTE_REMOVE_SCRIPT.contains("state=$HOME/.racktop"));
+        assert!(REMOTE_REMOVE_SCRIPT.contains("grep -F \"$state/.daemon.sh\""));
+        assert!(REMOTE_REMOVE_SCRIPT.contains("kill -KILL \"$pid\""));
+        assert!(REMOTE_REMOVE_SCRIPT.contains("rm -rf -- \"$state\""));
+        assert!(!REMOTE_REMOVE_SCRIPT.contains("rm -rf -- $HOME"));
     }
 
     #[test]

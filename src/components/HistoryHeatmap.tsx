@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import { Cpu, MemoryStick } from 'lucide-react'
-import type { HistoryHeatmapPoint, Snapshot } from '../types/models'
+import { Cpu, HardDrive, MemoryStick } from 'lucide-react'
+import type { DiskMetric, HistoryHeatmapPoint, Snapshot } from '../types/models'
 import { buildHeatmapDays, HEATMAP_BUCKET_HOURS, HEATMAP_ROWS_PER_DAY, heatmapLevel, historyHeatmapValue, indexHeatmapPoints } from '../utils/historyHeatmap'
 
 type HeatmapMetric = 'utilization' | 'memory'
@@ -64,10 +64,52 @@ function ResourceHeatmap({ title, subtitle, resource, points, days, defaultMetri
 
 export function HistoryHeatmaps({ snapshot, points, retentionDays }: { snapshot: Snapshot; points: HistoryHeatmapPoint[]; retentionDays: number }) {
   const days = useMemo(() => buildHeatmapDays(snapshot.timestamp, retentionDays), [retentionDays, snapshot.timestamp])
+  const disks = snapshot.disks ?? []
   return (
-    <div className="history-heatmap-list">
-      <ResourceHeatmap title="CPU" subtitle={snapshot.system.cpuModel || '系统 CPU'} resource="cpu" points={points} days={days} defaultMetric="memory" memoryTone="blue" icon={<Cpu size={16} />} />
-      {snapshot.gpus.map((gpu) => <ResourceHeatmap key={gpu.uuid} title={`GPU ${gpu.index}`} subtitle={gpu.name.replace('NVIDIA ', '')} resource={gpu.uuid} points={points} days={days} defaultMetric="memory" memoryTone="green" icon={<MemoryStick size={16} />} />)}
+    <div className="history-view-stack">
+      <div className="history-heatmap-list">
+        <ResourceHeatmap title="CPU" subtitle={snapshot.system.cpuModel || '系统 CPU'} resource="cpu" points={points} days={days} defaultMetric="memory" memoryTone="blue" icon={<Cpu size={16} />} />
+        {snapshot.gpus.map((gpu) => <ResourceHeatmap key={gpu.uuid} title={`GPU ${gpu.index}`} subtitle={gpu.name.replace('NVIDIA ', '')} resource={gpu.uuid} points={points} days={days} defaultMetric="memory" memoryTone="green" icon={<MemoryStick size={16} />} />)}
+      </div>
+      <StorageWaffleList disks={disks} />
     </div>
+  )
+}
+
+function formatStorage(bytes: number) {
+  const gb = bytes / 1024 ** 3
+  return gb >= 1024 ? `${(gb / 1024).toFixed(1)} TB` : `${gb.toFixed(1)} GB`
+}
+
+function StorageWaffleList({ disks }: { disks: DiskMetric[] }) {
+  return (
+    <section className="panel storage-waffle-panel">
+      <header className="history-heatmap__header">
+        <div className="history-heatmap__identity">
+          <span className="storage-waffle__icon"><HardDrive size={16} /></span>
+          <div><h3>存储空间</h3><p>各挂载磁盘当前已用空间；每格代表 0.5%</p></div>
+        </div>
+      </header>
+      {disks.length === 0 ? <p className="storage-waffle__empty">暂无磁盘采样</p> : (
+        <div className="storage-waffle-list">
+          {disks.map((disk) => {
+            const usedPercent = disk.totalBytes > 0 ? Math.min(100, disk.usedBytes / disk.totalBytes * 100) : 0
+            const filled = Math.round(usedPercent * 2)
+            return (
+              <div className="storage-waffle-row" key={disk.mountPoint}>
+                <strong className="storage-waffle-row__mount mono">{disk.mountPoint}</strong>
+                <div className="storage-waffle-grid" data-columns="50" data-rows="4" role="img" aria-label={`${disk.mountPoint} 已用 ${formatStorage(disk.usedBytes)}，共 ${formatStorage(disk.totalBytes)}`}>
+                  {Array.from({ length: 200 }, (_, index) => <i className={index < filled ? 'is-used' : ''} data-storage-cell key={index} />)}
+                </div>
+                <div className="storage-waffle-row__footer">
+                  <span><i className="is-used" />已用 <strong>{formatStorage(disk.usedBytes)}</strong></span>
+                  <span>总计 <strong>{formatStorage(disk.totalBytes)}</strong> · {usedPercent.toFixed(1)}%</span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </section>
   )
 }

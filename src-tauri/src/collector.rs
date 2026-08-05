@@ -1,4 +1,4 @@
-use crate::models::{CpuProcessMetric, GpuMetric, ProcessMetric, Server, Snapshot, SystemMetric};
+use crate::models::{CpuProcessMetric, DiskMetric, GpuMetric, ProcessMetric, Server, Snapshot, SystemMetric};
 use std::{collections::{HashMap, HashSet}, process::Stdio, time::{SystemTime, UNIX_EPOCH}};
 use tokio::{process::Command, time::{timeout, Duration}};
 
@@ -15,6 +15,7 @@ sleep 0.25;
 printf '__RACKTOP_CPU2__\n'; head -n 1 /proc/stat;
 printf '__RACKTOP_LOAD__\n'; cat /proc/loadavg;
 printf '__RACKTOP_MEM__\n'; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo;
+printf '__RACKTOP_DISK__\n'; df -P -k -x tmpfs -x devtmpfs 2>/dev/null | awk 'NR > 1 && $2 ~ /^[0-9]+$/ { print $6 "|" $3 "|" $2 "|" $4 }' | head -n 16;
 printf '__RACKTOP_USERCPU__\n'; ps -u "$(id -un)" -o pcpu= 2>/dev/null | awk -v n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)" '{s+=$1} END {printf "%.2f\n", n>0?s/n:s+0}';
 printf '__RACKTOP_NVIDIA__\n';
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -151,6 +152,7 @@ pub fn parse_snapshot(server_id: &str, output: &str) -> Result<Snapshot, String>
     }
     if let Some(memory) = sections.get("MEM") { parse_memory(memory, &mut system); }
     system.current_user_cpu_utilization = first_line(&sections, "USERCPU").map(parse_number).unwrap_or_default();
+    let disks = sections.get("DISK").map(|lines| lines.iter().filter_map(|line| parse_disk(line).ok()).collect()).unwrap_or_default();
 
     let nvidia_lines = sections.get("NVIDIA").cloned().unwrap_or_default();
     let nvidia_smi = nvidia_lines.first().map(String::as_str).unwrap_or("missing").to_string();
@@ -169,7 +171,17 @@ pub fn parse_snapshot(server_id: &str, output: &str) -> Result<Snapshot, String>
     let cpu_processes = parse_cpu_processes(&ps, &processes, &username, uid_min);
     let processes_sampled = sections.contains_key("GPUPROC");
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
-    Ok(Snapshot { server_id: server_id.into(), hostname, username, os_id: os_id.into(), os_name: os_name.into(), timestamp, status: if nvidia_smi == "available" { "online".into() } else { "warning".into() }, system, gpus, processes, cpu_processes, processes_sampled, nvidia_smi, nvidia_message })
+    Ok(Snapshot { server_id: server_id.into(), hostname, username, os_id: os_id.into(), os_name: os_name.into(), timestamp, status: if nvidia_smi == "available" { "online".into() } else { "warning".into() }, system, gpus, disks, processes, cpu_processes, processes_sampled, nvidia_smi, nvidia_message })
+}
+
+fn parse_disk(line: &str) -> Result<DiskMetric, String> {
+    let fields: Vec<&str> = line.split('|').collect();
+    if fields.len() != 4 || fields[0].is_empty() { return Err("磁盘采样记录无效".into()); }
+    let used_kb = fields[1].parse::<u64>().map_err(|_| "磁盘已用空间无效".to_string())?;
+    let total_kb = fields[2].parse::<u64>().map_err(|_| "磁盘总空间无效".to_string())?;
+    let available_kb = fields[3].parse::<u64>().map_err(|_| "磁盘可用空间无效".to_string())?;
+    if total_kb == 0 || used_kb > total_kb { return Err("磁盘容量范围无效".into()); }
+    Ok(DiskMetric { mount_point: fields[0].to_string(), used_bytes: used_kb.saturating_mul(1024), total_bytes: total_kb.saturating_mul(1024), available_bytes: available_kb.saturating_mul(1024) })
 }
 
 fn split_sections(output: &str) -> HashMap<String, Vec<String>> {
@@ -371,6 +383,10 @@ mod tests {
         assert_eq!(snapshot.processes[0].sm_utilization, Some(73.0));
         assert_eq!(snapshot.processes[0].parent_pid, 1);
         assert_eq!(snapshot.cpu_processes.len(), 2);
+        assert!(snapshot.disks.is_empty());
+        let disk = parse_disk("/mnt/data|250000|1000000|750000").unwrap();
+        assert_eq!(disk.used_bytes, 250_000 * 1024);
+        assert_eq!(disk.total_bytes, 1_000_000 * 1024);
         assert_eq!(snapshot.cpu_processes[0].pid, 4343);
         assert_eq!(snapshot.cpu_processes[0].parent_pid, 4242);
         assert!(!snapshot.cpu_processes[0].is_group_leader);
