@@ -1,5 +1,27 @@
 import type { CpuProcessMetric, ProcessMetric, Snapshot } from '../types/models'
 
+export function currentUserProcessCount(snapshot: Snapshot) {
+  const pids = new Set(snapshot.processes.filter((process) => process.isCurrentUser).map((process) => process.pid))
+  for (const process of snapshot.cpuProcesses) if (process.isCurrentUser) pids.add(process.pid)
+  return pids.size
+}
+
+export function processTaskRootPid(process: ProcessMetric | CpuProcessMetric, snapshot: Snapshot) {
+  const byPid = new Map<number, ProcessMetric | CpuProcessMetric>()
+  for (const candidate of [...snapshot.processes, ...snapshot.cpuProcesses]) byPid.set(candidate.pid, candidate)
+  let current = process
+  let rootPid = process.pid
+  const visited = new Set<number>([process.pid])
+  while (current.parentPid > 1) {
+    const parent = byPid.get(current.parentPid)
+    if (!parent || visited.has(parent.pid)) break
+    visited.add(parent.pid)
+    rootPid = parent.pid
+    current = parent
+  }
+  return rootPid
+}
+
 export function cpuChildrenOfGpu(process: ProcessMetric, cpuProcesses: CpuProcessMetric[]) {
   return cpuProcesses.filter((candidate) => candidate.parentPid === process.pid)
 }

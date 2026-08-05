@@ -15,6 +15,7 @@ export function deriveGpuMemoryStallWarnings(
   for (const server of servers) {
     const snapshot = snapshots[server.id]
     if (!snapshot) continue
+    const observedAt = Math.min(now, snapshot.timestamp)
     for (const gpu of snapshot.gpus) {
       const id = `gpu-memory-stall:${server.id}:${gpu.uuid}`
       if (!(gpu.memoryUsedMb > 0 && gpu.utilization <= 0.5)) {
@@ -23,7 +24,7 @@ export function deriveGpuMemoryStallWarnings(
       }
       since[id] ??= snapshot.timestamp
       activeIds.add(id)
-      if (now - since[id] < GPU_MEMORY_STALL_SECONDS || ignoredIds.has(id)) continue
+      if (observedAt - since[id] < GPU_MEMORY_STALL_SECONDS || ignoredIds.has(id)) continue
       warnings.push({
         id,
         serverId: server.id,
@@ -35,7 +36,7 @@ export function deriveGpuMemoryStallWarnings(
         memoryUsedMb: gpu.memoryUsedMb,
         memoryTotalMb: gpu.memoryTotalMb,
         startedAt: since[id],
-        durationSeconds: Math.max(0, now - since[id]),
+        durationSeconds: Math.max(0, observedAt - since[id]),
       })
     }
   }

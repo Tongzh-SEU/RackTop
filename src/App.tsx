@@ -72,6 +72,7 @@ import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldRecordHis
 import { deriveGpuMemoryStallWarnings } from './utils/gpuMemoryWarnings'
 import { acquiredDataItems, interactionDurationSeconds, interactionVisualStatus } from './utils/activityLog'
 import { duplicateImportIndexes } from './utils/serverIdentity'
+import { currentUserProcessCount } from './utils/processRelations'
 import { previewServerOrder, serverDropTarget, type ServerDropPlacement } from './utils/serverOrder'
 import authorAvatar from './assets/tongzh-seu.png'
 import packageInfo from '../package.json'
@@ -234,6 +235,7 @@ function App() {
   const [pendingHostKey, setPendingHostKey] = useState<HostKeyInfo | null>(null)
   const [serverPendingDelete, setServerPendingDelete] = useState<Server | null>(null)
   const [processPendingTermination, setProcessPendingTermination] = useState<(ProcessTerminationTarget & { serverId: string; serverName: string }) | null>(null)
+  const [terminatingProcess, setTerminatingProcess] = useState<{ serverId: string; pid: number } | null>(null)
   const initialLoad = useRef(false)
   const snapshotsRef = useRef<Record<string, Snapshot>>({})
   const ignoredNvidiaWarningsRef = useRef(ignoredNvidiaWarnings)
@@ -253,6 +255,7 @@ function App() {
   const idleReservationsRef = useRef<IdleReservation[]>([])
   const reservationPendingSince = useRef<Record<string, Record<string, number>>>({})
   const gpuMemoryStallSince = useRef<Record<string, number>>({})
+  const notifiedGpuMemoryStalls = useRef(new Set<string>())
   const ignoredGpuMemoryStallWarnings = useRef<Set<string>>((() => {
     if (typeof localStorage === 'undefined') return new Set<string>()
     try {
@@ -593,6 +596,25 @@ function App() {
     const result = deriveGpuMemoryStallWarnings(servers, snapshots, gpuMemoryStallSince.current, ignoredGpuMemoryStallWarnings.current, now)
     gpuMemoryStallSince.current = result.since
     setGpuMemoryStallWarnings(result.warnings)
+    let ignoredChanged = false
+    for (const id of ignoredGpuMemoryStallWarnings.current) {
+      if (id in result.since) continue
+      ignoredGpuMemoryStallWarnings.current.delete(id)
+      ignoredChanged = true
+    }
+    if (ignoredChanged) localStorage.setItem('racktop.ignoredGpuMemoryStallWarnings.v1', JSON.stringify([...ignoredGpuMemoryStallWarnings.current]))
+    for (const warning of result.warnings) {
+      if (notifiedGpuMemoryStalls.current.has(warning.id)) continue
+      notifiedGpuMemoryStalls.current.add(warning.id)
+      void api.notify(
+        `${warning.serverName} 显存占用预警`,
+        `GPU ${warning.gpuIndex} 占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} GB，但 UTL 持续为 0`,
+        { serverId: warning.serverId, gpuUuid: warning.gpuUuid },
+      )
+    }
+    for (const id of notifiedGpuMemoryStalls.current) {
+      if (!(id in result.since)) notifiedGpuMemoryStalls.current.delete(id)
+    }
   }, [servers, snapshots])
 
   useEffect(() => {
@@ -910,7 +932,7 @@ function App() {
         <nav className="primary-nav" aria-label="主导航">
           <button className={mainView === 'fleet' ? 'is-active' : ''} onClick={() => setMainView('fleet')}><LayoutDashboard size={17} />总览 <span className="nav-count">{totals.gpus}</span></button>
           <button className={mainView === 'idle' ? 'is-active' : ''} onClick={() => setMainView('idle')}><Zap size={17} />空闲算力 <span className="nav-count">{totals.idle}</span></button>
-          <button className={mainView === 'mine' ? 'is-active' : ''} onClick={() => setMainView('mine')}><UserRound size={17} />我的进程 <span className="nav-count">{servers.reduce((sum, server) => sum + (snapshots[server.id]?.processes.filter((process) => process.isCurrentUser).length ?? 0) + (snapshots[server.id]?.cpuProcesses.filter((process) => process.isCurrentUser).length ?? 0), 0)}</span></button>
+          <button className={mainView === 'mine' ? 'is-active' : ''} onClick={() => setMainView('mine')}><UserRound size={17} />我的进程 <span className="nav-count">{servers.reduce((sum, server) => sum + (snapshots[server.id] ? currentUserProcessCount(snapshots[server.id]) : 0), 0)}</span></button>
         </nav>
         <div className="sidebar__section-header"><span>服务器</span><span>{totals.online}/{servers.length}</span></div>
         <div className="search-field"><Search size={14} /><input aria-label="搜索服务器" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索" />{search && <button onClick={() => setSearch('')} aria-label="清除搜索"><X size={13} /></button>}</div>
@@ -972,7 +994,7 @@ function App() {
           ) : mainView === 'idle' ? (
             <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} currentReservation={currentIdleReservation} onFiltersChange={setIdleFilters} onReserve={() => setReservationEditor({ filters: { ...idleFilters }, reservation: currentIdleReservation })} sortRevision={manualRefreshRevision} onSelect={(serverId) => { setSelectedServerId(serverId); setSelectedGpuUuid(null); setSelectedTab('overview'); setMainView('server') }} onQuickTerminal={(server, gpu) => setQuickTerminal({ server, gpu })} onReserveGpu={(server, gpu) => setReservationEditor({ filters: { ...idleFilters, duration: 0, targetServerId: server.id, targetGpuUuid: gpu.uuid } })} />
           ) : mainView === 'mine' ? (
-            <MineProcessView servers={servers} snapshots={snapshots} warnings={mineProcessWarnings} onRequestTerminate={(serverId, target) => { const server = servers.find((item) => item.id === serverId); if (server) setProcessPendingTermination({ serverId, serverName: server.name, ...target }) }} />
+            <MineProcessView servers={servers} snapshots={snapshots} warnings={mineProcessWarnings} terminatingProcess={terminatingProcess} onOpenTerminal={(serverId) => { setSelectedServerId(serverId); setSelectedGpuUuid(null); setSelectedTab('terminal'); setMainView('server') }} onRequestTerminate={(serverId, target) => { const server = servers.find((item) => item.id === serverId); if (server) setProcessPendingTermination({ serverId, serverName: server.name, ...target }) }} />
           ) : mainView === 'fleet' ? (
             <FleetOverview servers={servers} snapshots={snapshots} settings={settings} totals={totals} sort={fleetSort} descending={fleetDescending} onSort={setFleetSort} onToggleOrder={() => setFleetDescending((value) => !value)} onSelect={(serverId, tab, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid ?? null); setSelectedTab(tab); setMainView('server') }} />
           ) : selectedServer && selectedSnapshot ? (
@@ -989,6 +1011,7 @@ function App() {
               onDelete={() => setServerPendingDelete(selectedServer)}
               onEdit={() => { setEditingServer(selectedServer); setShowServerForm(true) }}
               onRequestTerminate={(target) => setProcessPendingTermination({ ...target, serverId: selectedServer.id, serverName: selectedServer.name })}
+              terminatingPid={terminatingProcess?.serverId === selectedServer.id ? terminatingProcess.pid : undefined}
               nvidiaWarningIgnored={ignoredNvidiaWarnings.has(selectedServer.id)}
               onIgnoreNvidiaWarning={() => setNvidiaWarningIgnored(selectedServer.id, true)}
               onRestoreNvidiaWarning={() => setNvidiaWarningIgnored(selectedServer.id, false)}
@@ -1001,14 +1024,14 @@ function App() {
         </div>
       </main>
 
-      {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultSamplingInterval={settings?.defaultSamplingIntervalSeconds} defaultHistoryRetentionDays={settings?.historyRetentionDays} defaultRemoteHistoryEnabled showGuide={settings?.showAddServerGuide ?? true} onGuideDismiss={() => { if (settings) void api.saveSettings({ ...settings, showAddServerGuide: false }).then(setSettings) }} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
+      {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultRemoteHistoryEnabled showGuide={settings?.showAddServerGuide ?? true} onGuideDismiss={() => { if (settings) void api.saveSettings({ ...settings, showAddServerGuide: false }).then(setSettings) }} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
       {showSettings && settings && <SettingsSheet settings={settings} onClose={() => setShowSettings(false)} onSave={async (value) => { setSettings(await api.saveSettings(value)); setShowSettings(false); setToast('设置已保存') }} />}
       {showActivityLog && <ActivityLogSheet servers={servers} snapshots={snapshots} onClose={() => setShowActivityLog(false)} />}
       {showAbout && <AboutSheet onClose={() => setShowAbout(false)} onNotice={setToast} />}
       {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setImportDrafts(null); setToast(`已导入 ${selected.length} 台服务器`) }} />}
       {pendingHostKey && <HostKeyDialog info={pendingHostKey} onClose={() => setPendingHostKey(null)} onTrust={async () => { const serverId = pendingHostKey.serverId; await api.trustHostKey(pendingHostKey); setPendingHostKey(null); setToast('已信任服务器指纹'); await refreshServer(serverId) }} />}
       {serverPendingDelete && <DeleteServerDialog server={serverPendingDelete} onClose={() => setServerPendingDelete(null)} onDelete={() => removeServer(serverPendingDelete)} />}
-      {processPendingTermination && <TerminateProcessDialog target={processPendingTermination} onClose={() => setProcessPendingTermination(null)} onTerminate={async () => { const result = await api.terminateProcess(processPendingTermination.serverId, processPendingTermination.process.pid); setProcessPendingTermination(null); setToast(result); await refreshServer(processPendingTermination.serverId) }} />}
+      {processPendingTermination && <TerminateProcessDialog target={processPendingTermination} onClose={() => setProcessPendingTermination(null)} onTerminate={() => { const target = processPendingTermination; setProcessPendingTermination(null); setTerminatingProcess({ serverId: target.serverId, pid: target.process.pid }); void api.terminateProcess(target.serverId, target.process.pid).then(async (result) => { setToast(result); await refreshServer(target.serverId) }).catch((reason) => setToast(`结束 PID ${target.process.pid} 失败：${String(reason)}`)).finally(() => setTerminatingProcess(null)) }} />}
       {reservationEditor && <IdleReservationSheet reservation={reservationEditor.reservation} filters={reservationEditor.filters} availableGpuKeys={reservationEditorItems.filter((item) => item.available).map(({ server, gpu }) => idleReservationGpuKey(server.id, gpu.uuid))} onClose={() => setReservationEditor(null)} onSave={saveIdleReservation} />}
       {showReservationCenter && <IdleReservationCenter reservations={idleReservations} warnings={gpuMemoryStallWarnings} onClose={() => setShowReservationCenter(false)} onEdit={(reservation) => { setShowReservationCenter(false); setReservationEditor({ filters: reservation.filters, reservation }) }} onStatusChange={setIdleReservationStatus} onClearPending={clearReservationPending} onDelete={removeIdleReservation} onIgnoreWarning={ignoreGpuMemoryStallWarning} />}
       {quickTerminal && <div className="scrim quick-terminal-scrim"><section className="sheet quick-terminal-sheet" role="dialog" aria-modal="true" aria-label={`${quickTerminal.server.name} GPU ${quickTerminal.gpu.index} 终端`}><header className="sheet__header"><div><p className="eyebrow">GPU 固定终端</p><h2>{quickTerminal.server.name} · GPU {quickTerminal.gpu.index}</h2></div><button className="icon-button" onClick={() => setQuickTerminal(null)} aria-label="关闭"><X size={18} /></button></header><SshTerminal serverId={quickTerminal.server.id} serverName={quickTerminal.server.name} gpuIndex={quickTerminal.gpu.index} onNotice={setToast} /></section></div>}
@@ -1052,6 +1075,7 @@ interface ServerDetailProps {
   onDelete: () => void
   onEdit: () => void
   onRequestTerminate: (target: ProcessTerminationTarget) => void
+  terminatingPid?: number
   nvidiaWarningIgnored: boolean
   onIgnoreNvidiaWarning: () => void
   onRestoreNvidiaWarning: () => void
@@ -1059,10 +1083,10 @@ interface ServerDetailProps {
   animateCharts: boolean
 }
 
-function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid, onTab, onSelectGpu, onRefresh, onDelete, onEdit, onRequestTerminate, nvidiaWarningIgnored, onIgnoreNvidiaWarning, onRestoreNvidiaWarning, isRefreshing, animateCharts }: ServerDetailProps) {
+function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid, onTab, onSelectGpu, onRefresh, onDelete, onEdit, onRequestTerminate, terminatingPid, nvidiaWarningIgnored, onIgnoreNvidiaWarning, onRestoreNvidiaWarning, isRefreshing, animateCharts }: ServerDetailProps) {
   const [showLogs, setShowLogs] = useState(false)
   return (
-    <div className="detail-page">
+    <div className={`detail-page ${tab === 'terminal' ? 'detail-page--terminal' : ''}`}>
       <div className="server-identity">
         <div><StatusPill status={server.status} /><span className="server-identity__meta">{server.location ? `${server.location} · ` : ''}{snapshot.username}@{snapshot.hostname} · 端口 {server.port}</span></div>
         <div className="server-identity__actions"><button className="icon-button" aria-label="打开采集与连接日志" title="日志" onClick={() => setShowLogs((value) => !value)}><ScrollText size={17} /></button><button className="icon-button" aria-label="编辑服务器" title="编辑服务器" onClick={onEdit}><MoreHorizontal size={18} /></button></div>
@@ -1073,10 +1097,10 @@ function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid
       </div>
       <div className="detail-content">
         {snapshot.nvidiaSmi !== 'available' && !nvidiaWarningIgnored && <NvidiaWarning snapshot={snapshot} onRefresh={onRefresh} onIgnore={onIgnoreNvidiaWarning} />}
-        {tab === 'overview' && <ServerOverview snapshot={snapshot} points={points} idleThreshold={settings?.idleGpuThreshold ?? 10} onSelectGpu={onSelectGpu} onOpenCpu={() => onTab('cpu')} onRequestTerminate={onRequestTerminate} animateCharts={animateCharts} />}
+        {tab === 'overview' && <ServerOverview snapshot={snapshot} points={points} idleThreshold={settings?.idleGpuThreshold ?? 10} onSelectGpu={onSelectGpu} onOpenCpu={() => onTab('cpu')} onRequestTerminate={onRequestTerminate} terminatingPid={terminatingPid} animateCharts={animateCharts} />}
         {tab === 'gpu' && <GpuDetail snapshot={snapshot} points={points} selectedGpuUuid={selectedGpuUuid} onSelectGpu={onSelectGpu} animateChart={animateCharts} />}
         {tab === 'cpu' && <CpuDetail snapshot={snapshot} points={points} animateChart={animateCharts} />}
-        {tab === 'processes' && <ProcessBlocks snapshot={snapshot} onRequestTerminate={onRequestTerminate} />}
+        {tab === 'processes' && <ProcessBlocks snapshot={snapshot} terminatingPid={terminatingPid} onRequestTerminate={onRequestTerminate} />}
         {tab === 'terminal' && <SshTerminal serverId={server.id} serverName={server.name} />}
         {tab === 'history' && <HistoryView server={server} snapshot={snapshot} />}
         {tab === 'connection' && <ConnectionView server={server} snapshot={snapshot} nvidiaWarningIgnored={nvidiaWarningIgnored} onRestoreNvidiaWarning={onRestoreNvidiaWarning} onRefresh={onRefresh} onDelete={onDelete} onEdit={onEdit} isRefreshing={isRefreshing} />}
@@ -1093,7 +1117,7 @@ function PanelHeader({ icon, title, subtitle, action }: { icon?: React.ReactNode
   return <header className="panel__header"><div>{icon && <span>{icon}</span>}<div><h3>{title}</h3>{subtitle && <p>{subtitle}</p>}</div></div>{action}</header>
 }
 
-function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCpu, onRequestTerminate, animateCharts }: { snapshot: Snapshot; points: HistoryPoint[]; idleThreshold: number; onSelectGpu: (gpuUuid: string) => void; onOpenCpu: () => void; onRequestTerminate: (target: ProcessTerminationTarget) => void; animateCharts: boolean }) {
+function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCpu, onRequestTerminate, terminatingPid, animateCharts }: { snapshot: Snapshot; points: HistoryPoint[]; idleThreshold: number; onSelectGpu: (gpuUuid: string) => void; onOpenCpu: () => void; onRequestTerminate: (target: ProcessTerminationTarget) => void; terminatingPid?: number; animateCharts: boolean }) {
   const readableGpus = snapshot.gpus.filter(isGpuAvailable)
   const totalMemoryMb = readableGpus.reduce((sum, gpu) => sum + Math.max(0, gpu.memoryTotalMb), 0)
   const usedMemoryMb = readableGpus.reduce((sum, gpu) => sum + Math.max(0, gpu.memoryUsedMb), 0)
@@ -1121,8 +1145,8 @@ function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCp
       </div>
     </section>,
     processes: <section className="overview-section" aria-labelledby="overview-process-title">
-      <div className="overview-section__header"><TerminalSquare size={17} /><div><h2 id="overview-process-title">当前进程</h2><p>GPU 与 CPU 进程及其父子关系</p></div></div>
-      <ProcessBlocks snapshot={snapshot} compact onRequestTerminate={onRequestTerminate} />
+      <div className="overview-section__header"><TerminalSquare size={17} /><div><h2 id="overview-process-title">当前进程</h2><p>GPU 与 CPU 进程按任务颜色分组</p></div></div>
+      <ProcessBlocks snapshot={snapshot} compact terminatingPid={terminatingPid} onRequestTerminate={onRequestTerminate} />
     </section>,
   }
 
@@ -1173,6 +1197,9 @@ function GpuDetail({ snapshot, points, selectedGpuUuid, animateChart }: { snapsh
     <section className="gpu-detail-list">{orderedGpus.map((gpu) => {
       if (!isGpuAvailable(gpu)) return <article className="panel gpu-detail gpu-detail--unavailable" key={gpu.uuid}><div className="gpu-detail__title"><div><span>GPU {gpu.index}</span><h3>{gpu.name}</h3><small>{gpu.uuid.replace('unavailable-', '').replaceAll('_', ':')}</small></div><strong>无法读取</strong></div><div className="gpu-unavailable"><AlertCircle size={19} /><div><strong>监控数据不可用</strong><p>健康 GPU 仍会继续采集；此卡不参与利用率汇总、空闲判断和预约。</p></div></div></article>
       const gpuProcesses = snapshot.processes.filter((process) => process.gpuUuid === gpu.uuid)
+      const attributedMemoryMb = gpuProcesses.reduce((sum, process) => sum + Math.max(0, process.memoryUsedMb), 0)
+      const unattributedMemoryMb = Math.max(0, gpu.memoryUsedMb - attributedMemoryMb)
+      const hasUnattributedMemory = unattributedMemoryMb >= 256
       const ownMemoryMb = gpuProcesses.filter((process) => process.isCurrentUser).reduce((sum, process) => sum + process.memoryUsedMb, 0)
       const totalSmUtilization = aggregateGpuSmUtilization(gpuProcesses)
       const memory = gpuMemoryPercent(gpu)
@@ -1181,7 +1208,7 @@ function GpuDetail({ snapshot, points, selectedGpuUuid, animateChart }: { snapsh
         <div className="gpu-detail__title"><div><span>GPU {gpu.index}{isExpanded ? ' · 已展开' : ''}</span><h3>{gpu.name}</h3><small>{gpu.uuid}</small></div><strong>{displayedGpuMemoryPercent(memory)}%<small> MEM</small></strong></div>
         <div className="gpu-detail__meters"><MetricBar label="MEM" value={displayedGpuMemoryPercent(memory)} detail={`${(gpu.memoryUsedMb / 1024).toFixed(1)} / ${(gpu.memoryTotalMb / 1024).toFixed(1)} GB`} accent="purple" /><MetricBar label="UTL" value={gpu.utilization} accent={gpuLoadAccent(gpu.utilization)} /></div>
         <div className="stat-row stat-row--gpu"><span><small>MBW</small><strong>{clampPercent(gpu.memoryUtilization).toFixed(0)}%</strong></span><span><small>温度</small><strong>{gpu.temperatureCelsius}°C</strong></span><span><small>功耗</small><strong>{gpu.powerWatts.toFixed(1)} W</strong></span><button type="button" className={expanded?.uuid === gpu.uuid && expanded.mode === 'processes' ? 'is-active' : ''} aria-expanded={expanded?.uuid === gpu.uuid && expanded.mode === 'processes'} onClick={() => toggleExpanded(gpu.uuid, 'processes')}><small>进程</small><strong>{gpuProcesses.length}</strong></button><button type="button" className={expanded?.uuid === gpu.uuid && expanded.mode === 'sm' ? 'is-active' : ''} aria-expanded={expanded?.uuid === gpu.uuid && expanded.mode === 'sm'} onClick={() => toggleExpanded(gpu.uuid, 'sm')}><small>SM</small><strong>{totalSmUtilization.toFixed(0)}%</strong></button></div>
-        {isExpanded && <div className="gpu-detail__processes"><header><strong>{expanded.mode === 'sm' ? '进程 SM 活跃率' : `GPU ${gpu.index} 进程`}</strong><small>{expanded.mode === 'sm' ? '单次 pmon 采样，不代表算法效率' : `${gpuProcesses.length} 个计算进程`}</small></header>{gpuProcesses.length ? gpuProcesses.map((process) => <div key={process.pid}><code>PID {process.pid}</code><span title={process.command}>{process.command}</span><strong>{expanded.mode === 'sm' ? `SM ${clampPercent(process.smUtilization ?? 0).toFixed(0)}%` : `${(process.memoryUsedMb / 1024).toFixed(1)} GB`}</strong></div>) : <p className="gpu-detail__empty">当前没有 GPU 计算进程</p>}</div>}
+        {isExpanded && <div className="gpu-detail__processes"><header><strong>{expanded.mode === 'sm' ? '进程 SM 活跃率' : `GPU ${gpu.index} 进程`}</strong><small>{expanded.mode === 'sm' ? '单次 pmon 采样，不代表算法效率' : `${gpuProcesses.length} 个计算进程`}</small></header>{gpuProcesses.length ? gpuProcesses.map((process) => <div key={process.pid}><code>PID {process.pid}</code><span title={process.command}>{process.command}</span><strong>{expanded.mode === 'sm' ? `SM ${clampPercent(process.smUtilization ?? 0).toFixed(0)}%` : `${(process.memoryUsedMb / 1024).toFixed(1)} GB`}</strong></div>) : <p className="gpu-detail__empty">{hasUnattributedMemory ? `检测到 ${(unattributedMemoryMb / 1024).toFixed(1)} GB 显存占用，但 NVIDIA 驱动未返回可映射的 PID` : '当前没有 GPU 计算进程'}</p>}</div>}
         {ownMemoryMb > 0 && <div className="gpu-detail__own"><UserRound size={13} /><strong>你的任务</strong><span>占用 {(ownMemoryMb / 1024).toFixed(1)} GB 显存</span></div>}
       </article>
     })}</section>
@@ -1376,15 +1403,15 @@ function FleetOverview({ servers, snapshots, settings, totals, sort, descending,
   </div>
 }
 
-function MineProcessView({ servers, snapshots, warnings, onRequestTerminate }: { servers: Server[]; snapshots: Record<string, Snapshot>; warnings: Array<{ id: string; serverId: string; message: string }>; onRequestTerminate: (serverId: string, target: ProcessTerminationTarget) => void }) {
+function MineProcessView({ servers, snapshots, warnings, terminatingProcess, onOpenTerminal, onRequestTerminate }: { servers: Server[]; snapshots: Record<string, Snapshot>; warnings: Array<{ id: string; serverId: string; message: string }>; terminatingProcess: { serverId: string; pid: number } | null; onOpenTerminal: (serverId: string) => void; onRequestTerminate: (serverId: string, target: ProcessTerminationTarget) => void }) {
   const mineServers = servers.flatMap((server) => {
     const snapshot = snapshots[server.id]
     if (!snapshot) return []
-    const mineSnapshot = { ...snapshot, processes: snapshot.processes.filter((process) => process.isCurrentUser), cpuProcesses: snapshot.cpuProcesses.filter((process) => process.isCurrentUser && process.isGroupLeader) }
+    const mineSnapshot = { ...snapshot, processes: snapshot.processes.filter((process) => process.isCurrentUser), cpuProcesses: snapshot.cpuProcesses.filter((process) => process.isCurrentUser) }
     return mineSnapshot.processes.length || mineSnapshot.cpuProcesses.length ? [{ server, snapshot: mineSnapshot }] : []
   })
-  const mineCount = mineServers.reduce((sum, item) => sum + item.snapshot.processes.length + item.snapshot.cpuProcesses.length, 0)
-  return <div className="detail-page mine-process-page">{mineServers.length > 0 && <section className="mine-process-summary" aria-label="我的进程摘要"><span>{mineServers.length} 台服务器</span><strong>{mineCount} 个进程</strong></section>}{warnings.length > 0 && <section className="mine-process-warnings" aria-live="polite">{warnings.map((warning) => <div className="mine-process-warning" key={warning.id}><AlertCircle size={17} /><span>{warning.message}</span></div>)}</section>}{mineServers.length > 0 ? <div className="mine-process-list">{mineServers.map(({ server, snapshot }) => <section className="mine-process-server" key={server.id}><PanelHeader icon={<ServerIcon />} title={server.name} subtitle={`${server.host} · 最近采集 ${relativeTime(snapshot.timestamp)}`} /><ProcessBlocks snapshot={snapshot} onRequestTerminate={(target) => onRequestTerminate(server.id, target)} /></section>)}</div> : <div className="mine-process-empty" role="status"><UserRound size={28} /><strong>没有我的进程</strong><p>当前已连接的服务器上没有检测到你的 GPU 进程或 CPU 主进程。</p></div>}</div>
+  const mineCount = mineServers.reduce((sum, item) => sum + currentUserProcessCount(item.snapshot), 0)
+  return <div className="detail-page mine-process-page">{mineServers.length > 0 && <section className="mine-process-summary" aria-label="我的进程摘要"><span>{mineServers.length} 台服务器</span><strong>{mineCount} 个进程</strong></section>}{warnings.length > 0 && <section className="mine-process-warnings" aria-live="polite">{warnings.map((warning) => <div className="mine-process-warning" key={warning.id}><AlertCircle size={17} /><span>{warning.message}</span></div>)}</section>}{mineServers.length > 0 ? <div className="mine-process-list">{mineServers.map(({ server, snapshot }) => <section className="mine-process-server" key={server.id}><PanelHeader icon={<ServerIcon />} title={server.name} subtitle={`${server.host} · 最近采集 ${relativeTime(snapshot.timestamp)}`} action={<button className="icon-button" aria-label={`打开 ${server.name} 终端`} title="打开终端" onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={16} /></button>} /><ProcessBlocks snapshot={snapshot} hideEmptyBlocks terminatingPid={terminatingProcess?.serverId === server.id ? terminatingProcess.pid : undefined} onRequestTerminate={(target) => onRequestTerminate(server.id, target)} /></section>)}</div> : <div className="mine-process-empty" role="status"><UserRound size={28} /><strong>没有我的进程</strong><p>当前已连接的服务器上没有检测到你的 GPU 或 CPU 进程。</p></div>}</div>
 }
 
 function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentReservation, onFiltersChange, onReserve, sortRevision, onSelect, onQuickTerminal, onReserveGpu }: { servers: Server[]; snapshots: Record<string, Snapshot>; items: IdleGpuItem[]; filters: IdleFilters; currentReservation?: IdleReservation; onFiltersChange: (filters: IdleFilters) => void; onReserve: () => void; sortRevision: number; onSelect: (serverId: string, gpuUuid: string) => void; onQuickTerminal: (server: Server, gpu: Snapshot['gpus'][number]) => void; onReserveGpu: (server: Server, gpu: Snapshot['gpus'][number]) => void }) {
@@ -1539,7 +1566,7 @@ function IdleReservationCenter({ reservations, warnings, onClose, onEdit, onStat
       <div className="reservation-list">
         {warnings.map((warning) => <div className="reservation-row reservation-row--warning" key={warning.id}>
           <span className="reservation-row__status reservation-row__status--warning"><AlertCircle size={15} /></span>
-          <div className="reservation-row__content"><div><strong>{warning.serverName} · {warning.gpuIndex} · {warning.gpuName.replace('NVIDIA ', '')}</strong><em>显存占用预警</em></div><p>GPU MEM 已占用 {(warning.memoryUsedMb / 1024).toFixed(1)} / {(warning.memoryTotalMb / 1024).toFixed(1)} GB，但 UTL 为 0，已持续 {Math.floor(warning.durationSeconds / 3600)} 小时</p><small>{warning.usernames.length ? `用户：${warning.usernames.join('、')}` : '未识别到对应进程'} · 这不是系统弹窗通知</small></div>
+          <div className="reservation-row__content"><div><strong>{warning.serverName} · {warning.gpuIndex} · {warning.gpuName.replace('NVIDIA ', '')}</strong><em>显存占用预警</em></div><p>GPU MEM 已占用 {(warning.memoryUsedMb / 1024).toFixed(1)} / {(warning.memoryTotalMb / 1024).toFixed(1)} GB，但 UTL 为 0，已持续 {Math.floor(warning.durationSeconds / 3600)} 小时</p><small>{warning.usernames.length ? `用户：${warning.usernames.join('、')}` : '未识别到对应进程'} · 允许系统通知时会同步提醒</small></div>
           <div className="reservation-row__actions"><button className="button button--secondary button--small" onClick={() => onIgnoreWarning(warning)}>忽略</button></div>
         </div>)}
         {reservations.map((reservation) => <div className="reservation-row" key={reservation.id}>
@@ -1553,7 +1580,7 @@ function IdleReservationCenter({ reservations, warnings, onClose, onEdit, onStat
             <button className="icon-button reservation-delete" title="删除预约" aria-label={`删除 ${reservation.name}`} disabled={busyId === reservation.id} onClick={() => void run(reservation.id, () => onDelete(reservation.id))}><Trash2 size={14} /></button>
           </div>
         </div>)}
-        {reservations.length === 0 && <div className="inline-empty"><Bell size={24} /><strong>还没有预约</strong><p>在“寻找空闲算力”的条件栏中创建预约。</p></div>}
+        {reservations.length === 0 && warnings.length === 0 && <div className="inline-empty"><Bell size={24} /><strong>还没有预约</strong><p>在“寻找空闲算力”的条件栏中创建预约。</p></div>}
         {error && <p className="form-error" role="alert">{error}</p>}
       </div>
       <footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>完成</button></footer>
@@ -1577,14 +1604,12 @@ function SettingsSheet({ settings, onClose, onSave }: { settings: AppSettings; o
           <label className="switch-row"><span><strong>显示添加服务器引导</strong><small>重新开启地址、认证、Host Key 与远端历史提示</small></span><input type="checkbox" checked={value.showAddServerGuide} onChange={(event) => set('showAddServerGuide', event.target.checked)} /></label>
         </SettingsGroup>
         <SettingsGroup icon={<RefreshCw />} title="采样">
-          <label>新服务器默认采样 <span>{value.defaultSamplingIntervalSeconds} 秒</span><input type="range" min="2" max="30" value={value.defaultSamplingIntervalSeconds} onChange={(event) => set('defaultSamplingIntervalSeconds', Number(event.target.value))} /></label>
           <label>后台最低采样间隔 <span>{value.backgroundSamplingIntervalSeconds} 秒</span><input type="range" min="5" max="120" value={value.backgroundSamplingIntervalSeconds} onChange={(event) => set('backgroundSamplingIntervalSeconds', Number(event.target.value))} /></label>
           <label>进程刷新 <select value={value.processIntervalSeconds} onChange={(event) => set('processIntervalSeconds', Number(event.target.value))}><option value="2">2 秒</option><option value="5">5 秒</option><option value="10">10 秒</option><option value="30">30 秒</option></select></label>
           <label>实时趋势窗口 <span>{value.realtimeWindowMinutes} 分钟</span><input type="range" min="10" max="360" step="10" value={value.realtimeWindowMinutes} onChange={(event) => set('realtimeWindowMinutes', Number(event.target.value))} /></label>
         </SettingsGroup>
         <SettingsGroup icon={<Database />} title="历史">
-          <label className="switch-row"><span><strong>保存历史数据</strong><small>使用本地 SQLite，按每台服务器的策略自动清理</small></span><input type="checkbox" checked={value.historyEnabled} onChange={(event) => set('historyEnabled', event.target.checked)} /></label>
-          <label>新服务器默认保存时间 <select disabled={!value.historyEnabled} value={value.historyRetentionDays} onChange={(event) => set('historyRetentionDays', Number(event.target.value))}><option value="1">1 天</option><option value="7">7 天</option><option value="30">30 天</option><option value="90">90 天</option></select></label>
+          <label className="switch-row"><span><strong>保存历史数据</strong><small>使用本地 SQLite，固定保留最近 90 天</small></span><input type="checkbox" checked={value.historyEnabled} onChange={(event) => set('historyEnabled', event.target.checked)} /></label>
         </SettingsGroup>
         <SettingsGroup icon={<CircleGauge />} title="空闲与告警">
           <label>空闲 GPU 阈值 <span>{value.idleGpuThreshold}%</span><input type="range" min="0" max="30" value={value.idleGpuThreshold} onChange={(event) => set('idleGpuThreshold', Number(event.target.value))} /></label>
@@ -1647,7 +1672,7 @@ function ActivityLogSheet({ servers, snapshots, onClose }: { servers: Server[]; 
           {!error && summary.servers.length === 0 && <div className="activity-log-empty-state"><ScrollText size={24} /><strong>等待首次服务器交互</strong><p>发送、接收和本地写入数据会在这里按服务器汇总。</p></div>}
         </div>
       </div>
-      <footer className="sheet__footer"><span>日志仅保存在内存中，不写入历史数据库。</span><button className="button button--secondary" onClick={onClose}>关闭</button></footer>
+      <footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>关闭</button></footer>
     </section>
   </div>
 }
@@ -1674,11 +1699,10 @@ function SshImportSheet({ drafts, servers, onClose, onImport }: { drafts: Server
   return <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="sheet import-sheet" role="dialog" aria-modal="true" aria-labelledby="ssh-import-title"><header className="sheet__header"><div><p className="eyebrow">OpenSSH Config</p><h2 id="ssh-import-title">选择要监控的服务器</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="import-list">{duplicates.size > 0 && <p className="import-notice" role="status"><AlertCircle size={15} /><span>已识别并跳过 {duplicates.size} 台重复服务器；相同用户名、地址与端口只保留一条连接。</span></p>}{drafts.map((draft, index) => { const duplicate = duplicates.has(index); return <label className={`import-row ${duplicate ? 'import-row--duplicate' : ''}`} key={`${draft.sshAlias}-${draft.host}-${index}`}><input type="checkbox" checked={selected.has(index)} disabled={duplicate} onChange={() => toggle(index)} /><span><strong>{draft.sshAlias || draft.name}</strong><small>{draft.username}@{draft.host}:{draft.port}{draft.proxyJump ? ` · via ${draft.proxyJump}` : ''}</small></span>{duplicate && <em>已存在</em>}</label>})}{error && <p className="form-error" role="alert">{error}</p>}</div><footer className="sheet__footer"><span className="sheet__selection-count">已选 {selected.size} / {availableCount} 台可导入</span><button className="button button--secondary" onClick={onClose}>取消</button><button className="button button--primary" disabled={saving || selected.size === 0} onClick={async () => { setSaving(true); setError(null); try { await onImport(drafts.filter((_, index) => selected.has(index))) } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '导入中…' : `导入 ${selected.size} 台`}</button></footer></section></div>
 }
 
-function TerminateProcessDialog({ target, onClose, onTerminate }: { target: ProcessTerminationTarget & { serverId: string; serverName: string }; onClose: () => void; onTerminate: () => Promise<void> }) {
+function TerminateProcessDialog({ target, onClose, onTerminate }: { target: ProcessTerminationTarget & { serverId: string; serverName: string }; onClose: () => void; onTerminate: () => void }) {
   const [stage, setStage] = useState<'review' | 'verify'>('review')
   const [confirmation, setConfirmation] = useState('')
   const [copied, setCopied] = useState(false)
-  const [terminating, setTerminating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const pid = target.process.pid
   const expected = String(pid)
@@ -1691,7 +1715,7 @@ function TerminateProcessDialog({ target, onClose, onTerminate }: { target: Proc
       setError('无法访问剪贴板，请手动输入 PID')
     }
   }
-  return <div className="scrim"><section className="sheet terminate-process-sheet" role="alertdialog" aria-modal="true" aria-labelledby="terminate-process-title"><header className="sheet__header"><div><p className="eyebrow">结束远程进程</p><h2 id="terminate-process-title">{stage === 'review' ? `确认结束 PID ${pid}？` : '再次确认进程 PID'}</h2></div><button className="icon-button" onClick={onClose} disabled={terminating} aria-label="关闭"><X size={18} /></button></header><div className="terminate-process-body"><span className="terminate-process-icon"><OctagonX size={24} /></span><div className="terminate-process-copy">{stage === 'review' ? <><p>将在 <strong>{target.serverName}</strong> 上结束当前 SSH 用户的整个进程组，并清理其残留子进程。</p><dl><div><dt>进程</dt><dd>{target.kind.toUpperCase()} · PID {pid}</dd></div><div><dt>命令</dt><dd className="mono">{target.process.command}</dd></div></dl><small>先发送 TERM，3 秒后仍存在则发送 KILL。未保存的计算状态可能丢失。</small></> : <><p>点击下方 PID 可自动复制，然后将数字输入确认框。</p><button type="button" className={`copy-pid-button ${copied ? 'is-copied' : ''}`} onClick={() => void copyPid()} aria-label={`复制 PID ${pid}`}>{copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}<code>{copied ? `已复制 PID ${pid}` : `PID ${pid}`}</code></button><label>输入 PID 以确认<input autoFocus inputMode="numeric" value={confirmation} onChange={(event) => setConfirmation(event.target.value.replace(/\D/g, ''))} placeholder={expected} /></label></>}{error && <p className="form-error" role="alert">{error}</p>}</div></div><footer className="sheet__footer">{stage === 'verify' && <button className="button button--secondary" onClick={() => { setStage('review'); setError(null) }} disabled={terminating}>返回</button>}<button className="button button--secondary" onClick={onClose} disabled={terminating}>取消</button>{stage === 'review' ? <button className="button button--danger" onClick={() => setStage('verify')}>继续确认</button> : <button className="button button--danger" disabled={terminating || confirmation !== expected} onClick={async () => { setTerminating(true); setError(null); try { await onTerminate() } catch (reason) { setError(String(reason)); setTerminating(false) } }}>{terminating ? '正在结束…' : `结束 PID ${pid}`}</button>}</footer></section></div>
+  return <div className="scrim"><section className="sheet terminate-process-sheet" role="alertdialog" aria-modal="true" aria-labelledby="terminate-process-title"><header className="sheet__header"><div><p className="eyebrow">结束远程进程</p><h2 id="terminate-process-title">{stage === 'review' ? `确认结束 PID ${pid}？` : '再次确认进程 PID'}</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="terminate-process-body"><span className="terminate-process-icon"><OctagonX size={24} /></span><div className="terminate-process-copy">{stage === 'review' ? <><p>将在 <strong>{target.serverName}</strong> 上结束当前 SSH 用户的 PID {pid}，并递归清理它下面的 CPU 子进程。同一终端中不相关的兄弟进程不会被结束。</p><dl><div><dt>进程</dt><dd>{target.kind.toUpperCase()} · PID {pid}</dd></div><div><dt>命令</dt><dd className="mono">{target.process.command}</dd></div></dl><small>先发送 TERM，3 秒后仍存在则发送 KILL。未保存的计算状态可能丢失。</small></> : <><p>点击下方 PID 可自动复制，然后将数字输入确认框。</p><button type="button" className={`copy-pid-button ${copied ? 'is-copied' : ''}`} onClick={() => void copyPid()} aria-label={`复制 PID ${pid}`}>{copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}<code>{copied ? `已复制 PID ${pid}` : `PID ${pid}`}</code></button><label>输入 PID 以确认<input autoFocus inputMode="numeric" value={confirmation} onChange={(event) => setConfirmation(event.target.value.replace(/\D/g, ''))} placeholder={expected} /></label></>}{error && <p className="form-error" role="alert">{error}</p>}</div></div><footer className="sheet__footer">{stage === 'verify' && <button className="button button--secondary" onClick={() => { setStage('review'); setError(null) }}>返回</button>}<button className="button button--secondary" onClick={onClose}>取消</button>{stage === 'review' ? <button className="button button--danger" onClick={() => setStage('verify')}>继续确认</button> : <button className="button button--danger" disabled={confirmation !== expected} onClick={onTerminate}>{`结束 PID ${pid}`}</button>}</footer></section></div>
 }
 
 function DeleteServerDialog({ server, onClose, onDelete }: { server: Server; onClose: () => void; onDelete: () => Promise<void> }) {

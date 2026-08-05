@@ -5,8 +5,6 @@ import { sshSetupTargetValidationMessage, unixSshSetupScript, windowsSshSetupScr
 
 interface ServerFormProps {
   initial?: Partial<ServerDraft>
-  defaultSamplingInterval?: number
-  defaultHistoryRetentionDays?: number
   defaultRemoteHistoryEnabled?: boolean
   showGuide?: boolean
   onGuideDismiss?: () => void
@@ -14,7 +12,7 @@ interface ServerFormProps {
   onSave: (draft: ServerDraft) => Promise<void>
 }
 
-export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistoryRetentionDays = 90, defaultRemoteHistoryEnabled = true, showGuide = true, onGuideDismiss, onClose, onSave }: ServerFormProps) {
+export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGuide = true, onGuideDismiss, onClose, onSave }: ServerFormProps) {
   const [draft, setDraft] = useState<ServerDraft>({
     id: initial?.id,
     name: initial?.name ?? '',
@@ -26,8 +24,8 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
     identityFile: initial?.identityFile ?? '',
     proxyJump: initial?.proxyJump ?? '',
     tags: initial?.tags ?? [],
-    samplingIntervalSeconds: initial?.samplingIntervalSeconds ?? defaultSamplingInterval,
-    historyRetentionDays: initial?.historyRetentionDays ?? defaultHistoryRetentionDays,
+    samplingIntervalSeconds: 2,
+    historyRetentionDays: 90,
     remoteHistoryEnabled: initial?.remoteHistoryEnabled ?? defaultRemoteHistoryEnabled,
     authMethod: initial?.authMethod ?? 'sshAgent',
   })
@@ -177,11 +175,7 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
               <label>跳板机 ProxyJump<input value={draft.proxyJump ?? ''} onChange={(event) => set('proxyJump', event.target.value)} placeholder="可选" /></label>
               <label>标签<input value={draft.tags.join(', ')} onChange={(event) => set('tags', event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean))} placeholder="lab, h100" /></label>
             </div>
-            <div className="form-grid form-grid--2">
-              <label>此服务器采样间隔<select value={draft.samplingIntervalSeconds} onChange={(event) => set('samplingIntervalSeconds', Number(event.target.value))}><option value="2">2 秒</option><option value="5">5 秒</option><option value="10">10 秒</option><option value="15">15 秒</option><option value="30">30 秒</option></select><small>前台使用；后台会自动采用更低频率。</small></label>
-              <label>此服务器历史保存<select value={draft.historyRetentionDays} onChange={(event) => set('historyRetentionDays', Number(event.target.value))}><option value="1">1 天</option><option value="7">7 天</option><option value="30">30 天</option><option value="90">90 天</option></select><small>独立覆盖全局默认保存时间。</small></label>
-            </div>
-            <label className="switch-row remote-history-row"><Database size={18} /><span><strong>远端持续保存 30 天</strong><small>启动用户级隐藏常驻采集进程；RackTop 关闭期间继续记录，重新打开后自动同步。不保存进程和命令。</small></span><input type="checkbox" checked={draft.remoteHistoryEnabled} onChange={(event) => set('remoteHistoryEnabled', event.target.checked)} /></label>
+            <label className="switch-row remote-history-row"><Database size={18} /><span><strong>服务器远端缓存 30 天</strong><small>固定保留 30 天；RackTop 关闭期间继续采集，重新打开后同步到本机 90 天历史。不保存进程和命令。</small></span><input type="checkbox" checked={draft.remoteHistoryEnabled} onChange={(event) => set('remoteHistoryEnabled', event.target.checked)} /></label>
             {error && <p className="form-error" role="alert">{error}</p>}
           </div>
           <footer className="sheet__footer">
