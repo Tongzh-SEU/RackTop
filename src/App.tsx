@@ -1672,7 +1672,7 @@ function ActivityLogSheet({ servers, snapshots, onClose }: { servers: Server[]; 
           {!error && summary.servers.length === 0 && <div className="activity-log-empty-state"><ScrollText size={24} /><strong>等待首次服务器交互</strong><p>发送、接收和本地写入数据会在这里按服务器汇总。</p></div>}
         </div>
       </div>
-      <footer className="sheet__footer"><span>日志仅保存在内存中，不写入历史数据库。</span><button className="button button--secondary" onClick={onClose}>关闭</button></footer>
+      <footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>关闭</button></footer>
     </section>
   </div>
 }
