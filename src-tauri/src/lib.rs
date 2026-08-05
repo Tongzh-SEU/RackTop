@@ -3,15 +3,59 @@ pub mod models;
 mod remote_history;
 mod host_key;
 mod ssh_config;
-mod storage;
+pub mod storage;
 mod terminal;
 
-use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
+use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogEntry, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
+use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::Database;
 use terminal::TerminalManager;
 use tauri::{image::Image, menu::{Menu, MenuBuilder, MenuItemBuilder}, tray::TrayIconBuilder, AppHandle, Emitter, Manager, State};
+
+#[derive(Default)]
+struct InteractionLogStore {
+    next_id: AtomicU64,
+    entries: Mutex<VecDeque<InteractionLogEntry>>,
+}
+
+impl InteractionLogStore {
+    fn now_millis() -> i64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_millis() as i64).unwrap_or_default()
+    }
+
+    fn begin(&self, server: &Server, command: String) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.push_front(InteractionLogEntry { id, server_id: server.id.clone(), server_name: server.name.clone(), started_at: Self::now_millis(), finished_at: None, command, response_bytes: 0, stored_bytes: 0, status: "running".into(), error: None });
+            entries.truncate(200);
+        }
+        id
+    }
+
+    fn finish(&self, id: u64, response_bytes: u64, stored_bytes: u64, error: Option<String>) {
+        if let Ok(mut entries) = self.entries.lock() {
+            if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
+                entry.finished_at = Some(Self::now_millis());
+                entry.response_bytes = response_bytes;
+                entry.stored_bytes = stored_bytes;
+                entry.status = if error.is_some() { "error".into() } else { "success".into() };
+                entry.error = error;
+            }
+        }
+    }
+
+    fn list(&self) -> Result<Vec<InteractionLogEntry>, String> {
+        self.entries.lock().map(|entries| entries.iter().cloned().collect()).map_err(|error| error.to_string())
+    }
+}
+
+#[tauri::command]
+fn list_interaction_logs(logs: State<'_, InteractionLogStore>) -> Result<Vec<InteractionLogEntry>, String> {
+    logs.list()
+}
 
 #[tauri::command]
 fn list_servers(database: State<'_, Database>) -> Result<Vec<Server>, String> {
@@ -69,21 +113,48 @@ fn close_terminal(terminals: State<'_, TerminalManager>, session_id: String) -> 
 }
 
 #[tauri::command]
-async fn collect_server(database: State<'_, Database>, server_id: String, include_processes: bool, record_history: bool) -> Result<Snapshot, String> {
+async fn collect_server(database: State<'_, Database>, logs: State<'_, InteractionLogStore>, server_id: String, include_processes: bool, include_disks: bool, record_history: bool) -> Result<Snapshot, String> {
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
-    match collector::collect_with_password(&server, password.as_deref(), include_processes).await {
-        Ok(snapshot) => {
-            database.update_status(&server_id, &snapshot.status, snapshot.nvidia_message.as_deref(), Some(snapshot.timestamp))?;
-            if record_history {
-                database.save_snapshot(&snapshot)?;
-            }
-            if snapshot.processes_sampled {
-                database.save_local_usage(&snapshot)?;
-            }
-            Ok(snapshot)
+    let log_id = logs.begin(&server, collector::collection_display_command(&server, include_processes, include_disks));
+    let password = match if server.auth_method == "password" { database.get_password(&server_id) } else { Ok(None) } {
+        Ok(password) => password,
+        Err(error) => {
+            logs.finish(log_id, 0, 0, Some(error.clone()));
+            return Err(error);
         }
-        Err(error) => Err(error),
+    };
+    match collector::collect_with_password_detailed(&server, password.as_deref(), include_processes, include_disks).await {
+        Ok(collected) => {
+            let response_bytes = collected.response_bytes;
+            let snapshot = collected.snapshot;
+            let mut stored_bytes = 0u64;
+            let stored = (|| -> Result<(), String> {
+                database.update_status(&server_id, &snapshot.status, snapshot.nvidia_message.as_deref(), Some(snapshot.timestamp))?;
+                if record_history {
+                    stored_bytes = serde_json::to_vec(&snapshot).map_err(|error| error.to_string())?.len() as u64;
+                    database.save_snapshot(&snapshot)?;
+                }
+                if snapshot.processes_sampled {
+                    let usage_rows = database.save_local_usage(&snapshot)?;
+                    stored_bytes = stored_bytes.saturating_add((usage_rows as u64).saturating_mul(96));
+                }
+                Ok(())
+            })();
+            match stored {
+                Ok(()) => {
+                    logs.finish(log_id, response_bytes, stored_bytes, None);
+                    Ok(snapshot)
+                }
+                Err(error) => {
+                    logs.finish(log_id, response_bytes, stored_bytes, Some(error.clone()));
+                    Err(error)
+                }
+            }
+        }
+        Err(error) => {
+            logs.finish(log_id, 0, 0, Some(error.clone()));
+            Err(error)
+        }
     }
 }
 
@@ -267,6 +338,7 @@ pub fn run() {
             let database = Database::open(&app_data.join("racktop.sqlite")).map_err(|error| Box::<dyn std::error::Error>::from(std::io::Error::other(error)))?;
             app.manage(database);
             app.manage(TerminalManager::default());
+            app.manage(InteractionLogStore::default());
 
             let menu = build_tray_menu(&app.handle(), "预约摘要")?;
             TrayIconBuilder::with_id("racktop-tray")
@@ -290,7 +362,7 @@ pub fn run() {
                 .build(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, list_interaction_logs, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }

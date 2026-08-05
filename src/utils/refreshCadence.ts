@@ -1,4 +1,5 @@
 export const FOREGROUND_STATUS_INTERVAL_MS = 500
+export const DISK_STATUS_INTERVAL_MS = 15 * 60 * 1_000
 
 export function statusRefreshIntervalMs(fastStatusView: boolean, documentHidden: boolean, samplingIntervalSeconds: number, backgroundIntervalSeconds: number): number {
   if (documentHidden) return Math.max(samplingIntervalSeconds, backgroundIntervalSeconds) * 1_000

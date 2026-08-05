@@ -138,7 +138,7 @@ fn parse_history_line(line: &str) -> Result<HistoryPoint, String> {
         gpu_utilizations.insert(values[0].to_string(), parse_percent(values[1])?);
         gpu_memory_utilizations.insert(values[0].to_string(), parse_percent(values[2])?);
     }
-    Ok(HistoryPoint { timestamp, cpu_utilization, memory_utilization, swap_utilization, gpu_utilizations, gpu_memory_utilizations })
+    Ok(HistoryPoint { timestamp, cpu_utilization, memory_utilization, swap_utilization, cpu_min: cpu_utilization, cpu_max: cpu_utilization, memory_min: memory_utilization, memory_max: memory_utilization, swap_min: swap_utilization, swap_max: swap_utilization, gpu_mins: gpu_utilizations.clone(), gpu_maxes: gpu_utilizations.clone(), gpu_memory_mins: gpu_memory_utilizations.clone(), gpu_memory_maxes: gpu_memory_utilizations.clone(), gpu_utilizations, gpu_memory_utilizations })
 }
 
 fn parse_percent(value: &str) -> Result<f64, String> {

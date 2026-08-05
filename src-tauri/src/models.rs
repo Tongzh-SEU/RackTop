@@ -70,6 +70,21 @@ pub struct RemoteCleanupSweepResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct InteractionLogEntry {
+    pub id: u64,
+    pub server_id: String,
+    pub server_name: String,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub command: String,
+    pub response_bytes: u64,
+    pub stored_bytes: u64,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GpuMetric {
     pub index: u32,
     pub uuid: String,
@@ -89,6 +104,8 @@ pub struct DiskMetric {
     pub used_bytes: u64,
     pub total_bytes: u64,
     pub available_bytes: u64,
+    #[serde(default)]
+    pub current_user_used_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +190,26 @@ pub struct HistoryPoint {
     pub gpu_utilizations: HashMap<String, f64>,
     #[serde(default)]
     pub gpu_memory_utilizations: HashMap<String, f64>,
+    #[serde(default)]
+    pub cpu_min: f64,
+    #[serde(default)]
+    pub cpu_max: f64,
+    #[serde(default)]
+    pub memory_min: f64,
+    #[serde(default)]
+    pub memory_max: f64,
+    #[serde(default)]
+    pub swap_min: f64,
+    #[serde(default)]
+    pub swap_max: f64,
+    #[serde(default)]
+    pub gpu_mins: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_maxes: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_memory_mins: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_memory_maxes: HashMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

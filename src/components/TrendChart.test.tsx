@@ -33,7 +33,7 @@ const snapshot = {
 
 function renderSeriesIds(mode: 'cpu' | 'systemMemory' | 'gpu' | 'gpuMemory') {
   renderToStaticMarkup(<TrendChart points={points} snapshot={snapshot} mode={mode} />)
-  return captured.option?.series.map((series) => series.id)
+  return captured.option?.series.map((series) => series.id).filter((id) => !id?.includes(':range-'))
 }
 
 describe('TrendChart series identity', () => {
@@ -51,7 +51,7 @@ describe('TrendChart series identity', () => {
 
   it('supports ten percent transparency for overview GPU lines', () => {
     renderToStaticMarkup(<TrendChart points={points} snapshot={snapshot} mode="gpu" seriesOpacity={0.9} />)
-    expect(captured.option?.series[0].lineStyle?.opacity).toBe(0.9)
+    expect(captured.option?.series.find((series) => series.id === 'gpu-utilization:GPU-a')?.lineStyle?.opacity).toBe(0.9)
   })
 
   it('breaks the line across unsampled periods instead of drawing a zero or continuous segment', () => {
@@ -69,6 +69,13 @@ describe('TrendChart series identity', () => {
   it('keeps missing GPU metrics null instead of substituting zero or the current snapshot', () => {
     const missingGpuPoint = { ...points[0], gpuUtilizations: {}, gpuMemoryUtilizations: {} }
     renderToStaticMarkup(<TrendChart points={[missingGpuPoint]} snapshot={snapshot} mode="gpuMemory" />)
-    expect(captured.option?.series[0].data).toEqual([[1_000, null]])
+    expect(captured.option?.series.find((series) => series.id === 'gpu-memory:GPU-a')?.data).toEqual([[1_000, null]])
+  })
+
+  it('keeps regular ten minute tier points connected while preserving a peak range', () => {
+    const tiered = Array.from({ length: 4 }, (_, index) => ({ ...points[0], timestamp: 1 + index * 10 * 60, cpuMin: 5, cpuMax: 80 }))
+    renderToStaticMarkup(<TrendChart points={tiered} snapshot={snapshot} mode="cpu" />)
+    expect(trendSeriesData(tiered, (point) => point.cpuUtilization)).toHaveLength(4)
+    expect(captured.option?.series.find((series) => series.id === 'cpu-utilization:range-span')?.data?.[0]).toEqual([1_000, 75])
   })
 })

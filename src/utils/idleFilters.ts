@@ -1,5 +1,5 @@
 import type { HistoryPoint, IdleReservationFilters, Server, Snapshot } from '../types/models'
-import { clampPercent, gpuMemoryPercent, hasOtherUserGpuWorkload } from './gpu'
+import { clampPercent, gpuMemoryPercent, hasOtherUserGpuWorkload, isGpuAvailable } from './gpu'
 
 export type IdleFilters = IdleReservationFilters
 
@@ -63,6 +63,7 @@ export function displayedFreeMemoryGb(memoryMb: number): number {
 export function rankIdleGpuItems(servers: Server[], snapshots: Record<string, Snapshot>, history: Record<string, HistoryPoint[]>, filters: IdleFilters): IdleGpuItem[] {
   return servers.flatMap((server) => (snapshots[server.id]?.gpus ?? []).map((gpu) => ({ server, gpu }))).filter(({ server, gpu }) => {
     const snapshot = snapshots[server.id]
+    if (!isGpuAvailable(gpu)) return false
     if (filters.targetServerId && server.id !== filters.targetServerId) return false
     if (filters.targetGpuUuid && gpu.uuid !== filters.targetGpuUuid) return false
     if (filters.gpuModel !== 'all' && gpu.name !== filters.gpuModel) return false

@@ -15,17 +15,55 @@ sleep 0.25;
 printf '__RACKTOP_CPU2__\n'; head -n 1 /proc/stat;
 printf '__RACKTOP_LOAD__\n'; cat /proc/loadavg;
 printf '__RACKTOP_MEM__\n'; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo;
-printf '__RACKTOP_DISK__\n'; df -P -k -x tmpfs -x devtmpfs 2>/dev/null | awk 'NR > 1 && $2 ~ /^[0-9]+$/ { print $6 "|" $3 "|" $2 "|" $4 }' | head -n 16;
+if [ "${RACKTOP_INCLUDE_DISKS:-1}" = "1" ]; then
+  printf '__RACKTOP_DISK__\n';
+  current_user="$(id -un)";
+  home_mount="$(df -P -k "$HOME" 2>/dev/null | awk 'NR == 2 {print $6}')";
+  home_used="$(du -skx "$HOME" 2>/dev/null | awk '{print $1; exit}')"; home_used="${home_used:-0}";
+  df -P -k -x tmpfs -x devtmpfs 2>/dev/null | awk 'NR > 1 && $2 ~ /^[0-9]+$/ { print $6 "|" $3 "|" $2 "|" $4 }' | while IFS='|' read -r mount used total available; do
+    case "$mount" in /sys|/sys/*|/proc|/proc/*|/dev|/dev/*|/run|/run/*|/boot/efi|/boot/efi/*|/snap/*|/var/lib/docker/*|/var/lib/containers/*|/var/lib/kubelet/*) continue ;; esac
+    own=0;
+    if [ "$mount" = "$home_mount" ]; then own="$home_used";
+    else
+      for candidate in "$mount/$current_user" "$mount/home/$current_user"; do
+        if [ -d "$candidate" ]; then own="$(du -skx "$candidate" 2>/dev/null | awk '{print $1; exit}')"; own="${own:-0}"; break; fi;
+      done;
+    fi;
+    [ "$own" -gt "$used" ] 2>/dev/null && own="$used";
+    printf '%s|%s|%s|%s|%s\n' "$mount" "$used" "$total" "$available" "$own";
+  done | head -n 16;
+fi;
 printf '__RACKTOP_USERCPU__\n'; ps -u "$(id -un)" -o pcpu= 2>/dev/null | awk -v n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)" '{s+=$1} END {printf "%.2f\n", n>0?s/n:s+0}';
 printf '__RACKTOP_NVIDIA__\n';
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   printf 'missing\n';
-elif ! nvidia-smi -L >/dev/null 2>&1; then
-  printf 'failed\n'; nvidia-smi -L 2>&1 || true;
 else
-  printf 'available\n';
-  printf '__RACKTOP_GPU__\n';
-  nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits;
+  nvidia_list="$(nvidia-smi -L 2>&1)"; nvidia_status=$?;
+  if [ "$nvidia_status" -eq 0 ]; then nvidia_state=available;
+  elif printf '%s\n' "$nvidia_list" | grep -q '^GPU [0-9][0-9]*:'; then nvidia_state=degraded;
+  elif printf '%s\n' "$nvidia_list" | grep -qi 'permission denied'; then nvidia_state=permissionDenied;
+  else nvidia_state=failed; fi;
+  printf '%s\n' "$nvidia_state";
+  if [ "$nvidia_state" != available ]; then printf '%s\n' "$nvidia_list"; fi;
+  if [ "$nvidia_state" = available ] || [ "$nvidia_state" = degraded ]; then
+    printf '__RACKTOP_GPU__\n';
+    if [ "$nvidia_state" = available ]; then
+      nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null || true;
+    else
+      printf '%s\n' "$nvidia_list" | sed -n 's/^GPU \([0-9][0-9]*\):.*/\1/p' | while read -r gpu_index; do
+        nvidia-smi -i "$gpu_index" --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null || true;
+      done;
+      printf '%s\n' "$nvidia_list" | awk '
+        /^GPU [0-9][0-9]*:/ {
+          value=$0; sub(/^GPU /, "", value); sub(/:.*/, "", value); next_index=value+1; next
+        }
+        /Unable to determine the device handle for gpu / {
+          match($0, /gpu [0-9A-Fa-f:.]+/); bus=substr($0, RSTART+4, RLENGTH-4); sub(/:$/, "", bus);
+          uuid=bus; gsub(/[^0-9A-Za-z]/, "_", uuid);
+          printf "%d, Unavailable GPU (%s), unavailable-%s, 0, 0, 0, 0, 0, 0\n", next_index, bus, uuid; next_index++
+        }';
+    fi;
+  fi;
 fi;
 if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = "1" ]; then
   printf '__RACKTOP_GPUPROC__\n';
@@ -40,14 +78,24 @@ fi;
 printf '__RACKTOP_END__\n';"#;
 
 pub async fn collect(server: &Server) -> Result<Snapshot, String> {
-    collect_with_password(server, None, true).await
+    collect_with_password(server, None, true, true).await
 }
 
-pub async fn collect_with_password(server: &Server, password: Option<&str>, include_processes: bool) -> Result<Snapshot, String> {
+pub async fn collect_with_password(server: &Server, password: Option<&str>, include_processes: bool, include_disks: bool) -> Result<Snapshot, String> {
+    collect_with_password_detailed(server, password, include_processes, include_disks).await.map(|result| result.snapshot)
+}
+
+pub struct CollectionResult {
+    pub snapshot: Snapshot,
+    pub response_bytes: u64,
+}
+
+pub async fn collect_with_password_detailed(server: &Server, password: Option<&str>, include_processes: bool, include_disks: bool) -> Result<CollectionResult, String> {
     let (mut command, target) = configured_ssh_command(server, password)?;
     command.arg(target).arg(format!(
-        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_REMOTE_HISTORY={};{REMOTE_SCRIPT}",
+        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{REMOTE_SCRIPT}",
         if include_processes { 1 } else { 0 },
+        if include_disks { 1 } else { 0 },
         if server.remote_history_enabled { 1 } else { 0 },
     )).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = timeout(Duration::from_secs(15), command.output()).await.map_err(|_| format!("连接 {} 超时（15 秒）", server.name))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
@@ -55,7 +103,54 @@ pub async fn collect_with_password(server: &Server, password: Option<&str>, incl
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(classify_ssh_error(&stderr));
     }
-    parse_snapshot(&server.id, &String::from_utf8_lossy(&output.stdout))
+    let snapshot = parse_snapshot(&server.id, &String::from_utf8_lossy(&output.stdout))?;
+    Ok(CollectionResult { snapshot, response_bytes: output.stdout.len() as u64 })
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+pub fn collection_display_command(server: &Server, include_processes: bool, include_disks: bool) -> String {
+    let mut arguments = vec![
+        "-o ConnectTimeout=8".to_string(),
+        "-o ServerAliveInterval=5".to_string(),
+        "-o ServerAliveCountMax=2".to_string(),
+        "-o StrictHostKeyChecking=yes".to_string(),
+    ];
+    if server.auth_method == "password" {
+        arguments.extend([
+            "-o BatchMode=no".to_string(),
+            "-o PreferredAuthentications=password,keyboard-interactive".to_string(),
+            "-o PubkeyAuthentication=no".to_string(),
+            "-o NumberOfPasswordPrompts=1".to_string(),
+        ]);
+    } else {
+        arguments.push("-o BatchMode=yes".to_string());
+    }
+    #[cfg(unix)]
+    arguments.extend([
+        "-o ControlMaster=auto".to_string(),
+        "-o ControlPersist=600".to_string(),
+        "-o ControlPath=/tmp/racktop-%C".to_string(),
+    ]);
+    if let Some(identity) = server.identity_file.as_deref().filter(|value| !value.is_empty()) {
+        arguments.push(format!("-i {}", shell_quote(identity)));
+    }
+    if let Some(proxy) = server.proxy_jump.as_deref().filter(|value| !value.is_empty()) {
+        arguments.push(format!("-J {}", shell_quote(proxy)));
+    }
+    let target = server.ssh_alias.as_deref().filter(|value| !value.is_empty()).map(str::to_string).unwrap_or_else(|| {
+        arguments.push(format!("-p {}", server.port));
+        format!("{}@{}", server.username, server.host)
+    });
+    let remote_command = format!(
+        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{REMOTE_SCRIPT}",
+        if include_processes { 1 } else { 0 },
+        if include_disks { 1 } else { 0 },
+        if server.remote_history_enabled { 1 } else { 0 },
+    );
+    format!("ssh {} {} {}", arguments.join(" "), shell_quote(&target), shell_quote(&remote_command))
 }
 
 pub(crate) fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<(Command, String), String> {
@@ -176,12 +271,19 @@ pub fn parse_snapshot(server_id: &str, output: &str) -> Result<Snapshot, String>
 
 fn parse_disk(line: &str) -> Result<DiskMetric, String> {
     let fields: Vec<&str> = line.split('|').collect();
-    if fields.len() != 4 || fields[0].is_empty() { return Err("磁盘采样记录无效".into()); }
+    if !(4..=5).contains(&fields.len()) || !is_visible_disk_mount(fields[0]) { return Err("磁盘采样记录无效".into()); }
     let used_kb = fields[1].parse::<u64>().map_err(|_| "磁盘已用空间无效".to_string())?;
     let total_kb = fields[2].parse::<u64>().map_err(|_| "磁盘总空间无效".to_string())?;
     let available_kb = fields[3].parse::<u64>().map_err(|_| "磁盘可用空间无效".to_string())?;
     if total_kb == 0 || used_kb > total_kb { return Err("磁盘容量范围无效".into()); }
-    Ok(DiskMetric { mount_point: fields[0].to_string(), used_bytes: used_kb.saturating_mul(1024), total_bytes: total_kb.saturating_mul(1024), available_bytes: available_kb.saturating_mul(1024) })
+    let current_user_used_kb = fields.get(4).and_then(|value| value.parse::<u64>().ok()).unwrap_or_default().min(used_kb);
+    Ok(DiskMetric { mount_point: fields[0].to_string(), used_bytes: used_kb.saturating_mul(1024), total_bytes: total_kb.saturating_mul(1024), available_bytes: available_kb.saturating_mul(1024), current_user_used_bytes: current_user_used_kb.saturating_mul(1024) })
+}
+
+fn is_visible_disk_mount(mount: &str) -> bool {
+    !["/sys", "/proc", "/dev", "/run", "/boot/efi", "/snap", "/var/lib/docker", "/var/lib/containers", "/var/lib/kubelet"]
+        .iter()
+        .any(|prefix| mount == *prefix || mount.starts_with(&format!("{prefix}/")))
 }
 
 fn split_sections(output: &str) -> HashMap<String, Vec<String>> {
@@ -384,9 +486,13 @@ mod tests {
         assert_eq!(snapshot.processes[0].parent_pid, 1);
         assert_eq!(snapshot.cpu_processes.len(), 2);
         assert!(snapshot.disks.is_empty());
-        let disk = parse_disk("/mnt/data|250000|1000000|750000").unwrap();
+        let disk = parse_disk("/mnt/data|250000|1000000|750000|50000").unwrap();
         assert_eq!(disk.used_bytes, 250_000 * 1024);
         assert_eq!(disk.total_bytes, 1_000_000 * 1024);
+        assert_eq!(disk.current_user_used_bytes, 50_000 * 1024);
+        assert!(parse_disk("/sys/firmware/efi/efivars|1|10|9|0").is_err());
+        assert!(parse_disk("/boot/efi|1|10|9|0").is_err());
+        assert!(parse_disk("/home|4|10|6|1").is_ok());
         assert_eq!(snapshot.cpu_processes[0].pid, 4343);
         assert_eq!(snapshot.cpu_processes[0].parent_pid, 4242);
         assert!(!snapshot.cpu_processes[0].is_group_leader);
@@ -398,6 +504,24 @@ mod tests {
         assert!(!snapshot.cpu_processes.iter().any(|process| process.pid == 5900));
         assert_eq!(snapshot.system.memory_used_bytes, 25_000 * 1024);
         assert!((snapshot.system.cpu_utilization - 30.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn keeps_healthy_gpus_when_one_device_handle_fails() {
+        let output = SAMPLE.replacen(
+            "available\n__RACKTOP_GPU__\n0, NVIDIA GeForce RTX 4090 D, GPU-abc, 25, 10, 2048, 24564, 48, 110.5",
+            "degraded\nGPU 0: NVIDIA GeForce RTX 4090 (UUID: GPU-abc)\nUnable to determine the device handle for gpu 0000:D1:00.0: Unknown Error\n__RACKTOP_GPU__\n0, NVIDIA GeForce RTX 4090 D, GPU-abc, 25, 10, 2048, 24564, 48, 110.5\n1, Unavailable GPU (0000:D1:00.0), unavailable-0000_D1_00_0, 0, 0, 0, 0, 0, 0",
+            1,
+        );
+        let snapshot = parse_snapshot("server-1", &output).unwrap();
+        assert_eq!(snapshot.nvidia_smi, "degraded");
+        assert_eq!(snapshot.status, "warning");
+        assert_eq!(snapshot.gpus.len(), 2);
+        assert_eq!(snapshot.gpus[0].uuid, "GPU-abc");
+        assert_eq!(snapshot.gpus[1].uuid, "unavailable-0000_D1_00_0");
+        assert_eq!(snapshot.gpus[1].index, 1);
+        assert!(snapshot.nvidia_message.as_deref().unwrap_or_default().contains("0000:D1:00.0"));
+        assert!(REMOTE_SCRIPT.contains("nvidia_state=degraded"));
     }
 
     #[test]

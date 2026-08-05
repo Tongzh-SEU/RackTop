@@ -90,7 +90,7 @@ export interface Snapshot {
   processes: ProcessMetric[]
   cpuProcesses: CpuProcessMetric[]
   processesSampled: boolean
-  nvidiaSmi: 'available' | 'missing' | 'permissionDenied' | 'failed'
+  nvidiaSmi: 'available' | 'degraded' | 'missing' | 'permissionDenied' | 'failed'
   nvidiaMessage?: string | null
 }
 
@@ -99,6 +99,7 @@ export interface DiskMetric {
   usedBytes: number
   totalBytes: number
   availableBytes: number
+  currentUserUsedBytes?: number
 }
 
 export interface HistoryPoint {
@@ -108,6 +109,16 @@ export interface HistoryPoint {
   swapUtilization: number
   gpuUtilizations: Record<string, number>
   gpuMemoryUtilizations: Record<string, number>
+  cpuMin?: number
+  cpuMax?: number
+  memoryMin?: number
+  memoryMax?: number
+  swapMin?: number
+  swapMax?: number
+  gpuMins?: Record<string, number>
+  gpuMaxes?: Record<string, number>
+  gpuMemoryMins?: Record<string, number>
+  gpuMemoryMaxes?: Record<string, number>
 }
 
 export interface HistoryHeatmapPoint {
@@ -190,6 +201,20 @@ export interface IdleReservation {
   pendingConfirmationGpuKeys?: string[]
 }
 
+export interface GpuMemoryStallWarning {
+  id: string
+  serverId: string
+  serverName: string
+  gpuUuid: string
+  gpuIndex: number
+  gpuName: string
+  usernames: string[]
+  memoryUsedMb: number
+  memoryTotalMb: number
+  startedAt: number
+  durationSeconds: number
+}
+
 export type DetailTab = 'overview' | 'processes' | 'terminal' | 'gpu' | 'cpu' | 'history' | 'connection'
 
 export interface ServerDraft {
@@ -221,4 +246,17 @@ export interface RemoteCleanupSweepResult {
   cleanedNames: string[]
   pendingNames: string[]
   expiredNames: string[]
+}
+
+export interface InteractionLogEntry {
+  id: number
+  serverId: string
+  serverName: string
+  startedAt: number
+  finishedAt?: number | null
+  command: string
+  responseBytes: number
+  storedBytes: number
+  status: 'running' | 'success' | 'error'
+  error?: string | null
 }
