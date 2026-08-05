@@ -74,6 +74,7 @@ import { acquiredDataItems, interactionDurationSeconds, interactionVisualStatus 
 import { duplicateImportIndexes } from './utils/serverIdentity'
 import { currentUserProcessCount } from './utils/processRelations'
 import { previewServerOrder, serverDropTarget, type ServerDropPlacement } from './utils/serverOrder'
+import { serverMatchesSearch } from './utils/serverSearch'
 import authorAvatar from './assets/tongzh-seu.png'
 import packageInfo from '../package.json'
 
@@ -625,10 +626,8 @@ function App() {
   }, [idleReservations])
 
   const visibleServers = useMemo(() => {
-    const needle = search.trim().toLowerCase()
-    if (!needle) return servers
-    return servers.filter((server) => [server.name, server.location ?? '', server.host, server.username, ...server.tags].some((value) => value.toLowerCase().includes(needle)))
-  }, [servers, search])
+    return servers.filter((server) => serverMatchesSearch(server, snapshots[server.id], search))
+  }, [servers, snapshots, search])
 
   const idleGpuItems = useMemo(() => rankIdleGpuItems(servers, snapshots, history, idleFilters), [servers, snapshots, history, idleFilters])
   const idleAvailableCount = idleGpuItems.filter((item) => item.available).length
