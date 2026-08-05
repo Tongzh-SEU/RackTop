@@ -15,7 +15,24 @@ sleep 0.25;
 printf '__RACKTOP_CPU2__\n'; head -n 1 /proc/stat;
 printf '__RACKTOP_LOAD__\n'; cat /proc/loadavg;
 printf '__RACKTOP_MEM__\n'; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo;
-printf '__RACKTOP_DISK__\n'; df -P -k -x tmpfs -x devtmpfs 2>/dev/null | awk 'NR > 1 && $2 ~ /^[0-9]+$/ { print $6 "|" $3 "|" $2 "|" $4 }' | head -n 16;
+if [ "${RACKTOP_INCLUDE_DISKS:-1}" = "1" ]; then
+  printf '__RACKTOP_DISK__\n';
+  current_user="$(id -un)";
+  home_mount="$(df -P -k "$HOME" 2>/dev/null | awk 'NR == 2 {print $6}')";
+  home_used="$(du -skx "$HOME" 2>/dev/null | awk '{print $1; exit}')"; home_used="${home_used:-0}";
+  df -P -k -x tmpfs -x devtmpfs 2>/dev/null | awk 'NR > 1 && $2 ~ /^[0-9]+$/ { print $6 "|" $3 "|" $2 "|" $4 }' | while IFS='|' read -r mount used total available; do
+    case "$mount" in /sys|/sys/*|/proc|/proc/*|/dev|/dev/*|/run|/run/*|/boot/efi|/boot/efi/*|/snap/*|/var/lib/docker/*|/var/lib/containers/*|/var/lib/kubelet/*) continue ;; esac
+    own=0;
+    if [ "$mount" = "$home_mount" ]; then own="$home_used";
+    else
+      for candidate in "$mount/$current_user" "$mount/home/$current_user"; do
+        if [ -d "$candidate" ]; then own="$(du -skx "$candidate" 2>/dev/null | awk '{print $1; exit}')"; own="${own:-0}"; break; fi;
+      done;
+    fi;
+    [ "$own" -gt "$used" ] 2>/dev/null && own="$used";
+    printf '%s|%s|%s|%s|%s\n' "$mount" "$used" "$total" "$available" "$own";
+  done | head -n 16;
+fi;
 printf '__RACKTOP_USERCPU__\n'; ps -u "$(id -un)" -o pcpu= 2>/dev/null | awk -v n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)" '{s+=$1} END {printf "%.2f\n", n>0?s/n:s+0}';
 printf '__RACKTOP_NVIDIA__\n';
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -40,14 +57,15 @@ fi;
 printf '__RACKTOP_END__\n';"#;
 
 pub async fn collect(server: &Server) -> Result<Snapshot, String> {
-    collect_with_password(server, None, true).await
+    collect_with_password(server, None, true, true).await
 }
 
-pub async fn collect_with_password(server: &Server, password: Option<&str>, include_processes: bool) -> Result<Snapshot, String> {
+pub async fn collect_with_password(server: &Server, password: Option<&str>, include_processes: bool, include_disks: bool) -> Result<Snapshot, String> {
     let (mut command, target) = configured_ssh_command(server, password)?;
     command.arg(target).arg(format!(
-        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_REMOTE_HISTORY={};{REMOTE_SCRIPT}",
+        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{REMOTE_SCRIPT}",
         if include_processes { 1 } else { 0 },
+        if include_disks { 1 } else { 0 },
         if server.remote_history_enabled { 1 } else { 0 },
     )).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = timeout(Duration::from_secs(15), command.output()).await.map_err(|_| format!("连接 {} 超时（15 秒）", server.name))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
@@ -176,12 +194,19 @@ pub fn parse_snapshot(server_id: &str, output: &str) -> Result<Snapshot, String>
 
 fn parse_disk(line: &str) -> Result<DiskMetric, String> {
     let fields: Vec<&str> = line.split('|').collect();
-    if fields.len() != 4 || fields[0].is_empty() { return Err("磁盘采样记录无效".into()); }
+    if !(4..=5).contains(&fields.len()) || !is_visible_disk_mount(fields[0]) { return Err("磁盘采样记录无效".into()); }
     let used_kb = fields[1].parse::<u64>().map_err(|_| "磁盘已用空间无效".to_string())?;
     let total_kb = fields[2].parse::<u64>().map_err(|_| "磁盘总空间无效".to_string())?;
     let available_kb = fields[3].parse::<u64>().map_err(|_| "磁盘可用空间无效".to_string())?;
     if total_kb == 0 || used_kb > total_kb { return Err("磁盘容量范围无效".into()); }
-    Ok(DiskMetric { mount_point: fields[0].to_string(), used_bytes: used_kb.saturating_mul(1024), total_bytes: total_kb.saturating_mul(1024), available_bytes: available_kb.saturating_mul(1024) })
+    let current_user_used_kb = fields.get(4).and_then(|value| value.parse::<u64>().ok()).unwrap_or_default().min(used_kb);
+    Ok(DiskMetric { mount_point: fields[0].to_string(), used_bytes: used_kb.saturating_mul(1024), total_bytes: total_kb.saturating_mul(1024), available_bytes: available_kb.saturating_mul(1024), current_user_used_bytes: current_user_used_kb.saturating_mul(1024) })
+}
+
+fn is_visible_disk_mount(mount: &str) -> bool {
+    !["/sys", "/proc", "/dev", "/run", "/boot/efi", "/snap", "/var/lib/docker", "/var/lib/containers", "/var/lib/kubelet"]
+        .iter()
+        .any(|prefix| mount == *prefix || mount.starts_with(&format!("{prefix}/")))
 }
 
 fn split_sections(output: &str) -> HashMap<String, Vec<String>> {
@@ -384,9 +409,13 @@ mod tests {
         assert_eq!(snapshot.processes[0].parent_pid, 1);
         assert_eq!(snapshot.cpu_processes.len(), 2);
         assert!(snapshot.disks.is_empty());
-        let disk = parse_disk("/mnt/data|250000|1000000|750000").unwrap();
+        let disk = parse_disk("/mnt/data|250000|1000000|750000|50000").unwrap();
         assert_eq!(disk.used_bytes, 250_000 * 1024);
         assert_eq!(disk.total_bytes, 1_000_000 * 1024);
+        assert_eq!(disk.current_user_used_bytes, 50_000 * 1024);
+        assert!(parse_disk("/sys/firmware/efi/efivars|1|10|9|0").is_err());
+        assert!(parse_disk("/boot/efi|1|10|9|0").is_err());
+        assert!(parse_disk("/home|4|10|6|1").is_ok());
         assert_eq!(snapshot.cpu_processes[0].pid, 4343);
         assert_eq!(snapshot.cpu_processes[0].parent_pid, 4242);
         assert!(!snapshot.cpu_processes[0].is_group_leader);

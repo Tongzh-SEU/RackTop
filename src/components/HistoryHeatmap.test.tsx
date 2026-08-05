@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { HistoryHeatmapPoint, Snapshot } from '../types/models'
-import { HistoryHeatmaps, historyHeatmapTone } from './HistoryHeatmap'
+import { HistoryHeatmaps, StorageWaffleList, historyHeatmapTone } from './HistoryHeatmap'
 
 const timestamp = new Date(2026, 7, 4, 6).getTime() / 1000
 const snapshot: Snapshot = {
@@ -11,7 +11,7 @@ const snapshot: Snapshot = {
     { index: 0, uuid: 'GPU-0', name: 'NVIDIA A100', utilization: 55, memoryUtilization: 70, memoryUsedMb: 70, memoryTotalMb: 100, temperatureCelsius: 40, powerWatts: 100 },
     { index: 1, uuid: 'GPU-1', name: 'NVIDIA A100', utilization: 10, memoryUtilization: 20, memoryUsedMb: 20, memoryTotalMb: 100, temperatureCelsius: 38, powerWatts: 90 },
   ],
-  disks: [{ mountPoint: '/data', usedBytes: 2 * 1024 ** 3, totalBytes: 10 * 1024 ** 3, availableBytes: 8 * 1024 ** 3 }],
+  disks: [{ mountPoint: '/data', usedBytes: 4 * 1024 ** 3, totalBytes: 10 * 1024 ** 3, availableBytes: 6 * 1024 ** 3, currentUserUsedBytes: 1.5 * 1024 ** 3 }],
   processes: [], cpuProcesses: [],
 }
 const points: HistoryHeatmapPoint[] = [{ timestamp, sampleCount: 12, cpuUtilization: 25, memoryUtilization: 40, gpuUtilizations: { 'GPU-0': 55, 'GPU-1': 10 }, gpuMemoryUtilizations: { 'GPU-0': 70, 'GPU-1': 20 } }]
@@ -39,14 +39,17 @@ describe('HistoryHeatmaps', () => {
     expect(historyHeatmapTone('memory', 'green')).toBe('green')
   })
 
-  it('renders storage as one full-width 50 by 4 waffle row per disk', () => {
-    const markup = renderToStaticMarkup(<HistoryHeatmaps snapshot={snapshot} points={points} retentionDays={2} />)
+  it('renders storage as one full-width 100 by 5 ownership waffle per disk', () => {
+    const markup = renderToStaticMarkup(<StorageWaffleList disks={snapshot.disks ?? []} />)
     expect(markup).toContain('存储空间')
-    expect(markup).toContain('data-columns="50" data-rows="4"')
+    expect(markup).toContain('data-columns="100" data-rows="5"')
     expect(markup).toContain('/data')
-    expect(markup).toContain('已用 <strong>2.0 GB</strong>')
+    expect(markup).toContain('你的 <strong>1.5 GB</strong>')
+    expect(markup).toContain('其他 <strong>2.5 GB</strong>')
     expect(markup).toContain('总计 <strong>10.0 GB</strong>')
     expect(markup.match(/class="storage-waffle-grid"/g)).toHaveLength(1)
-    expect(markup.match(/data-storage-cell="true"/g)).toHaveLength(200)
+    expect(markup.match(/data-storage-cell="true"/g)).toHaveLength(500)
+    expect(markup).toContain('class="is-own"')
+    expect(markup).toContain('class="is-other"')
   })
 })

@@ -69,10 +69,10 @@ fn close_terminal(terminals: State<'_, TerminalManager>, session_id: String) -> 
 }
 
 #[tauri::command]
-async fn collect_server(database: State<'_, Database>, server_id: String, include_processes: bool, record_history: bool) -> Result<Snapshot, String> {
+async fn collect_server(database: State<'_, Database>, server_id: String, include_processes: bool, include_disks: bool, record_history: bool) -> Result<Snapshot, String> {
     let server = database.get_server(&server_id)?;
     let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
-    match collector::collect_with_password(&server, password.as_deref(), include_processes).await {
+    match collector::collect_with_password(&server, password.as_deref(), include_processes, include_disks).await {
         Ok(snapshot) => {
             database.update_status(&server_id, &snapshot.status, snapshot.nvidia_message.as_deref(), Some(snapshot.timestamp))?;
             if record_history {

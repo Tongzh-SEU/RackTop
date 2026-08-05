@@ -11,20 +11,27 @@ const snapshot: Snapshot = {
 }
 
 const distribution: UsageDistributionData = {
-  users: [{ username: 'alice', activeSeconds: 60, memoryMbSeconds: 3_000 }],
-  coveredDays: 1,
+  users: [{ username: 'alice', activeSeconds: 60_000, memoryMbSeconds: 3_000_000 }, { username: 'bob', activeSeconds: 60, memoryMbSeconds: 3_000 }],
+  coveredDays: 2,
   requestedDays: 30,
-  coverageGpuSeconds: 120,
+  coverageGpuSeconds: 172_800,
 }
 
 describe('UsageDistribution', () => {
-  it('renders two complete 25 by 4 waffle grids with subdued user colors', () => {
+  it('renders two complete 38 by 5 waffle grids with strong user colors', () => {
     const markup = renderToStaticMarkup(<UsageDistribution snapshot={snapshot} data={distribution} />)
 
-    expect(markup.match(/title="(?:alice|未使用) [\d.]+%"/g)).toHaveLength(200)
+    expect(markup.match(/title="[^"]+ [\d.]+%"/g)).toHaveLength(380)
+    expect(markup.match(/data-columns="38" data-rows="5"/g)).toHaveLength(2)
     expect(markup).toContain('使用时间百分比分布')
     expect(markup).toContain('显存占用百分比分布')
-    expect(markup).toContain('color-mix(in srgb, #4f8ee8 70%, var(--surface))')
+    expect(markup).toContain('color-mix(in srgb, #4f8ee8 92%, var(--surface))')
     expect(markup).toContain('background:var(--surface-muted)')
+    expect(markup).toContain('缺失')
+    expect(markup).not.toContain('usage-coverage')
+    expect(markup).toContain('按已覆盖 2 天统计')
+    expect(markup).toContain('alice 34.7%')
+    expect(markup).toContain('data-partial="true"')
+    expect(markup).toContain('color-mix(in srgb, #5aa779 46%, var(--surface))')
   })
 })

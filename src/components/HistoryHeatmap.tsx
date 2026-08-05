@@ -64,14 +64,10 @@ function ResourceHeatmap({ title, subtitle, resource, points, days, defaultMetri
 
 export function HistoryHeatmaps({ snapshot, points, retentionDays }: { snapshot: Snapshot; points: HistoryHeatmapPoint[]; retentionDays: number }) {
   const days = useMemo(() => buildHeatmapDays(snapshot.timestamp, retentionDays), [retentionDays, snapshot.timestamp])
-  const disks = snapshot.disks ?? []
   return (
-    <div className="history-view-stack">
-      <div className="history-heatmap-list">
-        <ResourceHeatmap title="CPU" subtitle={snapshot.system.cpuModel || '系统 CPU'} resource="cpu" points={points} days={days} defaultMetric="memory" memoryTone="blue" icon={<Cpu size={16} />} />
-        {snapshot.gpus.map((gpu) => <ResourceHeatmap key={gpu.uuid} title={`GPU ${gpu.index}`} subtitle={gpu.name.replace('NVIDIA ', '')} resource={gpu.uuid} points={points} days={days} defaultMetric="memory" memoryTone="green" icon={<MemoryStick size={16} />} />)}
-      </div>
-      <StorageWaffleList disks={disks} />
+    <div className="history-heatmap-list">
+      <ResourceHeatmap title="CPU" subtitle={snapshot.system.cpuModel || '系统 CPU'} resource="cpu" points={points} days={days} defaultMetric="memory" memoryTone="blue" icon={<Cpu size={16} />} />
+      {snapshot.gpus.map((gpu) => <ResourceHeatmap key={gpu.uuid} title={`GPU ${gpu.index}`} subtitle={gpu.name.replace('NVIDIA ', '')} resource={gpu.uuid} points={points} days={days} defaultMetric="memory" memoryTone="green" icon={<MemoryStick size={16} />} />)}
     </div>
   )
 }
@@ -81,28 +77,33 @@ function formatStorage(bytes: number) {
   return gb >= 1024 ? `${(gb / 1024).toFixed(1)} TB` : `${gb.toFixed(1)} GB`
 }
 
-function StorageWaffleList({ disks }: { disks: DiskMetric[] }) {
+export function StorageWaffleList({ disks }: { disks: DiskMetric[] }) {
   return (
     <section className="panel storage-waffle-panel">
       <header className="history-heatmap__header">
         <div className="history-heatmap__identity">
           <span className="storage-waffle__icon"><HardDrive size={16} /></span>
-          <div><h3>存储空间</h3><p>各挂载磁盘当前已用空间；每格代表 0.5%</p></div>
+          <div><h3>存储空间</h3><p>深绿为你的占用，浅绿为其他占用，灰色为空闲</p></div>
         </div>
       </header>
       {disks.length === 0 ? <p className="storage-waffle__empty">暂无磁盘采样</p> : (
         <div className="storage-waffle-list">
           {disks.map((disk) => {
             const usedPercent = disk.totalBytes > 0 ? Math.min(100, disk.usedBytes / disk.totalBytes * 100) : 0
-            const filled = Math.round(usedPercent * 2)
+            const ownBytes = Math.min(disk.usedBytes, Math.max(0, disk.currentUserUsedBytes ?? 0))
+            const otherBytes = Math.max(0, disk.usedBytes - ownBytes)
+            const usedCells = Math.round(usedPercent * 5)
+            const ownCells = disk.totalBytes > 0 ? Math.min(usedCells, Math.round(ownBytes / disk.totalBytes * 500)) : 0
+            const otherCells = Math.max(0, usedCells - ownCells)
             return (
               <div className="storage-waffle-row" key={disk.mountPoint}>
                 <strong className="storage-waffle-row__mount mono">{disk.mountPoint}</strong>
-                <div className="storage-waffle-grid" data-columns="50" data-rows="4" role="img" aria-label={`${disk.mountPoint} 已用 ${formatStorage(disk.usedBytes)}，共 ${formatStorage(disk.totalBytes)}`}>
-                  {Array.from({ length: 200 }, (_, index) => <i className={index < filled ? 'is-used' : ''} data-storage-cell key={index} />)}
+                <div className="storage-waffle-grid" data-columns="100" data-rows="5" role="img" aria-label={`${disk.mountPoint} 你占用 ${formatStorage(ownBytes)}，其他占用 ${formatStorage(otherBytes)}，共 ${formatStorage(disk.totalBytes)}`}>
+                  {Array.from({ length: 500 }, (_, index) => <i className={index < ownCells ? 'is-own' : index < ownCells + otherCells ? 'is-other' : ''} data-storage-cell key={index} />)}
                 </div>
                 <div className="storage-waffle-row__footer">
-                  <span><i className="is-used" />已用 <strong>{formatStorage(disk.usedBytes)}</strong></span>
+                  <span><i className="is-own" />你的 <strong>{formatStorage(ownBytes)}</strong></span>
+                  <span><i className="is-other" />其他 <strong>{formatStorage(otherBytes)}</strong></span>
                   <span>总计 <strong>{formatStorage(disk.totalBytes)}</strong> · {usedPercent.toFixed(1)}%</span>
                 </div>
               </div>

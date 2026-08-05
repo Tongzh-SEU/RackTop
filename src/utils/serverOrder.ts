@@ -1,4 +1,5 @@
 export type ServerDropPlacement = 'before' | 'after'
+export interface ServerDropRow { id: string; top: number; bottom: number }
 
 export function previewServerOrder<T extends { id: string; sortOrder?: number }>(items: T[], sourceId: string, targetId: string, placement: ServerDropPlacement): T[] {
   if (!sourceId || sourceId === targetId) return items
@@ -11,4 +12,10 @@ export function previewServerOrder<T extends { id: string; sortOrder?: number }>
   remaining.splice(targetIndex + (placement === 'after' ? 1 : 0), 0, moved)
   if (remaining.every((item, index) => item.id === items[index]?.id)) return items
   return remaining.map((item, index) => ({ ...item, sortOrder: index }))
+}
+
+export function serverDropTarget(rows: ServerDropRow[], pointerY: number): { targetId: string; placement: ServerDropPlacement } | null {
+  if (rows.length === 0) return null
+  const target = rows.find((row) => pointerY <= row.bottom) ?? rows[rows.length - 1]
+  return { targetId: target.id, placement: pointerY < target.top + (target.bottom - target.top) / 2 ? 'before' : 'after' }
 }

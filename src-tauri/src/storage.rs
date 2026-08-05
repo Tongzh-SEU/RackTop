@@ -1,7 +1,7 @@
 use crate::models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Server, ServerDraft, Snapshot, UsageDistribution, UsagePoint, UsageUserAggregate};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::Path,
     sync::Mutex,
 };
@@ -20,12 +20,135 @@ pub struct Database {
     session_passwords: Mutex<HashMap<String, String>>,
 }
 
+#[derive(Default)]
+struct HeatmapAccumulator {
+    sample_count: i64,
+    cpu_sum: f64,
+    memory_sum: f64,
+    gpu_utilizations: HashMap<String, (f64, i64)>,
+    gpu_memory_utilizations: HashMap<String, (f64, i64)>,
+}
+
+#[derive(Default)]
+struct HourlyHistoryBucket {
+    sample_count: i64,
+    cpu_sum: f64,
+    memory_sum: f64,
+    gpu_utilization_sums: HashMap<String, f64>,
+    gpu_utilization_counts: HashMap<String, i64>,
+    gpu_memory_sums: HashMap<String, f64>,
+    gpu_memory_counts: HashMap<String, i64>,
+}
+
+struct StoredHistorySample {
+    cpu_utilization: f64,
+    memory_utilization: f64,
+    gpu_utilizations: HashMap<String, f64>,
+    gpu_memory_utilizations: HashMap<String, f64>,
+}
+
+fn hour_start(timestamp: i64) -> i64 {
+    timestamp - timestamp.rem_euclid(3_600)
+}
+
+fn adjust_metric_totals(sums: &mut HashMap<String, f64>, counts: &mut HashMap<String, i64>, values: &HashMap<String, f64>, direction: i64) {
+    for (uuid, value) in values {
+        *sums.entry(uuid.clone()).or_default() += *value * direction as f64;
+        *counts.entry(uuid.clone()).or_default() += direction;
+        if counts.get(uuid).copied().unwrap_or_default() <= 0 {
+            counts.remove(uuid);
+            sums.remove(uuid);
+        }
+    }
+}
+
+fn update_hourly_history_bucket(connection: &Connection, server_id: &str, timestamp: i64, previous: Option<&StoredHistorySample>, next: &StoredHistorySample) -> Result<(), String> {
+    let bucket_timestamp = hour_start(timestamp);
+    let mut bucket = connection.query_row(
+        "SELECT sample_count,cpu_sum,memory_sum,gpu_utilization_sums_json,gpu_utilization_counts_json,gpu_memory_sums_json,gpu_memory_counts_json
+         FROM history_hourly_buckets WHERE server_id=?1 AND timestamp=?2",
+        params![server_id, bucket_timestamp],
+        |row| {
+            Ok(HourlyHistoryBucket {
+                sample_count: row.get(0)?,
+                cpu_sum: row.get(1)?,
+                memory_sum: row.get(2)?,
+                gpu_utilization_sums: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+                gpu_utilization_counts: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+                gpu_memory_sums: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default(),
+                gpu_memory_counts: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+            })
+        },
+    ).optional().map_err(|error| error.to_string())?.unwrap_or_default();
+
+    if let Some(previous) = previous {
+        bucket.cpu_sum -= previous.cpu_utilization;
+        bucket.memory_sum -= previous.memory_utilization;
+        adjust_metric_totals(&mut bucket.gpu_utilization_sums, &mut bucket.gpu_utilization_counts, &previous.gpu_utilizations, -1);
+        adjust_metric_totals(&mut bucket.gpu_memory_sums, &mut bucket.gpu_memory_counts, &previous.gpu_memory_utilizations, -1);
+    } else {
+        bucket.sample_count += 1;
+    }
+    bucket.cpu_sum += next.cpu_utilization;
+    bucket.memory_sum += next.memory_utilization;
+    adjust_metric_totals(&mut bucket.gpu_utilization_sums, &mut bucket.gpu_utilization_counts, &next.gpu_utilizations, 1);
+    adjust_metric_totals(&mut bucket.gpu_memory_sums, &mut bucket.gpu_memory_counts, &next.gpu_memory_utilizations, 1);
+
+    connection.execute(
+        "INSERT INTO history_hourly_buckets(server_id,timestamp,sample_count,cpu_sum,memory_sum,gpu_utilization_sums_json,gpu_utilization_counts_json,gpu_memory_sums_json,gpu_memory_counts_json)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+         ON CONFLICT(server_id,timestamp) DO UPDATE SET sample_count=excluded.sample_count,cpu_sum=excluded.cpu_sum,memory_sum=excluded.memory_sum,gpu_utilization_sums_json=excluded.gpu_utilization_sums_json,gpu_utilization_counts_json=excluded.gpu_utilization_counts_json,gpu_memory_sums_json=excluded.gpu_memory_sums_json,gpu_memory_counts_json=excluded.gpu_memory_counts_json",
+        params![
+            server_id,
+            bucket_timestamp,
+            bucket.sample_count,
+            bucket.cpu_sum,
+            bucket.memory_sum,
+            serde_json::to_string(&bucket.gpu_utilization_sums).map_err(|error| error.to_string())?,
+            serde_json::to_string(&bucket.gpu_utilization_counts).map_err(|error| error.to_string())?,
+            serde_json::to_string(&bucket.gpu_memory_sums).map_err(|error| error.to_string())?,
+            serde_json::to_string(&bucket.gpu_memory_counts).map_err(|error| error.to_string())?,
+        ],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn rebuild_hourly_history_buckets(connection: &mut Connection) -> Result<(), String> {
+    let mut buckets: BTreeMap<(String, i64), HourlyHistoryBucket> = BTreeMap::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT server_id,timestamp,cpu_utilization,memory_utilization,gpu_json,gpu_memory_json FROM snapshots ORDER BY server_id,timestamp"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, f64>(2)?, row.get::<_, f64>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?))
+        }).map_err(|error| error.to_string())?;
+        for row in rows {
+            let (server_id, timestamp, cpu, memory, gpu_json, gpu_memory_json) = row.map_err(|error| error.to_string())?;
+            let bucket = buckets.entry((server_id, hour_start(timestamp))).or_default();
+            bucket.sample_count += 1;
+            bucket.cpu_sum += cpu;
+            bucket.memory_sum += memory;
+            adjust_metric_totals(&mut bucket.gpu_utilization_sums, &mut bucket.gpu_utilization_counts, &serde_json::from_str(&gpu_json).unwrap_or_default(), 1);
+            adjust_metric_totals(&mut bucket.gpu_memory_sums, &mut bucket.gpu_memory_counts, &serde_json::from_str(&gpu_memory_json).unwrap_or_default(), 1);
+        }
+    }
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    transaction.execute("DELETE FROM history_hourly_buckets", []).map_err(|error| error.to_string())?;
+    for ((server_id, timestamp), bucket) in buckets {
+        transaction.execute(
+            "INSERT INTO history_hourly_buckets(server_id,timestamp,sample_count,cpu_sum,memory_sum,gpu_utilization_sums_json,gpu_utilization_counts_json,gpu_memory_sums_json,gpu_memory_counts_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![server_id, timestamp, bucket.sample_count, bucket.cpu_sum, bucket.memory_sum, serde_json::to_string(&bucket.gpu_utilization_sums).map_err(|error| error.to_string())?, serde_json::to_string(&bucket.gpu_utilization_counts).map_err(|error| error.to_string())?, serde_json::to_string(&bucket.gpu_memory_sums).map_err(|error| error.to_string())?, serde_json::to_string(&bucket.gpu_memory_counts).map_err(|error| error.to_string())?],
+        ).map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())
+}
+
 impl Database {
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        let connection = Connection::open(path).map_err(|error| error.to_string())?;
+        let mut connection = Connection::open(path).map_err(|error| error.to_string())?;
         connection
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
@@ -64,6 +187,20 @@ impl Database {
                     FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
                  );
                  CREATE INDEX IF NOT EXISTS idx_snapshots_lookup ON snapshots(server_id, timestamp);
+                 CREATE TABLE IF NOT EXISTS history_hourly_buckets (
+                    server_id TEXT NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    sample_count INTEGER NOT NULL,
+                    cpu_sum REAL NOT NULL,
+                    memory_sum REAL NOT NULL,
+                    gpu_utilization_sums_json TEXT NOT NULL DEFAULT '{}',
+                    gpu_utilization_counts_json TEXT NOT NULL DEFAULT '{}',
+                    gpu_memory_sums_json TEXT NOT NULL DEFAULT '{}',
+                    gpu_memory_counts_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY(server_id,timestamp),
+                    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_history_hourly_lookup ON history_hourly_buckets(server_id,timestamp);
                  CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value_json TEXT NOT NULL
@@ -153,6 +290,11 @@ impl Database {
             [],
         ).map_err(|error| error.to_string())?;
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_unique ON snapshots(server_id,timestamp)", []).map_err(|error| error.to_string())?;
+        let hourly_bucket_count: i64 = connection.query_row("SELECT COUNT(*) FROM history_hourly_buckets", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+        let snapshot_count: i64 = connection.query_row("SELECT COUNT(*) FROM snapshots", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+        if hourly_bucket_count == 0 && snapshot_count > 0 {
+            rebuild_hourly_history_buckets(&mut connection)?;
+        }
         Ok(Self { connection: Mutex::new(connection), session_passwords: Mutex::new(HashMap::new()) })
     }
 
@@ -309,17 +451,31 @@ impl Database {
         let server = self.get_server(&snapshot.server_id)?;
         let memory_utilization = if snapshot.system.memory_total_bytes > 0 { snapshot.system.memory_used_bytes as f64 / snapshot.system.memory_total_bytes as f64 * 100.0 } else { 0.0 };
         let swap_utilization = if snapshot.system.swap_total_bytes > 0 { snapshot.system.swap_used_bytes as f64 / snapshot.system.swap_total_bytes as f64 * 100.0 } else { 0.0 };
-        let gpu_map: HashMap<&str, f64> = snapshot.gpus.iter().map(|gpu| (gpu.uuid.as_str(), gpu.utilization)).collect();
-        let gpu_memory_map: HashMap<&str, f64> = snapshot.gpus.iter().map(|gpu| (gpu.uuid.as_str(), if gpu.memory_total_mb > 0.0 { (gpu.memory_used_mb / gpu.memory_total_mb * 100.0).clamp(0.0, 100.0) } else { 0.0 })).collect();
-        let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        connection.execute(
+        let gpu_map: HashMap<String, f64> = snapshot.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.utilization)).collect();
+        let gpu_memory_map: HashMap<String, f64> = snapshot.gpus.iter().map(|gpu| (gpu.uuid.clone(), if gpu.memory_total_mb > 0.0 { (gpu.memory_used_mb / gpu.memory_total_mb * 100.0).clamp(0.0, 100.0) } else { 0.0 })).collect();
+        let next_sample = StoredHistorySample { cpu_utilization: snapshot.system.cpu_utilization, memory_utilization, gpu_utilizations: gpu_map, gpu_memory_utilizations: gpu_memory_map };
+        let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let previous = transaction.query_row(
+            "SELECT cpu_utilization,memory_utilization,gpu_json,gpu_memory_json FROM snapshots WHERE server_id=?1 AND timestamp=?2",
+            params![snapshot.server_id, snapshot.timestamp],
+            |row| Ok(StoredHistorySample {
+                cpu_utilization: row.get(0)?,
+                memory_utilization: row.get(1)?,
+                gpu_utilizations: serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or_default(),
+                gpu_memory_utilizations: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+            }),
+        ).optional().map_err(|error| error.to_string())?;
+        transaction.execute(
             "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(server_id,timestamp) DO UPDATE SET cpu_utilization=excluded.cpu_utilization,memory_utilization=excluded.memory_utilization,swap_utilization=excluded.swap_utilization,gpu_json=excluded.gpu_json,gpu_memory_json=excluded.gpu_memory_json,payload_json=excluded.payload_json",
-            params![snapshot.server_id, snapshot.timestamp, snapshot.system.cpu_utilization, memory_utilization, swap_utilization, serde_json::to_string(&gpu_map).unwrap_or_else(|_| "{}".into()), serde_json::to_string(&gpu_memory_map).unwrap_or_else(|_| "{}".into()), serde_json::to_string(snapshot).map_err(|error| error.to_string())?],
+            params![snapshot.server_id, snapshot.timestamp, next_sample.cpu_utilization, next_sample.memory_utilization, swap_utilization, serde_json::to_string(&next_sample.gpu_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(&next_sample.gpu_memory_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(snapshot).map_err(|error| error.to_string())?],
         ).map_err(|error| error.to_string())?;
+        update_hourly_history_bucket(&transaction, &snapshot.server_id, snapshot.timestamp, previous.as_ref(), &next_sample)?;
         let cutoff = snapshot.timestamp - i64::from(server.history_retention_days) * 86_400;
-        connection.execute("DELETE FROM snapshots WHERE server_id=?1 AND timestamp < ?2", params![snapshot.server_id, cutoff]).map_err(|error| error.to_string())?;
-        Ok(())
+        transaction.execute("DELETE FROM snapshots WHERE server_id=?1 AND timestamp < ?2", params![snapshot.server_id, cutoff]).map_err(|error| error.to_string())?;
+        transaction.execute("DELETE FROM history_hourly_buckets WHERE server_id=?1 AND timestamp < ?2", params![snapshot.server_id, hour_start(cutoff)]).map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
     }
 
     pub fn remote_history_cursor(&self, server_id: &str, now: i64) -> Result<i64, String> {
@@ -337,13 +493,14 @@ impl Database {
         let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
         let transaction = connection.transaction().map_err(|error| error.to_string())?;
         let mut imported = 0usize;
+        let mut imported_points = Vec::new();
         {
             let mut statement = transaction.prepare(
                 "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,'{}') ON CONFLICT(server_id,timestamp) DO NOTHING"
             ).map_err(|error| error.to_string())?;
             for point in points.iter().filter(|point| point.timestamp >= cutoff) {
-                imported += statement.execute(params![
+                let inserted = statement.execute(params![
                     server_id,
                     point.timestamp,
                     point.cpu_utilization,
@@ -352,9 +509,21 @@ impl Database {
                     serde_json::to_string(&point.gpu_utilizations).map_err(|error| error.to_string())?,
                     serde_json::to_string(&point.gpu_memory_utilizations).map_err(|error| error.to_string())?,
                 ]).map_err(|error| error.to_string())?;
+                imported += inserted;
+                if inserted > 0 { imported_points.push(point); }
             }
         }
+        for point in imported_points {
+            let sample = StoredHistorySample {
+                cpu_utilization: point.cpu_utilization,
+                memory_utilization: point.memory_utilization,
+                gpu_utilizations: point.gpu_utilizations.clone(),
+                gpu_memory_utilizations: point.gpu_memory_utilizations.clone(),
+            };
+            update_hourly_history_bucket(&transaction, server_id, point.timestamp, None, &sample)?;
+        }
         transaction.execute("DELETE FROM snapshots WHERE server_id=?1 AND timestamp < ?2", params![server_id, cutoff]).map_err(|error| error.to_string())?;
+        transaction.execute("DELETE FROM history_hourly_buckets WHERE server_id=?1 AND timestamp < ?2", params![server_id, hour_start(cutoff)]).map_err(|error| error.to_string())?;
         transaction.execute(
             "UPDATE servers SET remote_history_last_sync_at=MAX(COALESCE(remote_history_last_sync_at,0),?2) WHERE id=?1",
             params![server_id, latest],
@@ -463,49 +632,53 @@ impl Database {
     pub fn get_history_heatmap(&self, server_id: &str, from_timestamp: i64, timezone_offset_seconds: i64, gpu_uuids: &[String]) -> Result<Vec<HistoryHeatmapPoint>, String> {
         const BUCKET_SECONDS: i64 = 3 * 60 * 60;
         let offset = timezone_offset_seconds.clamp(-86_400, 86_400);
+        let requested_gpus: HashSet<&str> = gpu_uuids.iter().map(String::as_str).collect();
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection.prepare(
             "SELECT ((timestamp + ?3) / ?4) * ?4 - ?3 AS bucket,
-                    COUNT(*), AVG(cpu_utilization), AVG(memory_utilization)
-             FROM snapshots
+                    sample_count,cpu_sum,memory_sum,gpu_utilization_sums_json,gpu_utilization_counts_json,gpu_memory_sums_json,gpu_memory_counts_json
+             FROM history_hourly_buckets
              WHERE server_id=?1 AND timestamp>=?2
-             GROUP BY bucket ORDER BY bucket"
+             ORDER BY timestamp"
         ).map_err(|error| error.to_string())?;
-        let rows = statement.query_map(params![server_id, from_timestamp, offset, BUCKET_SECONDS], |row| {
-            Ok(HistoryHeatmapPoint {
-                timestamp: row.get(0)?,
-                sample_count: row.get(1)?,
-                cpu_utilization: row.get(2)?,
-                memory_utilization: row.get(3)?,
-                gpu_utilizations: HashMap::new(),
-                gpu_memory_utilizations: HashMap::new(),
-            })
+        let rows = statement.query_map(params![server_id, hour_start(from_timestamp), offset, BUCKET_SECONDS], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, f64>(2)?, row.get::<_, f64>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?))
         }).map_err(|error| error.to_string())?;
-        let mut buckets = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-        let bucket_indexes: HashMap<i64, usize> = buckets.iter().enumerate().map(|(index, point)| (point.timestamp, index)).collect();
-
-        for gpu_uuid in gpu_uuids {
-            let json_path = format!("$.{}", serde_json::to_string(gpu_uuid).map_err(|error| error.to_string())?);
-            let mut gpu_statement = connection.prepare(
-                "SELECT ((timestamp + ?3) / ?4) * ?4 - ?3 AS bucket,
-                        AVG(CAST(json_extract(gpu_json, ?5) AS REAL)),
-                        AVG(CAST(json_extract(gpu_memory_json, ?5) AS REAL))
-                 FROM snapshots
-                 WHERE server_id=?1 AND timestamp>=?2
-                 GROUP BY bucket ORDER BY bucket"
-            ).map_err(|error| error.to_string())?;
-            let gpu_rows = gpu_statement.query_map(params![server_id, from_timestamp, offset, BUCKET_SECONDS, json_path], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<f64>>(1)?, row.get::<_, Option<f64>>(2)?))
-            }).map_err(|error| error.to_string())?;
-            for row in gpu_rows {
-                let (timestamp, utilization, memory_utilization) = row.map_err(|error| error.to_string())?;
-                let Some(index) = bucket_indexes.get(&timestamp).copied() else { continue };
-                if let Some(value) = utilization { buckets[index].gpu_utilizations.insert(gpu_uuid.clone(), value.clamp(0.0, 100.0)); }
-                if let Some(value) = memory_utilization { buckets[index].gpu_memory_utilizations.insert(gpu_uuid.clone(), value.clamp(0.0, 100.0)); }
+        let mut accumulators: BTreeMap<i64, HeatmapAccumulator> = BTreeMap::new();
+        for row in rows {
+            let (timestamp, sample_count, cpu_sum, memory_sum, gpu_sums_json, gpu_counts_json, gpu_memory_sums_json, gpu_memory_counts_json) = row.map_err(|error| error.to_string())?;
+            let accumulator = accumulators.entry(timestamp).or_default();
+            accumulator.sample_count += sample_count;
+            accumulator.cpu_sum += cpu_sum;
+            accumulator.memory_sum += memory_sum;
+            let gpu_counts: HashMap<String, i64> = serde_json::from_str(&gpu_counts_json).unwrap_or_default();
+            for (gpu_uuid, value) in serde_json::from_str::<HashMap<String, f64>>(&gpu_sums_json).unwrap_or_default() {
+                if !requested_gpus.contains(gpu_uuid.as_str()) { continue; }
+                let count = gpu_counts.get(&gpu_uuid).copied().unwrap_or_default();
+                let total = accumulator.gpu_utilizations.entry(gpu_uuid).or_default();
+                total.0 += value;
+                total.1 += count;
+            }
+            let gpu_memory_counts: HashMap<String, i64> = serde_json::from_str(&gpu_memory_counts_json).unwrap_or_default();
+            for (gpu_uuid, value) in serde_json::from_str::<HashMap<String, f64>>(&gpu_memory_sums_json).unwrap_or_default() {
+                if !requested_gpus.contains(gpu_uuid.as_str()) { continue; }
+                let count = gpu_memory_counts.get(&gpu_uuid).copied().unwrap_or_default();
+                let total = accumulator.gpu_memory_utilizations.entry(gpu_uuid).or_default();
+                total.0 += value;
+                total.1 += count;
             }
         }
-
-        Ok(buckets)
+        Ok(accumulators.into_iter().map(|(timestamp, accumulator)| {
+            let samples = accumulator.sample_count.max(1) as f64;
+            HistoryHeatmapPoint {
+                timestamp,
+                sample_count: accumulator.sample_count,
+                cpu_utilization: (accumulator.cpu_sum / samples).clamp(0.0, 100.0),
+                memory_utilization: (accumulator.memory_sum / samples).clamp(0.0, 100.0),
+                gpu_utilizations: accumulator.gpu_utilizations.into_iter().filter_map(|(uuid, (sum, count))| (count > 0).then_some((uuid, (sum / count as f64).clamp(0.0, 100.0)))).collect(),
+                gpu_memory_utilizations: accumulator.gpu_memory_utilizations.into_iter().filter_map(|(uuid, (sum, count))| (count > 0).then_some((uuid, (sum / count as f64).clamp(0.0, 100.0)))).collect(),
+            }
+        }).collect())
     }
 
     pub fn get_settings(&self) -> Result<AppSettings, String> {
@@ -737,6 +910,49 @@ mod tests {
     }
 
     #[test]
+    fn replacing_a_snapshot_updates_the_hourly_bucket_without_double_counting() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let server = db.save_server(draft("Replace", 30)).unwrap();
+        let mut sample = snapshot(&server.id, 21_900);
+        sample.system.cpu_utilization = 20.0;
+        sample.gpus.push(GpuMetric { index: 0, name: "NVIDIA Test".into(), uuid: "GPU-replace".into(), utilization: 25.0, memory_utilization: 0.0, memory_used_mb: 10_240.0, memory_total_mb: 40_960.0, temperature_celsius: 40.0, power_watts: 80.0 });
+        db.save_snapshot(&sample).unwrap();
+        sample.system.cpu_utilization = 80.0;
+        sample.gpus[0].utilization = 75.0;
+        sample.gpus[0].memory_used_mb = 30_720.0;
+        db.save_snapshot(&sample).unwrap();
+
+        let buckets = db.get_history_heatmap(&server.id, 0, 0, &["GPU-replace".into()]).unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].sample_count, 1);
+        assert_eq!(buckets[0].cpu_utilization, 80.0);
+        assert_eq!(buckets[0].gpu_utilizations.get("GPU-replace"), Some(&75.0));
+        assert_eq!(buckets[0].gpu_memory_utilizations.get("GPU-replace"), Some(&75.0));
+    }
+
+    #[test]
+    fn backfills_hourly_buckets_when_opening_an_existing_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sqlite");
+        let server_id = {
+            let db = Database::open(&path).unwrap();
+            let server = db.save_server(draft("Backfill", 30)).unwrap();
+            let mut sample = snapshot(&server.id, 21_900);
+            sample.system.cpu_utilization = 55.0;
+            db.save_snapshot(&sample).unwrap();
+            db.connection.lock().unwrap().execute("DELETE FROM history_hourly_buckets", []).unwrap();
+            server.id
+        };
+
+        let reopened = Database::open(&path).unwrap();
+        let buckets = reopened.get_history_heatmap(&server_id, 0, 0, &[]).unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].sample_count, 1);
+        assert_eq!(buckets[0].cpu_utilization, 55.0);
+    }
+
+    #[test]
     fn imports_remote_history_incrementally_without_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
@@ -753,6 +969,9 @@ mod tests {
         assert_eq!(db.import_remote_history(&server.id, std::slice::from_ref(&point)).unwrap(), 1);
         assert_eq!(db.import_remote_history(&server.id, std::slice::from_ref(&point)).unwrap(), 0);
         assert_eq!(db.get_history(&server.id, 0).unwrap().len(), 1);
+        let heatmap = db.get_history_heatmap(&server.id, 0, 0, &["GPU-a".into()]).unwrap();
+        assert_eq!(heatmap.len(), 1);
+        assert_eq!(heatmap[0].gpu_utilizations.get("GPU-a"), Some(&80.0));
         assert_eq!(db.get_server(&server.id).unwrap().remote_history_last_sync_at, Some(point.timestamp));
         assert_eq!(db.remote_history_cursor(&server.id, point.timestamp + 120).unwrap(), point.timestamp - 60);
     }

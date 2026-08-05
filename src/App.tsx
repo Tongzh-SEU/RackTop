@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { flushSync } from 'react-dom'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
@@ -51,7 +52,7 @@ import {
 import { api } from './services/api'
 import { openExternalUrl } from './services/external'
 import type { AppSettings, DetailTab, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
-import { HistoryHeatmaps } from './components/HistoryHeatmap'
+import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
@@ -62,11 +63,12 @@ import { StatusPill } from './components/StatusPill'
 import { TrendChart } from './components/TrendChart'
 import { UsageDistribution } from './components/UsageDistribution'
 import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, countOtherUserGpuWorkloads, displayedGpuMemoryPercent, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, isGpuIdle } from './utils/gpu'
+import { serverStatusAfterFailure, shouldShowConnectingOnAttempt } from './utils/connectionStatus'
 import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, loadIdleFilters, rankIdleGpuItems, saveIdleFilters, type IdleFilters, type IdleGpuItem } from './utils/idleFilters'
 import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservationFiltersEqual, idleReservationGpuKey, idleReservationSummary } from './utils/idleReservations'
-import { FOREGROUND_STATUS_INTERVAL_MS, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
+import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
 import { duplicateImportIndexes } from './utils/serverIdentity'
-import { previewServerOrder, type ServerDropPlacement } from './utils/serverOrder'
+import { previewServerOrder, serverDropTarget, type ServerDropPlacement } from './utils/serverOrder'
 import authorAvatar from './assets/tongzh-seu.png'
 import packageInfo from '../package.json'
 
@@ -189,9 +191,10 @@ function App() {
   const draggedServerIdRef = useRef<string | null>(null)
   const dragOriginalServersRef = useRef<Server[] | null>(null)
   const dragPreviewServersRef = useRef<Server[] | null>(null)
-  const serverDropCommittedRef = useRef(false)
+  const dragMouseRef = useRef<{ sourceId: string; startY: number; pointerY: number; grabOffsetY: number; active: boolean; rows: Array<{ id: string; top: number; bottom: number }> } | null>(null)
+  const dragMouseCleanupRef = useRef<(() => void) | null>(null)
+  const suppressServerClickRef = useRef(false)
   const serverRowRefs = useRef(new Map<string, HTMLButtonElement>())
-  const serverRowPositionsRef = useRef<Map<string, number> | null>(null)
   const [showServerForm, setShowServerForm] = useState(false)
   const [editingServer, setEditingServer] = useState<Server | null>(null)
   const [showSettings, setShowSettings] = useState(false)
@@ -221,6 +224,7 @@ function App() {
   const failureCounts = useRef<Record<string, number>>({})
   const lastAttemptAt = useRef<Record<string, number>>({})
   const lastProcessAttemptAt = useRef<Record<string, number>>({})
+  const lastDiskAttemptAt = useRef<Record<string, number>>({})
   const lastHistoryRecordedAt = useRef<Record<string, number>>({})
   const remoteHistoryServersRef = useRef<Server[]>([])
   const remoteSyncInFlight = useRef(new Set<string>())
@@ -252,16 +256,24 @@ function App() {
     if (!quiet) delete nextRetryAt.current[serverId]
     inFlightServers.current.add(serverId)
     setBusy((current) => new Set(current).add(serverId))
-    if (!snapshotsRef.current[serverId]) setServers((current) => current.map((server) => server.id === serverId ? { ...server, status: 'connecting', lastError: null } : server))
+    if (shouldShowConnectingOnAttempt(quiet, Boolean(snapshotsRef.current[serverId]), failureCounts.current[serverId] ?? 0)) {
+      setServers((current) => current.map((server) => server.id === serverId ? { ...server, status: 'connecting', lastError: null } : server))
+    }
     try {
       const previous = snapshotsRef.current[serverId]
       const fastStatusView = !document.hidden && (mainView === 'fleet' || (mainView === 'server' && selectedTab === 'overview' && selectedServerId === serverId))
       const includeProcesses = !quiet || !previous || fastStatusView || nowMs - (lastProcessAttemptAt.current[serverId] ?? 0) >= (settings?.processIntervalSeconds ?? 5) * 1000
+      const includeDisks = !quiet || !previous || nowMs - (lastDiskAttemptAt.current[serverId] ?? 0) >= DISK_STATUS_INTERVAL_MS
       const recordHistory = !serverConfig || shouldRecordHistory(lastHistoryRecordedAt.current[serverId], nowMs, serverConfig.samplingIntervalSeconds)
-      const collected = await api.collectServer(serverId, includeProcesses, recordHistory)
+      const collected = await api.collectServer(serverId, includeProcesses, includeDisks, recordHistory)
       if (deletedServerIds.current.has(serverId)) return
       if (collected.processesSampled) lastProcessAttemptAt.current[serverId] = nowMs
-      const snapshot = collected.processesSampled ? collected : { ...collected, processes: previous?.processes ?? [], cpuProcesses: previous?.cpuProcesses ?? [] }
+      if (includeDisks) lastDiskAttemptAt.current[serverId] = nowMs
+      const snapshot = {
+        ...collected,
+        ...(!collected.processesSampled ? { processes: previous?.processes ?? [], cpuProcesses: previous?.cpuProcesses ?? [] } : {}),
+        ...(!includeDisks ? { disks: previous?.disks ?? [] } : {}),
+      }
       snapshotsRef.current = { ...snapshotsRef.current, [serverId]: snapshot }
       failureCounts.current[serverId] = 0
       delete nextRetryAt.current[serverId]
@@ -293,7 +305,7 @@ function App() {
           void api.notify(`${name} 已离线`, `连续 ${failureCounts.current[serverId]} 次采集失败：${message}`)
         }
       }
-      setServers((current) => current.map((server) => server.id === serverId ? { ...server, status: failureCount >= 3 ? 'offline' : 'warning', lastError: `${message} · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试` } : server))
+      setServers((current) => current.map((server) => server.id === serverId ? { ...server, status: serverStatusAfterFailure(failureCount), lastError: `${message} · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试` } : server))
       if (message.includes('主机指纹')) {
         try {
           setPendingHostKey(await api.scanHostKey(serverId))
@@ -645,6 +657,7 @@ function App() {
       delete failureCounts.current[server.id]
       delete lastAttemptAt.current[server.id]
       delete lastProcessAttemptAt.current[server.id]
+      delete lastDiskAttemptAt.current[server.id]
       delete lastHistoryRecordedAt.current[server.id]
       delete nextRetryAt.current[server.id]
       for (const key of Object.keys(conditionSince.current)) if (key.includes(`:${server.id}:`)) delete conditionSince.current[key]
@@ -677,33 +690,128 @@ function App() {
     }
   }
 
-  const captureServerRowPositions = () => new Map(Array.from(serverRowRefs.current, ([id, element]) => [id, element.getBoundingClientRect().top]))
-
   function previewServerMove(sourceId: string, targetId: string, placement: ServerDropPlacement) {
     if (!sourceId || search) return
-    setServers((current) => {
-      const next = previewServerOrder(current, sourceId, targetId, placement)
-      if (next === current) return current
-      serverRowPositionsRef.current = captureServerRowPositions()
-      dragPreviewServersRef.current = next
-      return next
+    const original = dragOriginalServersRef.current ?? servers
+    const current = dragPreviewServersRef.current ?? original
+    const next = previewServerOrder(original, sourceId, targetId, placement)
+    if (next.map(({ id }) => id).join('\n') === current.map(({ id }) => id).join('\n')) return
+    dragPreviewServersRef.current = next
+    const drag = dragMouseRef.current
+    if (!drag) return
+    const originalTop = new Map(drag.rows.map((row) => [row.id, row.top]))
+    next.forEach((server, nextIndex) => {
+      if (server.id === sourceId) return
+      const element = serverRowRefs.current.get(server.id)
+      const naturalTop = originalTop.get(server.id)
+      const destinationTop = originalTop.get(original[nextIndex]?.id)
+      if (!element || naturalTop === undefined || destinationTop === undefined) return
+      animateServerRowTransform(element, destinationTop - naturalTop)
     })
   }
 
-  useLayoutEffect(() => {
-    const previousPositions = serverRowPositionsRef.current
-    if (!previousPositions) return
-    serverRowPositionsRef.current = null
-    if (settings?.reduceMotion || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  function animateServerRowTransform(element: HTMLButtonElement, translateY: number) {
+    const reduceMotion = settings?.reduceMotion || window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const visualTop = element.getBoundingClientRect().top
+    element.getAnimations().forEach((animation) => animation.cancel())
+    element.style.transform = translateY ? `translateY(${translateY}px)` : ''
+    if (reduceMotion) return
+    const delta = visualTop - element.getBoundingClientRect().top
+    element.animate(
+      [{ transform: `translateY(${translateY + delta}px)` }, { transform: translateY ? `translateY(${translateY}px)` : 'translateY(0)' }],
+      { duration: 210, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' },
+    )
+  }
+
+  function positionDraggedServer() {
+    const drag = dragMouseRef.current
+    const element = drag ? serverRowRefs.current.get(drag.sourceId) : null
+    if (!drag?.active || !element) return
+    const naturalTop = drag.rows.find((row) => row.id === drag.sourceId)?.top
+    if (naturalTop === undefined) return
+    element.getAnimations().forEach((animation) => animation.cancel())
+    element.style.transform = `translateY(${drag.pointerY - drag.grabOffsetY - naturalTop}px)`
+  }
+
+  function settleServerOrder(ordered: Server[]) {
+    const visualTops = new Map(Array.from(serverRowRefs.current, ([id, element]) => [id, element.getBoundingClientRect().top]))
+    for (const element of serverRowRefs.current.values()) element.getAnimations().forEach((animation) => animation.cancel())
+    flushSync(() => {
+      setServers(ordered)
+      setDraggedServerId(null)
+    })
+    draggedServerIdRef.current = null
+    const reduceMotion = settings?.reduceMotion || window.matchMedia('(prefers-reduced-motion: reduce)').matches
     for (const [id, element] of serverRowRefs.current) {
-      const previousTop = previousPositions.get(id)
-      if (previousTop === undefined) continue
-      const delta = previousTop - element.getBoundingClientRect().top
-      if (Math.abs(delta) < 0.5) continue
-      element.getAnimations().forEach((animation) => animation.cancel())
-      element.animate([{ transform: `translateY(${delta}px)` }, { transform: 'translateY(0)' }], { duration: 180, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' })
+      element.style.transform = ''
+      const visualTop = visualTops.get(id)
+      if (reduceMotion || visualTop === undefined) continue
+      const delta = visualTop - element.getBoundingClientRect().top
+      if (Math.abs(delta) >= 0.5) element.animate([{ transform: `translateY(${delta}px)` }, { transform: 'translateY(0)' }], { duration: 180, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' })
     }
-  }, [servers, settings?.reduceMotion])
+  }
+
+  function beginServerMouseDrag(event: MouseEvent<HTMLSpanElement>, serverId: string) {
+    if (event.button !== 0 || search) return
+    event.preventDefault()
+    event.stopPropagation()
+    dragMouseCleanupRef.current?.()
+    const row = event.currentTarget.closest('.server-row') as HTMLButtonElement | null
+    if (!row) return
+    const rows = servers.map((server) => {
+      const bounds = serverRowRefs.current.get(server.id)?.getBoundingClientRect()
+      return { id: server.id, top: bounds?.top ?? 0, bottom: bounds?.bottom ?? 0 }
+    })
+    const drag = { sourceId: serverId, startY: event.clientY, pointerY: event.clientY, grabOffsetY: event.clientY - row.getBoundingClientRect().top, active: false, rows }
+    dragMouseRef.current = drag
+    dragOriginalServersRef.current = servers
+    dragPreviewServersRef.current = servers
+    draggedServerIdRef.current = serverId
+
+    const cleanup = () => {
+      window.removeEventListener('mousemove', move, true)
+      window.removeEventListener('mouseup', finish, true)
+      window.removeEventListener('blur', cancel)
+      document.documentElement.classList.remove('is-server-dragging')
+      dragMouseCleanupRef.current = null
+    }
+    const move = (moveEvent: globalThis.MouseEvent) => {
+      if (!drag.active && Math.abs(moveEvent.clientY - drag.startY) < 4) return
+      moveEvent.preventDefault()
+      drag.pointerY = moveEvent.clientY
+      if (!drag.active) {
+        drag.active = true
+        document.documentElement.classList.add('is-server-dragging')
+        setDraggedServerId(drag.sourceId)
+      }
+      positionDraggedServer()
+      const target = serverDropTarget(drag.rows, moveEvent.clientY)
+      if (target) previewServerMove(drag.sourceId, target.targetId, target.placement)
+    }
+    const finish = () => {
+      cleanup()
+      dragMouseRef.current = null
+      if (drag.active) {
+        suppressServerClickRef.current = true
+        settleServerOrder(dragPreviewServersRef.current ?? dragOriginalServersRef.current ?? servers)
+        void commitServerOrder()
+      } else {
+        dragOriginalServersRef.current = null
+        dragPreviewServersRef.current = null
+        draggedServerIdRef.current = null
+      }
+    }
+    const cancel = () => {
+      cleanup()
+      dragMouseRef.current = null
+      for (const element of serverRowRefs.current.values()) animateServerRowTransform(element, 0)
+      cancelServerOrderPreview()
+    }
+    dragMouseCleanupRef.current = cleanup
+    window.addEventListener('mousemove', move, true)
+    window.addEventListener('mouseup', finish, true)
+    window.addEventListener('blur', cancel)
+  }
 
   async function commitServerOrder() {
     const ordered = dragPreviewServersRef.current ?? servers
@@ -753,14 +861,9 @@ function App() {
                 className={`server-row ${selectedServerId === server.id && mainView === 'server' ? 'is-selected' : ''} ${draggedServerId === server.id ? 'is-dragging' : ''}`}
                 key={server.id}
                 ref={(element) => { if (element) serverRowRefs.current.set(server.id, element); else serverRowRefs.current.delete(server.id) }}
-                draggable={!search}
-                onDragStart={(event) => { dragOriginalServersRef.current = servers; dragPreviewServersRef.current = servers; draggedServerIdRef.current = server.id; serverDropCommittedRef.current = false; setDraggedServerId(server.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', server.id) }}
-                onDragOver={(event) => { if (!search) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; const bounds = event.currentTarget.getBoundingClientRect(); previewServerMove(draggedServerIdRef.current ?? '', server.id, event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after') } }}
-                onDrop={(event) => { event.preventDefault(); serverDropCommittedRef.current = true; void commitServerOrder() }}
-                onDragEnd={() => { if (serverDropCommittedRef.current) serverDropCommittedRef.current = false; else cancelServerOrderPreview() }}
-                onClick={() => { setSelectedServerId(server.id); setSelectedGpuUuid(null); setMainView('server') }}
+                onClick={() => { if (suppressServerClickRef.current) { suppressServerClickRef.current = false; return }; setSelectedServerId(server.id); setSelectedGpuUuid(null); setMainView('server') }}
               >
-                <GripVertical size={13} className="server-row__drag" aria-hidden="true" />
+                <span className="server-row__drag" aria-hidden="true" onMouseDown={(event) => beginServerMouseDrag(event, server.id)}><GripVertical size={13} /></span>
                 <span className={`server-row__status server-row__status--${server.status}`} />
                 <span className="server-row__content">
                   <span className="server-row__title">{server.name}</span>
@@ -1057,6 +1160,7 @@ function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot 
   return <div className="history-page">
     <section className="history-section"><header className="history-page__header"><div><History size={18} /><span><h2>资源热力图</h2><p>每列 1 天，每格汇总连续 3 小时的平均使用率</p></span></div><small>最近 {Math.min(90, Math.max(1, server.historyRetentionDays))} 天</small></header>{heatmapLoading ? <div className="history-page__state"><RefreshCw className="spin" size={16} />正在读取资源历史…</div> : heatmapError ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />资源历史读取失败：{heatmapError}</div> : <HistoryHeatmaps snapshot={snapshot} points={heatmapPoints} retentionDays={server.historyRetentionDays} />}</section>
     <section className="history-section"><header className="history-page__header"><div><History size={18} /><span><h2>GPU 使用分布</h2><p>按 Unix 用户聚合活跃时间与显存积分</p></span></div><div className="usage-range" aria-label="使用分布时间范围">{([7, 15, 30, 90] as const).map((days) => <button key={days} aria-pressed={usageDays === days} onClick={() => setUsageDays(days)}>{days === 7 ? '1 周' : days === 15 ? '半个月' : days === 30 ? '1 个月' : '3 个月'}</button>)}</div></header>{usageLoading ? <div className="history-page__state"><RefreshCw className="spin" size={16} />正在聚合使用分布…</div> : usageError ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />使用分布读取失败：{usageError}</div> : usage && <UsageDistribution snapshot={snapshot} data={usage} />}</section>
+    <section className="history-section"><StorageWaffleList disks={snapshot.disks ?? []} /></section>
     <section className="data-retention"><Database size={18} /><div><strong>{server.remoteHistoryEnabled ? '在线本地采样 · 离线远端补档' : '仅在线本地采样'}</strong><p>{server.remoteHistoryEnabled ? 'RackTop 在线时写入本机时间桶；远端隐藏进程仅在 App 离线后接管，重新打开时增量补齐缺口。' : 'RackTop 运行时在本机生成使用分布；App 离线期间不补零，缺失时段保持灰色。'}不会保存 PID、进程命令、路径或终端输入输出。</p></div></section>
   </div>
 }
