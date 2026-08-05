@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { unixSshSetupScript, windowsSshSetupScript } from './sshSetup'
+import { sshSetupTargetValidationMessage, unixSshSetupScript, windowsSshSetupScript } from './sshSetup'
 
 describe('SSH setup scripts', () => {
   it('renders a directly runnable macOS/Linux script with the current target', () => {
@@ -15,5 +15,17 @@ describe('SSH setup scripts', () => {
     expect(script).toContain('$env:USERPROFILE')
     expect(script).toContain("ssh -p 22 'researcher@gpu.example.com' 'umask 077;")
     expect(script).toContain('ssh-add $keyPath')
+  })
+})
+
+describe('sshSetupTargetValidationMessage', () => {
+  it('identifies every missing connection field before copying', () => {
+    expect(sshSetupTargetValidationMessage({ username: '', host: '', port: 22 })).toContain('用户名和主机地址')
+    expect(sshSetupTargetValidationMessage({ username: '', host: '10.0.0.10', port: 22 })).toContain('用户名')
+    expect(sshSetupTargetValidationMessage({ username: 'researcher', host: '', port: 22 })).toContain('主机地址')
+  })
+
+  it('allows copying only after username and host are both filled', () => {
+    expect(sshSetupTargetValidationMessage({ username: ' researcher ', host: ' 10.0.0.10 ', port: 22 })).toBeNull()
   })
 })

@@ -3,13 +3,17 @@ import type { Snapshot, UsageDistribution as UsageDistributionData } from '../ty
 
 const colors = ['#4f8ee8', '#5aa779', '#d08b42', '#a06bc4', '#cf6268', '#36a0a0', '#8e8650', '#7b8496']
 
-interface Slice { name: string; percent: number; color: string }
+interface Slice { name: string; percent: number; color: string; unused?: boolean }
 
 function slices(values: Array<{ name: string; value: number }>, total: number): Slice[] {
-  if (total <= 0) return [{ name: '未使用', percent: 100, color: 'var(--surface-muted)' }]
+  if (total <= 0) return [{ name: '未使用', percent: 100, color: 'var(--surface-muted)', unused: true }]
   const users = values.filter((item) => item.value > 0).sort((a, b) => b.value - a.value).map((item, index) => ({ name: item.name, percent: Math.max(0, item.value / total * 100), color: colors[index % colors.length] }))
   const used = users.reduce((sum, item) => sum + item.percent, 0)
-  return [...users, { name: '未使用', percent: Math.max(0, 100 - used), color: 'var(--surface-muted)' }]
+  return [...users, { name: '未使用', percent: Math.max(0, 100 - used), color: 'var(--surface-muted)', unused: true }]
+}
+
+function displayColor(slice: Slice, strength: number) {
+  return slice.unused ? slice.color : `color-mix(in srgb, ${slice.color} ${strength}%, var(--surface))`
 }
 
 function Waffle({ title, subtitle, icon, data }: { title: string; subtitle: string; icon: React.ReactNode; data: Slice[] }) {
@@ -18,7 +22,7 @@ function Waffle({ title, subtitle, icon, data }: { title: string; subtitle: stri
     let cursor = 0
     return data.find((slice) => { cursor += slice.percent; return midpoint <= cursor }) ?? data[data.length - 1]
   })
-  return <section className="panel usage-waffle"><header><span>{icon}</span><div><h3>{title}</h3><p>{subtitle}</p></div></header><div className="usage-waffle__grid" role="img" aria-label={`${title}百分比分布`}>{cells.map((slice, index) => <span key={index} style={{ background: slice.color }} title={`${slice.name} ${slice.percent.toFixed(1)}%`} />)}</div><div className="usage-waffle__legend">{data.map((slice) => <div key={slice.name}><i style={{ background: slice.color }} /><span>{slice.name}</span><strong>{slice.percent.toFixed(1)}%</strong></div>)}</div></section>
+  return <section className="panel usage-waffle"><header><span>{icon}</span><div><h3>{title}</h3><p>{subtitle}</p></div></header><div className="usage-waffle__grid" role="img" aria-label={`${title}百分比分布`}>{cells.map((slice, index) => <span key={index} style={{ background: displayColor(slice, 70) }} title={`${slice.name} ${slice.percent.toFixed(1)}%`} />)}</div><div className="usage-waffle__legend">{data.map((slice) => <div key={slice.name}><i style={{ background: displayColor(slice, 78) }} /><span>{slice.name}</span><strong>{slice.percent.toFixed(1)}%</strong></div>)}</div></section>
 }
 
 export function UsageDistribution({ snapshot, data }: { snapshot: Snapshot; data: UsageDistributionData }) {

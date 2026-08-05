@@ -47,7 +47,7 @@ const defaultSettings: AppSettings = {
   processIntervalSeconds: 5,
   realtimeWindowMinutes: 30,
   historyEnabled: true,
-  historyRetentionDays: 30,
+  historyRetentionDays: 90,
   idleGpuThreshold: 10,
   idleMemoryThresholdMb: 40960,
   idleDurationMinutes: 10,

@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
-import { AlertTriangle, ArrowRight, Check, Copy, Database, KeyRound, ShieldCheck, Terminal, X } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Check, ChevronRight, Copy, Database, KeyRound, ShieldCheck, Terminal, X } from 'lucide-react'
 import type { ServerDraft } from '../types/models'
-import { unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
+import { sshSetupTargetValidationMessage, unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
 
 interface ServerFormProps {
   initial?: Partial<ServerDraft>
@@ -14,7 +14,7 @@ interface ServerFormProps {
   onSave: (draft: ServerDraft) => Promise<void>
 }
 
-export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistoryRetentionDays = 30, defaultRemoteHistoryEnabled = true, showGuide = true, onGuideDismiss, onClose, onSave }: ServerFormProps) {
+export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistoryRetentionDays = 90, defaultRemoteHistoryEnabled = true, showGuide = true, onGuideDismiss, onClose, onSave }: ServerFormProps) {
   const [draft, setDraft] = useState<ServerDraft>({
     id: initial?.id,
     name: initial?.name ?? '',
@@ -35,6 +35,7 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
   const [error, setError] = useState<string | null>(null)
   const [passwordAcknowledged, setPasswordAcknowledged] = useState(false)
   const [setupCopied, setSetupCopied] = useState(false)
+  const [setupCopyAttempted, setSetupCopyAttempted] = useState(false)
   const [dismissGuide, setDismissGuide] = useState(false)
   const [guideOpen, setGuideOpen] = useState(!initial?.id && showGuide)
 
@@ -42,10 +43,18 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
   const setupPlatform = /Windows/i.test(navigator.userAgent) ? 'windows' : 'unix'
   const setupTarget = { username: draft.username, host: draft.host, port: draft.port }
   const setupScript = setupPlatform === 'unix' ? unixSshSetupScript(setupTarget) : windowsSshSetupScript(setupTarget)
+  const setupValidationMessage = setupCopyAttempted ? sshSetupTargetValidationMessage(setupTarget) : null
 
   async function copySetupScript() {
+    const validationMessage = sshSetupTargetValidationMessage(setupTarget)
+    if (validationMessage) {
+      setSetupCopyAttempted(true)
+      setSetupCopied(false)
+      return
+    }
     try {
       await navigator.clipboard.writeText(setupScript)
+      setSetupCopyAttempted(false)
       setSetupCopied(true)
       window.setTimeout(() => setSetupCopied(false), 1600)
     } catch {
@@ -108,9 +117,9 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
               <label>服务器位置<input value={draft.location ?? ''} onChange={(event) => set('location', event.target.value)} placeholder="例如：实验室 301 / R2 机架 / U18" /></label>
             </div>
             <div className="form-grid form-grid--host">
-              <label>主机地址<input required value={draft.host} onChange={(event) => set('host', event.target.value)} placeholder="10.0.0.10" /></label>
+              <label>主机地址<input required aria-invalid={setupCopyAttempted && !draft.host.trim()} value={draft.host} onChange={(event) => set('host', event.target.value)} placeholder="10.0.0.10" /></label>
               <label>端口<input required type="number" min="1" max="65535" value={draft.port} onChange={(event) => set('port', Number(event.target.value))} /></label>
-              <label>用户名<input required value={draft.username} onChange={(event) => set('username', event.target.value)} placeholder="researcher" /></label>
+              <label>用户名<input required aria-invalid={setupCopyAttempted && !draft.username.trim()} value={draft.username} onChange={(event) => set('username', event.target.value)} placeholder="researcher" /></label>
             </div>
             <fieldset>
               <legend>认证方式</legend>
@@ -152,11 +161,16 @@ export function ServerForm({ initial, defaultSamplingInterval = 2, defaultHistor
               </div>
             )}
             <details className="key-guide">
-              <summary><KeyRound size={17} />SSH 密钥快速配置</summary>
+              <summary>
+                <span className="key-guide__summary-icon"><KeyRound size={17} /></span>
+                <span className="key-guide__summary-copy"><strong>SSH 密钥快速配置</strong><small>生成并复制当前服务器的免密登录命令</small></span>
+                <ChevronRight className="key-guide__chevron" size={16} aria-hidden="true" />
+              </summary>
               <div className="key-guide__toolbar">
                 <span className="key-guide__platform-label">已检测：{setupPlatform === 'windows' ? '本机 Windows PowerShell → 远程 Linux' : '本机 macOS Terminal → 远程 Linux'}</span>
                 <button type="button" className="button button--secondary button--small" onClick={() => void copySetupScript()}>{setupCopied ? <Check size={13} /> : <Copy size={13} />}{setupCopied ? '已复制' : '复制整段'}</button>
               </div>
+              {setupValidationMessage && <p className="key-guide__validation" role="alert"><AlertTriangle size={14} />{setupValidationMessage}</p>}
               <pre><code>{setupScript}</code></pre>
             </details>
             <div className="form-grid form-grid--2">

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
@@ -66,6 +66,7 @@ import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, loadIdleFilters, rankIdleG
 import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservationFiltersEqual, idleReservationGpuKey, idleReservationSummary } from './utils/idleReservations'
 import { FOREGROUND_STATUS_INTERVAL_MS, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
 import { duplicateImportIndexes } from './utils/serverIdentity'
+import { previewServerOrder, type ServerDropPlacement } from './utils/serverOrder'
 import authorAvatar from './assets/tongzh-seu.png'
 import packageInfo from '../package.json'
 
@@ -185,6 +186,12 @@ function App() {
   const [selectedGpuUuid, setSelectedGpuUuid] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [draggedServerId, setDraggedServerId] = useState<string | null>(null)
+  const draggedServerIdRef = useRef<string | null>(null)
+  const dragOriginalServersRef = useRef<Server[] | null>(null)
+  const dragPreviewServersRef = useRef<Server[] | null>(null)
+  const serverDropCommittedRef = useRef(false)
+  const serverRowRefs = useRef(new Map<string, HTMLButtonElement>())
+  const serverRowPositionsRef = useRef<Map<string, number> | null>(null)
   const [showServerForm, setShowServerForm] = useState(false)
   const [editingServer, setEditingServer] = useState<Server | null>(null)
   const [showSettings, setShowSettings] = useState(false)
@@ -585,7 +592,6 @@ function App() {
     setSelectedServerId(saved.id)
     setShowServerForm(false)
     setEditingServer(null)
-    if (!previous) localStorage.setItem('racktop.defaultRemoteHistoryEnabled', String(saved.remoteHistoryEnabled))
     await refreshServer(saved.id)
   }
 
@@ -639,22 +645,56 @@ function App() {
     }
   }
 
-  async function moveServerBefore(sourceId: string, targetId: string) {
-    if (!sourceId || sourceId === targetId || search) return
-    const previousOrder = servers
-    const next = servers.filter((server) => server.id !== sourceId)
-    const moved = servers.find((server) => server.id === sourceId)
-    if (!moved) return
-    next.splice(next.findIndex((server) => server.id === targetId), 0, moved)
-    const ordered = next.map((server, index) => ({ ...server, sortOrder: index }))
-    setServers(ordered)
+  const captureServerRowPositions = () => new Map(Array.from(serverRowRefs.current, ([id, element]) => [id, element.getBoundingClientRect().top]))
+
+  function previewServerMove(sourceId: string, targetId: string, placement: ServerDropPlacement) {
+    if (!sourceId || search) return
+    setServers((current) => {
+      const next = previewServerOrder(current, sourceId, targetId, placement)
+      if (next === current) return current
+      serverRowPositionsRef.current = captureServerRowPositions()
+      dragPreviewServersRef.current = next
+      return next
+    })
+  }
+
+  useLayoutEffect(() => {
+    const previousPositions = serverRowPositionsRef.current
+    if (!previousPositions) return
+    serverRowPositionsRef.current = null
+    if (settings?.reduceMotion || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    for (const [id, element] of serverRowRefs.current) {
+      const previousTop = previousPositions.get(id)
+      if (previousTop === undefined) continue
+      const delta = previousTop - element.getBoundingClientRect().top
+      if (Math.abs(delta) < 0.5) continue
+      element.getAnimations().forEach((animation) => animation.cancel())
+      element.animate([{ transform: `translateY(${delta}px)` }, { transform: 'translateY(0)' }], { duration: 180, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' })
+    }
+  }, [servers, settings?.reduceMotion])
+
+  async function commitServerOrder() {
+    const ordered = dragPreviewServersRef.current ?? servers
+    const previousOrder = dragOriginalServersRef.current ?? servers
     setDraggedServerId(null)
+    draggedServerIdRef.current = null
     try {
       await api.reorderServers(ordered.map((server) => server.id))
     } catch (error) {
       setServers(previousOrder)
       setToast(`服务器顺序保存失败：${String(error)}`)
+    } finally {
+      dragOriginalServersRef.current = null
+      dragPreviewServersRef.current = null
     }
+  }
+
+  function cancelServerOrderPreview() {
+    if (dragOriginalServersRef.current) setServers(dragOriginalServersRef.current)
+    dragOriginalServersRef.current = null
+    dragPreviewServersRef.current = null
+    draggedServerIdRef.current = null
+    setDraggedServerId(null)
   }
 
   return (
@@ -678,13 +718,14 @@ function App() {
             const snapshot = snapshots[server.id]
             return (
               <button
-                className={`server-row ${selectedServerId === server.id && mainView === 'server' ? 'is-selected' : ''}`}
+                className={`server-row ${selectedServerId === server.id && mainView === 'server' ? 'is-selected' : ''} ${draggedServerId === server.id ? 'is-dragging' : ''}`}
                 key={server.id}
+                ref={(element) => { if (element) serverRowRefs.current.set(server.id, element); else serverRowRefs.current.delete(server.id) }}
                 draggable={!search}
-                onDragStart={(event) => { setDraggedServerId(server.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', server.id) }}
-                onDragOver={(event) => { if (!search) { event.preventDefault(); event.dataTransfer.dropEffect = 'move' } }}
-                onDrop={(event) => { event.preventDefault(); void moveServerBefore(event.dataTransfer.getData('text/plain') || draggedServerId || '', server.id) }}
-                onDragEnd={() => setDraggedServerId(null)}
+                onDragStart={(event) => { dragOriginalServersRef.current = servers; dragPreviewServersRef.current = servers; draggedServerIdRef.current = server.id; serverDropCommittedRef.current = false; setDraggedServerId(server.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', server.id) }}
+                onDragOver={(event) => { if (!search) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; const bounds = event.currentTarget.getBoundingClientRect(); previewServerMove(draggedServerIdRef.current ?? '', server.id, event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after') } }}
+                onDrop={(event) => { event.preventDefault(); serverDropCommittedRef.current = true; void commitServerOrder() }}
+                onDragEnd={() => { if (serverDropCommittedRef.current) serverDropCommittedRef.current = false; else cancelServerOrderPreview() }}
                 onClick={() => { setSelectedServerId(server.id); setSelectedGpuUuid(null); setMainView('server') }}
               >
                 <GripVertical size={13} className="server-row__drag" aria-hidden="true" />
@@ -758,7 +799,7 @@ function App() {
         </div>
       </main>
 
-      {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultSamplingInterval={settings?.defaultSamplingIntervalSeconds} defaultHistoryRetentionDays={settings?.historyRetentionDays} defaultRemoteHistoryEnabled={localStorage.getItem('racktop.defaultRemoteHistoryEnabled') !== 'false'} showGuide={settings?.showAddServerGuide ?? true} onGuideDismiss={() => { if (settings) void api.saveSettings({ ...settings, showAddServerGuide: false }).then(setSettings) }} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
+      {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultSamplingInterval={settings?.defaultSamplingIntervalSeconds} defaultHistoryRetentionDays={settings?.historyRetentionDays} defaultRemoteHistoryEnabled showGuide={settings?.showAddServerGuide ?? true} onGuideDismiss={() => { if (settings) void api.saveSettings({ ...settings, showAddServerGuide: false }).then(setSettings) }} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
       {showSettings && settings && <SettingsSheet settings={settings} onClose={() => setShowSettings(false)} onSave={async (value) => { setSettings(await api.saveSettings(value)); setShowSettings(false); setToast('设置已保存') }} />}
       {showAbout && <AboutSheet onClose={() => setShowAbout(false)} onNotice={setToast} />}
       {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setImportDrafts(null); setToast(`已导入 ${selected.length} 台服务器`) }} />}
@@ -1162,10 +1203,12 @@ function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentR
       const freeCpuGb = displayedFreeMemoryGb(((snapshot?.system.memoryTotalBytes ?? 0) - (snapshot?.system.memoryUsedBytes ?? 0)) / 1024 ** 2)
       const occupiedProcessCount = countOtherUserGpuWorkloads(gpu, snapshot?.processes ?? [])
       return <article className={`panel idle-card ${available ? '' : 'idle-card--unavailable'}`} key={`${server.id}-${gpu.uuid}`}>
+        <button className="idle-card__target" onClick={() => available ? onQuickTerminal(server, gpu) : onReserveGpu(server, gpu)} aria-label={`${available ? '打开终端' : '预约'} ${server.name} GPU ${gpu.index}`} title={available ? '打开终端' : '预约此卡'} />
         <div className="idle-card__body">
-          <div className="idle-card__top"><span className={`idle-badge ${available ? '' : 'idle-badge--unavailable'}`}>{available ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}{available ? '可用' : '不可用'}</span><div className="idle-card__actions"><button className="icon-button" onClick={() => available ? onQuickTerminal(server, gpu) : onReserveGpu(server, gpu)} aria-label={`${available ? '打开终端' : '预约'} ${server.name} GPU ${gpu.index}`} title={available ? '打开终端' : '预约此卡'}>{available ? <TerminalSquare size={15} /> : <BellPlus size={15} />}</button><button className="icon-button" onClick={() => onSelect(server.id, gpu.uuid)} aria-label={`打开 ${server.name} GPU ${gpu.index} 详情`} title="查看详情"><ChevronRight size={16} /></button></div></div>
+          <div className="idle-card__top"><span className={`idle-badge ${available ? '' : 'idle-badge--unavailable'}`}>{available ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}{available ? '可用' : '不可用'}</span><span className="idle-card__primary-action" aria-hidden="true">{available ? <TerminalSquare size={15} /> : <BellPlus size={15} />}</span></div>
           <h3>{server.name} · GPU {gpu.index}</h3><p>{gpu.name} · {snapshot?.system.cpuModel || '未知 CPU'}</p><div className="idle-card__stats"><span><strong>{freeGpuGb.toFixed(1)} GB</strong><small>GPU MEM</small></span><span><strong>{freeCpuGb.toFixed(1)} GB</strong><small>CPU MEM</small></span><span><strong>{occupiedProcessCount > 0 ? `有 ${occupiedProcessCount} 个` : '无'}</strong><small>进程占用</small></span></div><div className="tag-row">{server.tags.map((item) => <span key={item}>{item}</span>)}</div>
         </div>
+        <button className="icon-button idle-card__detail" onClick={() => onSelect(server.id, gpu.uuid)} aria-label={`打开 ${server.name} GPU ${gpu.index} 详情`} title="查看详情"><ChevronRight size={16} /></button>
       </article>
     })}{items.length === 0 && <div className="inline-empty inline-empty--wide"><WifiOff size={28} /><strong>没有对应范围的 GPU</strong><p>当前没有符合所选 GPU 型号、CPU 型号或服务器标签的设备。</p></div>}</section>
   </div>
