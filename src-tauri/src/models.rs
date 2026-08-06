@@ -313,12 +313,15 @@ pub struct AppSettings {
     pub temperature_threshold_celsius: f64,
     pub current_user_accent: String,
     pub theme: String,
+    #[serde(default = "default_font_density")]
+    pub font_density: String,
     pub reduce_motion: bool,
     #[serde(default = "default_true")]
     pub show_add_server_guide: bool,
 }
 
 fn default_true() -> bool { true }
+fn default_font_density() -> String { "default".into() }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -335,6 +338,7 @@ impl Default for AppSettings {
             temperature_threshold_celsius: 85.0,
             current_user_accent: "#0a84ff".into(),
             theme: "system".into(),
+            font_density: default_font_density(),
             reduce_motion: false,
             show_add_server_guide: true,
         }

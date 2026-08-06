@@ -41,7 +41,7 @@ const demoServers: Server[] = [
   },
 ]
 
-const defaultSettings: AppSettings = {
+export const DEFAULT_APP_SETTINGS: AppSettings = {
   defaultSamplingIntervalSeconds: 2,
   backgroundSamplingIntervalSeconds: 15,
   processIntervalSeconds: 5,
@@ -54,6 +54,7 @@ const defaultSettings: AppSettings = {
   temperatureThresholdCelsius: 85,
   currentUserAccent: '#0a84ff',
   theme: 'system',
+  fontDensity: 'default',
   reduceMotion: false,
   showAddServerGuide: true,
 }
@@ -135,7 +136,7 @@ const a100Snapshot: Snapshot = {
 }
 
 let browserServers = [...demoServers]
-let browserSettings = { ...defaultSettings }
+let browserSettings = { ...DEFAULT_APP_SETTINGS }
 let browserReservations: IdleReservation[] = []
 const browserInteractionSummary: InteractionLogSummary = { sentBytes: 0, responseBytes: 0, storedBytes: 0, localStorageBytes: 36.3 * 1024 ** 2, failureCount: 0, servers: [] }
 

@@ -170,6 +170,7 @@ export interface AppSettings {
   temperatureThresholdCelsius: number
   currentUserAccent: string
   theme: 'system' | 'light' | 'dark'
+  fontDensity: 'default' | 'compact'
   reduceMotion: boolean
   showAddServerGuide: boolean
 }

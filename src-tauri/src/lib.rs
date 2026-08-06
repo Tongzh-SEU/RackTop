@@ -378,6 +378,9 @@ fn get_settings(database: State<'_, Database>) -> Result<AppSettings, String> {
 
 #[tauri::command]
 fn save_settings(database: State<'_, Database>, settings: AppSettings) -> Result<AppSettings, String> {
+    if settings.font_density != "default" && settings.font_density != "compact" {
+        return Err("字体密度必须为默认或紧凑".into());
+    }
     if settings.default_sampling_interval_seconds < 2 {
         return Err("前台采样间隔不能短于 2 秒".into());
     }

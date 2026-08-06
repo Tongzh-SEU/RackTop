@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { AlertTriangle, ArrowRight, Check, ChevronRight, Copy, Database, KeyRound, ShieldCheck, Terminal, X } from 'lucide-react'
 import type { ServerDraft } from '../types/models'
 import { sshSetupTargetValidationMessage, unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
+import { Modal } from './Modal'
 
 interface ServerFormProps {
   initial?: Partial<ServerDraft>
@@ -77,8 +78,8 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
 
   if (guideOpen) {
     return (
-      <div className="scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-        <section className="sheet ssh-onboarding-sheet" role="dialog" aria-modal="true" aria-labelledby="ssh-onboarding-title">
+      <Modal onClose={onClose} labelledBy="ssh-onboarding-title">
+        <section className="sheet ssh-onboarding-sheet">
           <header className="sheet__header">
             <div><p className="eyebrow">首次连接</p><h2 id="ssh-onboarding-title">推荐使用 SSH 密钥</h2></div>
             <button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button>
@@ -94,13 +95,13 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
           </div>
           <footer className="sheet__footer"><button type="button" className="button button--secondary" onClick={() => setGuideOpen(false)}>已有配置，直接填写</button><button type="button" className="button button--primary" onClick={() => setGuideOpen(false)}>开始配置<ArrowRight size={16} /></button></footer>
         </section>
-      </div>
+      </Modal>
     )
   }
 
   return (
-    <div className="scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="sheet server-form-sheet" role="dialog" aria-modal="true" aria-labelledby="server-form-title">
+    <Modal onClose={onClose} labelledBy="server-form-title">
+      <section className="sheet server-form-sheet">
         <header className="sheet__header">
           <div>
             <p className="eyebrow">SSH 服务器</p>
@@ -179,13 +180,13 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
             {error && <p className="form-error" role="alert">{error}</p>}
           </div>
           <footer className="sheet__footer">
-            <button type="button" className="button button--secondary" onClick={onClose}>取消</button>
+            <button type="button" className="button button--secondary" data-modal-close>取消</button>
             <button type="submit" className="button button--primary" disabled={saving || (draft.authMethod === 'password' && !passwordAcknowledged)}>
               <Check size={17} />{saving ? '保存中…' : '保存并连接'}
             </button>
           </footer>
         </form>
       </section>
-    </div>
+    </Modal>
   )
 }
