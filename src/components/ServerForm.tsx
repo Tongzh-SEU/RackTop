@@ -1,8 +1,8 @@
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, ArrowRight, Check, ChevronRight, Copy, Database, KeyRound, ShieldCheck, Terminal, X } from 'lucide-react'
 import type { ServerDraft } from '../types/models'
 import { sshSetupTargetValidationMessage, unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
-import { Modal } from './Modal'
+import { Modal, type ModalHandle } from './Modal'
 
 interface ServerFormProps {
   initial?: Partial<ServerDraft>
@@ -14,6 +14,7 @@ interface ServerFormProps {
 }
 
 export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGuide = true, onGuideDismiss, onClose, onSave }: ServerFormProps) {
+  const modalRef = useRef<ModalHandle>(null)
   const [draft, setDraft] = useState<ServerDraft>({
     id: initial?.id,
     name: initial?.name ?? '',
@@ -69,6 +70,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
     try {
       await onSave({ ...draft, name: draft.name || draft.sshAlias || draft.host })
       if (!initial?.id && dismissGuide) onGuideDismiss?.()
+      modalRef.current?.close()
     } catch (reason) {
       setError(String(reason))
     } finally {
@@ -78,7 +80,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
 
   if (guideOpen) {
     return (
-      <Modal onClose={onClose} labelledBy="ssh-onboarding-title">
+      <Modal ref={modalRef} onClose={onClose} labelledBy="ssh-onboarding-title">
         <section className="sheet ssh-onboarding-sheet">
           <header className="sheet__header">
             <div><p className="eyebrow">首次连接</p><h2 id="ssh-onboarding-title">推荐使用 SSH 密钥</h2></div>
@@ -100,7 +102,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
   }
 
   return (
-    <Modal onClose={onClose} labelledBy="server-form-title">
+    <Modal ref={modalRef} onClose={onClose} labelledBy="server-form-title">
       <section className="sheet server-form-sheet">
         <header className="sheet__header">
           <div>

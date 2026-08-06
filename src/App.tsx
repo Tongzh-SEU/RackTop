@@ -55,7 +55,7 @@ import { openExternalUrl } from './services/external'
 import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
 import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
-import { Modal } from './components/Modal'
+import { Modal, type ModalHandle } from './components/Modal'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
 import { ResourceTrend } from './components/ResourceTrend'
@@ -714,7 +714,6 @@ function App() {
     const next = [saved, ...idleReservationsRef.current.filter((item) => item.id !== saved.id)]
     idleReservationsRef.current = next
     setIdleReservations(next)
-    setReservationEditor(null)
     setToast(reservation.id === saved.id && idleReservations.some((item) => item.id === saved.id) ? '预约已更新' : '预约已开始监测')
   }
 
@@ -760,9 +759,7 @@ function App() {
     deletedServerIds.current.delete(saved.id)
     setServers((current) => previous ? current.map((item) => item.id === saved.id ? server : item) : [...current, server])
     setSelectedServerId(saved.id)
-    setShowServerForm(false)
-    setEditingServer(null)
-    await refreshServer(saved.id)
+    void refreshServer(saved.id)
   }
 
   async function removeServer(server: Server) {
@@ -795,7 +792,6 @@ function App() {
       delete nextRetryAt.current[server.id]
       for (const key of Object.keys(conditionSince.current)) if (key.includes(`:${server.id}:`)) delete conditionSince.current[key]
       for (const key of notifiedConditions.current) if (key.includes(`:${server.id}:`) || key === `offline:${server.id}`) notifiedConditions.current.delete(key)
-      setServerPendingDelete(null)
       setToast(deletion.message)
       if (deletion.cleanupPending) {
         void api.notify(`${server.name} 远端清理等待重连`, '本地记录已删除，远端数据会自动重试清理 24 小时；超过期限将通知手动清理方式。')
@@ -990,21 +986,24 @@ function App() {
         <div className="server-list">
           {visibleServers.map((server) => {
             const snapshot = snapshots[server.id]
+            const ownGpuProcessCount = snapshot?.processes.filter((process) => process.isCurrentUser).length ?? 0
+            const ownCpuProcessCount = snapshot?.cpuProcesses.filter((process) => process.isCurrentUser).length ?? 0
+            const hasOwnProcesses = ownGpuProcessCount + ownCpuProcessCount > 0
             return (
               <button
                 className={`server-row ${selectedServerId === server.id && mainView === 'server' ? 'is-selected' : ''} ${draggedServerId === server.id ? 'is-dragging' : ''}`}
                 key={server.id}
                 ref={(element) => { if (element) serverRowRefs.current.set(server.id, element); else serverRowRefs.current.delete(server.id) }}
                 onClick={() => { if (suppressServerClickRef.current) { suppressServerClickRef.current = false; return }; setSelectedServerId(server.id); setSelectedGpuUuid(null); setMainView('server') }}
-                aria-label={`${server.name}，${server.status === 'online' ? '在线' : server.status === 'connecting' ? '连接中' : server.status === 'warning' ? '需注意' : server.status === 'offline' ? '离线' : '未连接'}${snapshot && [...snapshot.processes, ...snapshot.cpuProcesses].some((process) => process.isCurrentUser) ? '，有你的任务' : ''}`}
+                aria-label={`${server.name}，${server.status === 'online' ? '在线' : server.status === 'connecting' ? '连接中' : server.status === 'warning' ? '需注意' : server.status === 'offline' ? '离线' : '未连接'}${hasOwnProcesses ? `，你的 GPU 进程 ${ownGpuProcessCount} 个，CPU 进程 ${ownCpuProcessCount} 个` : ''}`}
               >
                 <span className="server-row__drag" aria-hidden="true" onMouseDown={(event) => beginServerMouseDrag(event, server.id)}><GripVertical size={13} /></span>
-                <span className={`server-row__status server-row__status--${server.status}`} />
+                <span className={`server-row__status server-row__status--${server.status}`} aria-hidden="true" />
                 <span className="server-row__content">
                   <span className="server-row__title">{server.name}</span>
                   <span className="server-row__meta">{snapshot ? `${snapshot.gpus.length} GPU ${Math.round(aggregateGpuMemoryPercent(snapshot.gpus))}% · CPU ${Math.round(clampPercent(snapshot.system.memoryTotalBytes ? snapshot.system.memoryUsedBytes / snapshot.system.memoryTotalBytes * 100 : 0))}%` : server.host}</span>
                 </span>
-                {snapshot && [...snapshot.processes, ...snapshot.cpuProcesses].some((process) => process.isCurrentUser) && <span className="own-task-dot" title="有你的任务" aria-label="有你的任务"><UserRound size={11} /></span>}
+                {hasOwnProcesses && <span className="own-task-dot" title={`你的 GPU 进程 ${ownGpuProcessCount} 个，CPU 进程 ${ownCpuProcessCount} 个`} aria-hidden="true"><UserRound size={11} /></span>}
                 <ChevronRight size={14} className="server-row__chevron" />
               </button>
             )
@@ -1078,13 +1077,13 @@ function App() {
       </main>
 
       {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultRemoteHistoryEnabled showGuide={settings?.showAddServerGuide ?? true} onGuideDismiss={() => { if (settings) void api.saveSettings({ ...settings, showAddServerGuide: false }).then(setSettings) }} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
-      {showSettings && settings && <SettingsSheet settings={settings} onClose={() => setShowSettings(false)} onSave={async (value) => { setSettings(await api.saveSettings(value)); setShowSettings(false); setToast('设置已保存') }} />}
+      {showSettings && settings && <SettingsSheet settings={settings} onClose={() => setShowSettings(false)} onSave={async (value) => { setSettings(await api.saveSettings(value)); setToast('设置已保存') }} />}
       {showActivityLog && <ActivityLogSheet servers={servers} snapshots={snapshots} onClose={() => setShowActivityLog(false)} />}
       {showAbout && <AboutSheet onClose={() => setShowAbout(false)} onNotice={setToast} />}
-      {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setImportDrafts(null); setToast(`已导入 ${selected.length} 台服务器`) }} />}
-      {pendingHostKey && <HostKeyDialog info={pendingHostKey} onClose={() => setPendingHostKey(null)} onTrust={async () => { const serverId = pendingHostKey.serverId; await api.trustHostKey(pendingHostKey); setPendingHostKey(null); setToast('已信任服务器指纹'); await refreshServer(serverId) }} />}
+      {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setToast(`已导入 ${selected.length} 台服务器`) }} />}
+      {pendingHostKey && <HostKeyDialog info={pendingHostKey} onClose={() => setPendingHostKey(null)} onTrust={async () => { const serverId = pendingHostKey.serverId; await api.trustHostKey(pendingHostKey); setToast('已信任服务器指纹'); void refreshServer(serverId) }} />}
       {serverPendingDelete && <DeleteServerDialog server={serverPendingDelete} onClose={() => setServerPendingDelete(null)} onDelete={() => removeServer(serverPendingDelete)} />}
-      {processPendingTermination && <TerminateProcessDialog target={processPendingTermination} onClose={() => setProcessPendingTermination(null)} onTerminate={() => { const target = processPendingTermination; setProcessPendingTermination(null); setTerminatingProcess({ serverId: target.serverId, pid: target.process.pid }); void api.terminateProcess(target.serverId, target.process.pid).then(async (result) => { setToast(result); await refreshServer(target.serverId) }).catch((reason) => setToast(`结束 PID ${target.process.pid} 失败：${String(reason)}`)).finally(() => setTerminatingProcess(null)) }} />}
+      {processPendingTermination && <TerminateProcessDialog target={processPendingTermination} onClose={() => setProcessPendingTermination(null)} onTerminate={() => { const target = processPendingTermination; setTerminatingProcess({ serverId: target.serverId, pid: target.process.pid }); void api.terminateProcess(target.serverId, target.process.pid).then(async (result) => { setToast(result); await refreshServer(target.serverId) }).catch((reason) => setToast(`结束 PID ${target.process.pid} 失败：${String(reason)}`)).finally(() => setTerminatingProcess(null)) }} />}
       {reservationEditor && <IdleReservationSheet reservation={reservationEditor.reservation} filters={reservationEditor.filters} availableGpuKeys={reservationEditorItems.filter((item) => item.available).map(({ server, gpu }) => idleReservationGpuKey(server.id, gpu.uuid))} onClose={() => setReservationEditor(null)} onSave={saveIdleReservation} />}
       {showReservationCenter && <IdleReservationCenter reservations={idleReservations} warnings={gpuMemoryStallWarnings} onClose={() => setShowReservationCenter(false)} onEdit={(reservation) => { setShowReservationCenter(false); setReservationEditor({ filters: reservation.filters, reservation }) }} onStatusChange={setIdleReservationStatus} onClearPending={clearReservationPending} onDelete={removeIdleReservation} onIgnoreWarning={ignoreGpuMemoryStallWarning} />}
       {quickTerminal && <Modal onClose={() => setQuickTerminal(null)} label={`${quickTerminal.server.name}${quickTerminal.gpu ? ` GPU ${quickTerminal.gpu.index}` : ''} 终端`} className="quick-terminal-modal"><section className="sheet quick-terminal-sheet"><header className="sheet__header"><div><p className="eyebrow">{quickTerminal.gpu ? 'GPU 固定终端' : 'SSH 终端'}</p><h2>{quickTerminal.server.name}{quickTerminal.gpu ? ` · GPU ${quickTerminal.gpu.index}` : ''}</h2></div><button className="icon-button" onClick={() => setQuickTerminal(null)} aria-label="关闭"><X size={18} /></button></header><SshTerminal serverId={quickTerminal.server.id} serverName={quickTerminal.server.name} gpuIndex={quickTerminal.gpu?.index} onNotice={setToast} /></section></Modal>}
@@ -1154,7 +1153,7 @@ interface ServerDetailProps {
   gpuMemoryWarnings: GpuMemoryStallWarning[]
 }
 
-function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid, onTab, onSelectGpu, onRefresh, onDelete, onEdit, onRequestTerminate, terminatingPid, nvidiaWarningIgnored, onIgnoreNvidiaWarning, onRestoreNvidiaWarning, isRefreshing, animateCharts, gpuMemoryWarnings }: ServerDetailProps) {
+const ServerDetail = memo(function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid, onTab, onSelectGpu, onRefresh, onDelete, onEdit, onRequestTerminate, terminatingPid, nvidiaWarningIgnored, onIgnoreNvidiaWarning, onRestoreNvidiaWarning, isRefreshing, animateCharts, gpuMemoryWarnings }: ServerDetailProps) {
   const [showLogs, setShowLogs] = useState(false)
   return (
     <div className={`detail-page ${tab === 'terminal' ? 'detail-page--terminal' : ''}`}>
@@ -1178,7 +1177,17 @@ function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid
       </div>
     </div>
   )
-}
+}, (previous, next) => previous.server === next.server
+  && previous.snapshot === next.snapshot
+  && previous.points === next.points
+  && previous.settings === next.settings
+  && previous.tab === next.tab
+  && previous.selectedGpuUuid === next.selectedGpuUuid
+  && previous.terminatingPid === next.terminatingPid
+  && previous.nvidiaWarningIgnored === next.nvidiaWarningIgnored
+  && previous.isRefreshing === next.isRefreshing
+  && previous.animateCharts === next.animateCharts
+  && previous.gpuMemoryWarnings === next.gpuMemoryWarnings)
 
 function MetricCard({ icon, label, value, foot, tone, emphasisFoot = false }: { icon: React.ReactNode; label: string; value: string; foot: string; tone: string; emphasisFoot?: boolean }) {
   return <article className="metric-card"><span className={`metric-card__icon metric-card__icon--${tone}`}>{icon}</span><div><span className="metric-card__label">{label}</span><strong>{value}</strong><small className={emphasisFoot ? 'metric-card__own' : ''}>{foot}</small></div></article>
@@ -1593,6 +1602,7 @@ function formatReservationExpiry(expiresAt: number | null): string {
 }
 
 function IdleReservationSheet({ reservation, filters, availableGpuKeys, onClose, onSave }: { reservation?: IdleReservation; filters: IdleReservationFilters; availableGpuKeys: string[]; onClose: () => void; onSave: (reservation: IdleReservation) => Promise<void> }) {
+  const modalRef = useRef<ModalHandle>(null)
   const [name, setName] = useState(reservation?.name ?? defaultReservationName(filters))
   const [expiration, setExpiration] = useState<ReservationExpiration>(() => reservationExpirationPreset(reservation))
   const [expirationChanged, setExpirationChanged] = useState(false)
@@ -1600,7 +1610,7 @@ function IdleReservationSheet({ reservation, filters, availableGpuKeys, onClose,
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const isEditing = Boolean(reservation)
-  return <Modal onClose={onClose} labelledBy="reservation-title">
+  return <Modal ref={modalRef} onClose={onClose} labelledBy="reservation-title">
     <section className="sheet reservation-sheet">
       <header className="sheet__header"><div><p className="eyebrow">空闲算力预约</p><h2 id="reservation-title">{isEditing ? '编辑预约' : '预约当前条件'}</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
       <div className="reservation-body">
@@ -1632,6 +1642,7 @@ function IdleReservationSheet({ reservation, filters, availableGpuKeys, onClose,
             currentAvailableGpuKeys: reservation?.currentAvailableGpuKeys ?? [...availableGpuKeys].sort(),
             pendingConfirmationGpuKeys: reservation?.pendingConfirmationGpuKeys ?? [],
           })
+          modalRef.current?.close()
         } catch (reason) {
           setError(String(reason))
           setSaving(false)
@@ -1644,6 +1655,8 @@ function IdleReservationSheet({ reservation, filters, availableGpuKeys, onClose,
 const reservationStatusLabel: Record<IdleReservation['status'], string> = { active: '监测中', paused: '已暂停', completed: '已完成', expired: '已过期' }
 
 function IdleReservationCenter({ reservations, warnings, onClose, onEdit, onStatusChange, onClearPending, onDelete, onIgnoreWarning }: { reservations: IdleReservation[]; warnings: GpuMemoryStallWarning[]; onClose: () => void; onEdit: (reservation: IdleReservation) => void; onStatusChange: (reservation: IdleReservation, status: IdleReservation['status']) => Promise<void>; onClearPending: (reservation: IdleReservation) => Promise<void>; onDelete: (reservationId: string) => Promise<void>; onIgnoreWarning: (warning: GpuMemoryStallWarning) => void }) {
+  const modalRef = useRef<ModalHandle>(null)
+  const pendingEditRef = useRef<IdleReservation | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const activeCount = reservations.filter((reservation) => reservation.status === 'active').length
@@ -1652,7 +1665,10 @@ function IdleReservationCenter({ reservations, warnings, onClose, onEdit, onStat
     setError(null)
     try { await action() } catch (reason) { setError(String(reason)) } finally { setBusyId(null) }
   }
-  return <Modal onClose={onClose} labelledBy="reservation-center-title">
+  return <Modal ref={modalRef} onClose={(result) => {
+    if (result === 'edit' && pendingEditRef.current) onEdit(pendingEditRef.current)
+    else onClose()
+  }} labelledBy="reservation-center-title">
     <section className="sheet reservation-center-sheet">
       <header className="sheet__header"><div><p className="eyebrow">预约与通知</p><h2 id="reservation-center-title">{activeCount} 个预约正在监测{warnings.length ? ` · ${warnings.length} 个预警` : ''}</h2></div></header>
       <div className="reservation-list">
@@ -1665,7 +1681,7 @@ function IdleReservationCenter({ reservations, warnings, onClose, onEdit, onStat
           <span className={`reservation-row__status reservation-row__status--${reservation.status}`}><Bell size={15} /></span>
           <div className="reservation-row__content"><div><strong>{reservation.name}</strong><em>{reservationStatusLabel[reservation.status]}</em></div><p>{idleReservationSummary(reservation.filters)}</p><small>{formatReservationExpiry(reservation.expiresAt)} · {reservation.notifyMode === 'once' ? '通知一次' : '持续监测'}{reservation.currentAvailableGpuKeys?.length ? ` · 当前可用 ${reservation.currentAvailableGpuKeys.length}` : ''}{reservation.pendingConfirmationGpuKeys?.length ? ` · 待确认 ${reservation.pendingConfirmationGpuKeys.length}` : ''}</small></div>
           <div className="reservation-row__actions">
-            <button className="icon-button" title="编辑预约" aria-label={`编辑 ${reservation.name}`} disabled={busyId === reservation.id} onClick={() => onEdit(reservation)}><Pencil size={14} /></button>
+            <button className="icon-button" title="编辑预约" aria-label={`编辑 ${reservation.name}`} disabled={busyId === reservation.id} onClick={() => { pendingEditRef.current = reservation; modalRef.current?.close('edit') }}><Pencil size={14} /></button>
             {reservation.status === 'active' && <button className="icon-button" title="暂停预约" aria-label={`暂停 ${reservation.name}`} disabled={busyId === reservation.id} onClick={() => void run(reservation.id, () => onStatusChange(reservation, 'paused'))}><Pause size={14} /></button>}
             {(reservation.status === 'paused' || reservation.status === 'completed') && <button className="icon-button" title="恢复预约" aria-label={`恢复 ${reservation.name}`} disabled={busyId === reservation.id} onClick={() => void run(reservation.id, () => onStatusChange(reservation, 'active'))}><Play size={14} /></button>}
             {!!reservation.pendingConfirmationGpuKeys?.length && <button className="button button--secondary button--small" title="清除待确认" disabled={busyId === reservation.id} onClick={() => void run(reservation.id, () => onClearPending(reservation))}>已确认</button>}
@@ -1681,11 +1697,12 @@ function IdleReservationCenter({ reservations, warnings, onClose, onEdit, onStat
 }
 
 function SettingsSheet({ settings, onClose, onSave }: { settings: AppSettings; onClose: () => void; onSave: (settings: AppSettings) => Promise<void> }) {
+  const modalRef = useRef<ModalHandle>(null)
   const [value, setValue] = useState(settings)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const set = <K extends keyof AppSettings>(key: K, next: AppSettings[K]) => setValue((current) => ({ ...current, [key]: next }))
-  return <Modal onClose={onClose} labelledBy="settings-title">
+  return <Modal ref={modalRef} onClose={onClose} labelledBy="settings-title">
     <section className="sheet settings-sheet">
       <header className="sheet__header"><div><p className="eyebrow">偏好设置</p><h2 id="settings-title">外观、采样与历史</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
       <div className="settings-body">
@@ -1712,7 +1729,7 @@ function SettingsSheet({ settings, onClose, onSave }: { settings: AppSettings; o
         </SettingsGroup>
         {error && <p className="form-error" role="alert">{error}</p>}
       </div>
-      <footer className="sheet__footer"><button className="button button--secondary settings-reset" type="button" onClick={() => setValue({ ...DEFAULT_APP_SETTINGS })}><RotateCcw size={14} />恢复默认</button><button className="button button--secondary" data-modal-close>取消</button><button className="button button--primary" disabled={saving} onClick={async () => { setSaving(true); setError(null); try { await onSave(value) } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '保存中…' : '保存设置'}</button></footer>
+      <footer className="sheet__footer"><button className="button button--secondary settings-reset" type="button" onClick={() => setValue({ ...DEFAULT_APP_SETTINGS })}><RotateCcw size={14} />恢复默认</button><button className="button button--secondary" data-modal-close>取消</button><button className="button button--primary" disabled={saving} onClick={async () => { setSaving(true); setError(null); try { await onSave(value); modalRef.current?.close() } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '保存中…' : '保存设置'}</button></footer>
     </section>
   </Modal>
 }
@@ -1788,16 +1805,18 @@ function AboutSheet({ onClose, onNotice }: { onClose: () => void; onNotice: (mes
 }
 
 function SshImportSheet({ drafts, servers, onClose, onImport }: { drafts: ServerDraft[]; servers: Server[]; onClose: () => void; onImport: (drafts: ServerDraft[]) => Promise<void> }) {
+  const modalRef = useRef<ModalHandle>(null)
   const duplicates = useMemo(() => duplicateImportIndexes(drafts, servers), [drafts, servers])
   const availableCount = drafts.length - duplicates.size
   const [selected, setSelected] = useState(() => new Set(drafts.map((_, index) => index).filter((index) => !duplicates.has(index))))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const toggle = (index: number) => { if (!duplicates.has(index)) setSelected((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next }) }
-  return <Modal onClose={onClose} labelledBy="ssh-import-title"><section className="sheet import-sheet"><header className="sheet__header"><div><p className="eyebrow">OpenSSH Config</p><h2 id="ssh-import-title">选择要监控的服务器</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="import-list">{duplicates.size > 0 && <p className="import-notice" role="status"><AlertCircle size={15} /><span>已识别并跳过 {duplicates.size} 台重复服务器；相同用户名、地址与端口只保留一条连接。</span></p>}{drafts.map((draft, index) => { const duplicate = duplicates.has(index); return <label className={`import-row ${duplicate ? 'import-row--duplicate' : ''}`} key={`${draft.sshAlias}-${draft.host}-${index}`}><input type="checkbox" checked={selected.has(index)} disabled={duplicate} onChange={() => toggle(index)} /><span><strong>{draft.sshAlias || draft.name}</strong><small>{draft.username}@{draft.host}:{draft.port}{draft.proxyJump ? ` · via ${draft.proxyJump}` : ''}</small></span>{duplicate && <em>已存在</em>}</label>})}{error && <p className="form-error" role="alert">{error}</p>}</div><footer className="sheet__footer"><span className="sheet__selection-count">已选 {selected.size} / {availableCount} 台可导入</span><button className="button button--secondary" onClick={onClose}>取消</button><button className="button button--primary" disabled={saving || selected.size === 0} onClick={async () => { setSaving(true); setError(null); try { await onImport(drafts.filter((_, index) => selected.has(index))) } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '导入中…' : `导入 ${selected.size} 台`}</button></footer></section></Modal>
+  return <Modal ref={modalRef} onClose={onClose} labelledBy="ssh-import-title"><section className="sheet import-sheet"><header className="sheet__header"><div><p className="eyebrow">OpenSSH Config</p><h2 id="ssh-import-title">选择要监控的服务器</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="import-list">{duplicates.size > 0 && <p className="import-notice" role="status"><AlertCircle size={15} /><span>已识别并跳过 {duplicates.size} 台重复服务器；相同用户名、地址与端口只保留一条连接。</span></p>}{drafts.map((draft, index) => { const duplicate = duplicates.has(index); return <label className={`import-row ${duplicate ? 'import-row--duplicate' : ''}`} key={`${draft.sshAlias}-${draft.host}-${index}`}><input type="checkbox" checked={selected.has(index)} disabled={duplicate} onChange={() => toggle(index)} /><span><strong>{draft.sshAlias || draft.name}</strong><small>{draft.username}@{draft.host}:{draft.port}{draft.proxyJump ? ` · via ${draft.proxyJump}` : ''}</small></span>{duplicate && <em>已存在</em>}</label>})}{error && <p className="form-error" role="alert">{error}</p>}</div><footer className="sheet__footer"><span className="sheet__selection-count">已选 {selected.size} / {availableCount} 台可导入</span><button className="button button--secondary" onClick={onClose}>取消</button><button className="button button--primary" disabled={saving || selected.size === 0} onClick={async () => { setSaving(true); setError(null); try { await onImport(drafts.filter((_, index) => selected.has(index))); modalRef.current?.close() } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '导入中…' : `导入 ${selected.size} 台`}</button></footer></section></Modal>
 }
 
 function TerminateProcessDialog({ target, onClose, onTerminate }: { target: ProcessTerminationTarget & { serverId: string; serverName: string }; onClose: () => void; onTerminate: () => void }) {
+  const modalRef = useRef<ModalHandle>(null)
   const [stage, setStage] = useState<'review' | 'verify'>('review')
   const [confirmation, setConfirmation] = useState('')
   const [copied, setCopied] = useState(false)
@@ -1813,18 +1832,21 @@ function TerminateProcessDialog({ target, onClose, onTerminate }: { target: Proc
       setError('无法访问剪贴板，请手动输入 PID')
     }
   }
-  return <Modal onClose={onClose} labelledBy="terminate-process-title" role="alertdialog" closeOnScrim={false} initialFocusSelector=".sheet__footer .button--secondary"><section className="sheet terminate-process-sheet"><header className="sheet__header"><div><p className="eyebrow">结束远程进程</p><h2 id="terminate-process-title">{stage === 'review' ? `确认结束 PID ${pid}？` : '再次确认进程 PID'}</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="terminate-process-body"><span className="terminate-process-icon"><OctagonX size={24} /></span><div className="terminate-process-copy">{stage === 'review' ? <><p>将在 <strong>{target.serverName}</strong> 上结束当前 SSH 用户的 PID {pid}，并递归清理它下面的 CPU 子进程。同一终端中不相关的兄弟进程不会被结束。</p><dl><div><dt>进程</dt><dd>{target.kind.toUpperCase()} · PID {pid}</dd></div><div><dt>命令</dt><dd className="mono">{target.process.command}</dd></div></dl><small>先发送 TERM，3 秒后仍存在则发送 KILL。未保存的计算状态可能丢失。</small></> : <><p>点击下方 PID 可自动复制，然后将数字输入确认框。</p><button type="button" className={`copy-pid-button ${copied ? 'is-copied' : ''}`} onClick={() => void copyPid()} aria-label={`复制 PID ${pid}`}>{copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}<code>{copied ? `已复制 PID ${pid}` : `PID ${pid}`}</code></button><label>输入 PID 以确认<input autoFocus inputMode="numeric" value={confirmation} onChange={(event) => setConfirmation(event.target.value.replace(/\D/g, ''))} placeholder={expected} /></label></>}{error && <p className="form-error" role="alert">{error}</p>}</div></div><footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>取消</button>{stage === 'review' ? <button className="button button--danger" onClick={() => setStage('verify')}>继续确认</button> : <button className="button button--danger" disabled={confirmation !== expected} onClick={onTerminate}>结束进程</button>}</footer></section></Modal>
+  return <Modal ref={modalRef} onClose={onClose} labelledBy="terminate-process-title" role="alertdialog" closeOnScrim={false} initialFocusSelector=".sheet__footer .button--secondary"><section className="sheet terminate-process-sheet"><header className="sheet__header"><div><p className="eyebrow">结束远程进程</p><h2 id="terminate-process-title">{stage === 'review' ? `确认结束 PID ${pid}？` : '再次确认进程 PID'}</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="terminate-process-body"><span className="terminate-process-icon"><OctagonX size={24} /></span><div className="terminate-process-copy">{stage === 'review' ? <><p>将在 <strong>{target.serverName}</strong> 上结束当前 SSH 用户的 PID {pid}，并递归清理它下面的 CPU 子进程。同一终端中不相关的兄弟进程不会被结束。</p><dl><div><dt>进程</dt><dd>{target.kind.toUpperCase()} · PID {pid}</dd></div><div><dt>命令</dt><dd className="mono">{target.process.command}</dd></div></dl><small>先发送 TERM，3 秒后仍存在则发送 KILL。未保存的计算状态可能丢失。</small></> : <><p>点击下方 PID 可自动复制，然后将数字输入确认框。</p><button type="button" className={`copy-pid-button ${copied ? 'is-copied' : ''}`} onClick={() => void copyPid()} aria-label={`复制 PID ${pid}`}>{copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}<code>{copied ? `已复制 PID ${pid}` : `PID ${pid}`}</code></button><label>输入 PID 以确认<input autoFocus inputMode="numeric" value={confirmation} onChange={(event) => setConfirmation(event.target.value.replace(/\D/g, ''))} placeholder={expected} /></label></>}{error && <p className="form-error" role="alert">{error}</p>}</div></div><footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>取消</button>{stage === 'review' ? <button className="button button--danger" onClick={() => setStage('verify')}>继续确认</button> : <button className="button button--danger" disabled={confirmation !== expected} onClick={() => { onTerminate(); modalRef.current?.close() }}>结束进程</button>}</footer></section></Modal>
 }
 
 function DeleteServerDialog({ server, onClose, onDelete }: { server: Server; onClose: () => void; onDelete: () => Promise<void> }) {
+  const modalRef = useRef<ModalHandle>(null)
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  return <Modal onClose={onClose} labelledBy="delete-server-title" role="alertdialog" closeOnScrim={false} closeOnEscape={!deleting} initialFocusSelector=".sheet__footer .button--secondary"><section className="sheet delete-server-sheet"><header className="sheet__header"><div><p className="eyebrow">删除服务器</p><h2 id="delete-server-title">确认删除“{server.name}”？</h2></div><button className="icon-button" onClick={onClose} disabled={deleting} aria-label="关闭"><X size={18} /></button></header><div className="delete-server-body"><span className="delete-server-icon"><Trash2 size={24} /></span><div><p>将从 RackTop 移除 <strong>{server.username}@{server.host}:{server.port}</strong>，并删除本机历史、远端采集进程及 <code>~/.racktop</code> 中的 RackTop 数据。</p><small>服务器上的其他文件不会受到影响；远端暂时不可达时会在 24 小时内自动重试。</small></div>{error && <p className="form-error" role="alert">删除失败：{error}</p>}</div><footer className="sheet__footer"><button className="button button--secondary" onClick={onClose} disabled={deleting}>取消</button><button className="button button--danger" disabled={deleting} onClick={async () => { setDeleting(true); setError(null); try { await onDelete() } catch (reason) { setError(String(reason)); setDeleting(false) } }}>{deleting ? '删除中…' : '删除全部数据'}</button></footer></section></Modal>
+  return <Modal ref={modalRef} onClose={onClose} labelledBy="delete-server-title" role="alertdialog" closeOnScrim={false} closeOnEscape={!deleting} initialFocusSelector=".sheet__footer .button--secondary"><section className="sheet delete-server-sheet"><header className="sheet__header"><div><p className="eyebrow">删除服务器</p><h2 id="delete-server-title">确认删除“{server.name}”？</h2></div><button className="icon-button" onClick={onClose} disabled={deleting} aria-label="关闭"><X size={18} /></button></header><div className="delete-server-body"><span className="delete-server-icon"><Trash2 size={24} /></span><div><p>将从 RackTop 移除 <strong>{server.username}@{server.host}:{server.port}</strong>，并删除本机历史、远端采集进程及 <code>~/.racktop</code> 中的 RackTop 数据。</p><small>服务器上的其他文件不会受到影响；远端暂时不可达时会在 24 小时内自动重试。</small></div>{error && <p className="form-error" role="alert">删除失败：{error}</p>}</div><footer className="sheet__footer"><button className="button button--secondary" onClick={onClose} disabled={deleting}>取消</button><button className="button button--danger" disabled={deleting} onClick={async () => { setDeleting(true); setError(null); try { await onDelete(); modalRef.current?.close() } catch (reason) { setError(String(reason)); setDeleting(false) } }}>{deleting ? '删除中…' : '删除全部数据'}</button></footer></section></Modal>
 }
 
 function HostKeyDialog({ info, onClose, onTrust }: { info: HostKeyInfo; onClose: () => void; onTrust: () => Promise<void> }) {
+  const modalRef = useRef<ModalHandle>(null)
   const [saving, setSaving] = useState(false)
-  return <Modal onClose={onClose} labelledBy="host-key-title" role="alertdialog" closeOnScrim={false} initialFocusSelector=".sheet__footer .button--secondary"><section className={`sheet host-key-sheet ${info.changed ? 'host-key-sheet--changed' : ''}`}><header className="sheet__header"><div><p className="eyebrow">{info.changed ? 'SSH 安全警告' : '首次 SSH 连接'}</p><h2 id="host-key-title">{info.changed ? '服务器 Host Key 已变化' : '核对服务器指纹'}</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="host-key-body"><span className="host-key-icon"><ShieldAlert size={26} /></span><p>{info.changed ? <>RackTop 检测到 <strong>{info.host}</strong> 的密钥与本机记录不一致。这可能是服务器重装，也可能是中间人攻击。</> : <>这是 RackTop 第一次连接 <strong>{info.host}</strong>。请通过可信渠道与服务器管理员核对以下指纹。</>}</p><div className="fingerprint"><small>{info.algorithm}</small><code>{info.fingerprint}</code></div><p className="host-key-note">{info.changed ? '连接已被阻止。请先通过独立可信渠道核实新指纹，再使用系统 ssh-keygen 手动移除旧记录；RackTop 不会覆盖现有密钥。' : '只有在确认指纹一致后才继续。RackTop 不会自动接受未知 Host Key。'}</p></div><footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>{info.changed ? '保持阻止' : '取消连接'}</button>{!info.changed && <button className="button button--primary" disabled={saving} onClick={async () => { setSaving(true); try { await onTrust() } finally { setSaving(false) } }}>{saving ? '保存中…' : '指纹一致，信任并连接'}</button>}</footer></section></Modal>
+  const [error, setError] = useState<string | null>(null)
+  return <Modal ref={modalRef} onClose={onClose} labelledBy="host-key-title" role="alertdialog" closeOnScrim={false} initialFocusSelector=".sheet__footer .button--secondary"><section className={`sheet host-key-sheet ${info.changed ? 'host-key-sheet--changed' : ''}`}><header className="sheet__header"><div><p className="eyebrow">{info.changed ? 'SSH 安全警告' : '首次 SSH 连接'}</p><h2 id="host-key-title">{info.changed ? '服务器 Host Key 已变化' : '核对服务器指纹'}</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="host-key-body"><span className="host-key-icon"><ShieldAlert size={26} /></span><p>{info.changed ? <>RackTop 检测到 <strong>{info.host}</strong> 的密钥与本机记录不一致。这可能是服务器重装，也可能是中间人攻击。</> : <>这是 RackTop 第一次连接 <strong>{info.host}</strong>。请通过可信渠道与服务器管理员核对以下指纹。</>}</p><div className="fingerprint"><small>{info.algorithm}</small><code>{info.fingerprint}</code></div><p className="host-key-note">{info.changed ? '连接已被阻止。请先通过独立可信渠道核实新指纹，再使用系统 ssh-keygen 手动移除旧记录；RackTop 不会覆盖现有密钥。' : '只有在确认指纹一致后才继续。RackTop 不会自动接受未知 Host Key。'}</p>{error && <p className="form-error" role="alert">保存失败：{error}</p>}</div><footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>{info.changed ? '保持阻止' : '取消连接'}</button>{!info.changed && <button className="button button--primary" disabled={saving} onClick={async () => { setSaving(true); setError(null); try { await onTrust(); modalRef.current?.close() } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '保存中…' : '指纹一致，信任并连接'}</button>}</footer></section></Modal>
 }
 
 export default App

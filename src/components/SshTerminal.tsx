@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
@@ -6,6 +6,7 @@ import '@xterm/xterm/css/xterm.css'
 import { AlertCircle, RefreshCw, SquareTerminal, X } from 'lucide-react'
 import { api } from '../services/api'
 import { analyzeCudaCommand } from '../utils/cudaCommand'
+import { Modal } from './Modal'
 
 interface TerminalEvent { sessionId: string; data?: string }
 
@@ -18,6 +19,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, onNotice }: { serv
   const [error, setError] = useState<string | null>(null)
   const [restart, setRestart] = useState(0)
   const [confirmation, setConfirmation] = useState<string | null>(null)
+  const confirmationTitleId = useId()
 
   useEffect(() => {
     if (!api.isDesktop || !containerRef.current) return
@@ -100,6 +102,6 @@ export function SshTerminal({ serverId, serverName, gpuIndex, onNotice }: { serv
     <header><span className={`terminal-status terminal-status--${status}`} /><strong>{gpuIndex === undefined ? serverName : `${serverName} · GPU ${gpuIndex}`}</strong><small>{status === 'connecting' ? '正在连接' : status === 'connected' ? '已连接' : status === 'error' ? '连接失败' : '已断开'}</small><button className="icon-button" aria-label="重新连接终端" title="重新连接" onClick={() => { setError(null); setStatus('connecting'); setRestart((value) => value + 1) }}><RefreshCw size={14} /></button></header>
     {error && <div className="terminal-error" role="alert"><AlertCircle size={15} /><span>{error}</span><button onClick={() => setError(null)} aria-label="关闭错误"><X size={13} /></button></div>}
     <div className="terminal-canvas" ref={containerRef} />
-    {confirmation && <div className="terminal-confirm" role="alertdialog" aria-modal="true"><div><strong>确认 GPU 绑定</strong><p>{confirmation}。命令仍停留在远端输入行，尚未执行。</p></div><button className="button button--secondary button--small" onClick={() => confirmPending(false)}>暂不执行</button><button className="button button--primary button--small" onClick={() => confirmPending(true)}>仍然执行</button></div>}
+    {confirmation && <Modal onClose={(result) => confirmPending(result === 'confirm')} labelledBy={confirmationTitleId} role="alertdialog" closeOnScrim={false} initialFocusSelector="[data-modal-result='cancel']"><section className="sheet terminal-confirm-sheet"><header className="sheet__header"><div><p className="eyebrow">终端命令检查</p><h2 id={confirmationTitleId}>确认 GPU 绑定</h2></div></header><div className="terminal-confirm-body"><AlertCircle size={20} /><p>{confirmation}。命令仍停留在远端输入行，尚未执行。</p></div><footer className="sheet__footer"><button className="button button--secondary" data-modal-close data-modal-result="cancel">暂不执行</button><button className="button button--primary" data-modal-close data-modal-result="confirm">仍然执行</button></footer></section></Modal>}
   </section>
 }

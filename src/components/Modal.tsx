@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 type ModalProps = {
   children: ReactNode
-  onClose: () => void
+  onClose: (result?: string) => void
   labelledBy?: string
   label?: string
   role?: 'dialog' | 'alertdialog'
@@ -13,23 +13,41 @@ type ModalProps = {
   initialFocusSelector?: string
 }
 
-const FOCUSABLE = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+export type ModalHandle = { close: (result?: string) => void }
 
-export function Modal({ children, onClose, labelledBy, label, role = 'dialog', className = '', closeOnScrim = true, closeOnEscape = true, initialFocusSelector }: ModalProps) {
+const FOCUSABLE = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+const modalStack: symbol[] = []
+
+type BackgroundState = { element: HTMLElement; inert: boolean; ariaHidden: string | null }
+
+export const Modal = forwardRef<ModalHandle, ModalProps>(function Modal({ children, onClose, labelledBy, label, role = 'dialog', className = '', closeOnScrim = true, closeOnEscape = true, initialFocusSelector }, ref) {
   const [closing, setClosing] = useState(false)
   const layerRef = useRef<HTMLDivElement>(null)
   const closeTimerRef = useRef<number | null>(null)
   const closingRef = useRef(false)
   const restoreFocusRef = useRef<HTMLElement | null>(null)
+  const modalIdRef = useRef(Symbol('modal'))
+  const scrimRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
+    const modalId = modalIdRef.current
+    modalStack.push(modalId)
     restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const root = document.getElementById('root')
-    const previousInert = root?.inert ?? false
-    const previousAriaHidden: string | null = root ? root.getAttribute('aria-hidden') : null
-    if (root) {
-      root.inert = true
-      root.setAttribute('aria-hidden', 'true')
+    const workspace = scrimRef.current?.closest<HTMLElement>('.workspace')
+    const ownScrim = scrimRef.current
+    const backgroundElements = new Set<HTMLElement>()
+    const sidebar = root?.querySelector<HTMLElement>('.sidebar')
+    if (sidebar) backgroundElements.add(sidebar)
+    if (workspace) {
+      for (const child of workspace.children) {
+        if (child !== ownScrim && child instanceof HTMLElement) backgroundElements.add(child)
+      }
+    } else if (root) backgroundElements.add(root)
+    const backgroundStates: BackgroundState[] = [...backgroundElements].map((element) => ({ element, inert: element.inert, ariaHidden: element.getAttribute('aria-hidden') }))
+    for (const { element } of backgroundStates) {
+      element.inert = true
+      element.setAttribute('aria-hidden', 'true')
     }
 
     const focusInitial = () => {
@@ -40,9 +58,11 @@ export function Modal({ children, onClose, labelledBy, label, role = 'dialog', c
     }
     const frame = window.requestAnimationFrame(focusInitial)
     const onKeyDown = (event: KeyboardEvent) => {
+      if (modalStack.at(-1) !== modalId) return
       if (event.key === 'Escape' && closeOnEscape && !closingRef.current) {
         event.preventDefault()
-        requestClose()
+        closingRef.current = true
+        onClose()
         return
       }
       if (event.key !== 'Tab') return
@@ -71,21 +91,25 @@ export function Modal({ children, onClose, labelledBy, label, role = 'dialog', c
       window.cancelAnimationFrame(frame)
       document.removeEventListener('keydown', onKeyDown)
       if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
-      if (root) {
-        root.inert = previousInert
-        if (previousAriaHidden === null) root.removeAttribute('aria-hidden')
-        else root.setAttribute('aria-hidden', previousAriaHidden)
+      const stackIndex = modalStack.lastIndexOf(modalId)
+      if (stackIndex >= 0) modalStack.splice(stackIndex, 1)
+      for (const { element, inert, ariaHidden } of backgroundStates) {
+        element.inert = inert
+        if (ariaHidden === null) element.removeAttribute('aria-hidden')
+        else element.setAttribute('aria-hidden', ariaHidden)
       }
       restoreFocusRef.current?.focus({ preventScroll: true })
     }
   }, [closeOnEscape, initialFocusSelector])
 
-  function requestClose() {
+  function requestClose(result?: string) {
     if (closingRef.current) return
     closingRef.current = true
     setClosing(true)
-    closeTimerRef.current = window.setTimeout(onClose, 150)
+    closeTimerRef.current = window.setTimeout(() => onClose(result), 150)
   }
+
+  useImperativeHandle(ref, () => ({ close: requestClose }))
 
   function handleClickCapture(event: ReactMouseEvent<HTMLDivElement>) {
     const target = event.target instanceof Element ? event.target.closest<HTMLElement>('button, [data-modal-close]') : null
@@ -94,11 +118,11 @@ export function Modal({ children, onClose, labelledBy, label, role = 'dialog', c
     if (!closesModal) return
     event.preventDefault()
     event.stopPropagation()
-    requestClose()
+    requestClose(target?.dataset.modalResult)
   }
 
   const content = (
-    <div className={`scrim modal-scrim ${closing ? 'is-closing' : ''}`} onPointerDown={(event) => { if (closeOnScrim && event.target === event.currentTarget) requestClose() }}>
+    <div ref={scrimRef} className={`scrim modal-scrim ${closing ? 'is-closing' : ''}`} data-modal-layer onPointerDown={(event) => { if (closeOnScrim && event.target === event.currentTarget) requestClose() }}>
       <div className="modal-positioner">
         <div ref={layerRef} className={`modal-focus-scope ${className}`} role={role} aria-modal="true" aria-labelledby={labelledBy} aria-label={label} tabIndex={-1} onClickCapture={handleClickCapture}>
           {children}
@@ -106,5 +130,5 @@ export function Modal({ children, onClose, labelledBy, label, role = 'dialog', c
       </div>
     </div>
   )
-  return typeof document === 'undefined' ? content : createPortal(content, document.body)
-}
+  return typeof document === 'undefined' ? content : createPortal(content, document.querySelector('.workspace') ?? document.body)
+})
