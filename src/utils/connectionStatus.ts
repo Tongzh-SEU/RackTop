@@ -9,3 +9,7 @@ export function serverStatusAfterFailure(failureCount: number): ServerStatus {
 export function shouldShowConnectingOnAttempt(quiet: boolean, hasSnapshot: boolean, failureCount: number) {
   return !quiet || !hasSnapshot || (failureCount > 0 && failureCount < OFFLINE_FAILURE_THRESHOLD)
 }
+
+export function canDisplayServerDetails(status: ServerStatus) {
+  return status === 'online' || status === 'warning'
+}

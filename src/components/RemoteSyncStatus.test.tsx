@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { RemoteSyncStatus, REMOTE_SYNC_STALE_SECONDS, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './RemoteSyncStatus'
+import { RemoteSyncStatus, REMOTE_SYNC_STALE_SECONDS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './RemoteSyncStatus'
 
 const baseStatus: RemoteSyncStatusState = { phase: 'syncing', completed: 2, total: 4, importedCount: 0, failedServerIds: [] }
 
@@ -18,5 +18,13 @@ describe('RemoteSyncStatus', () => {
     const failure = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'error', failedServerIds: ['a', 'b'] }} onOpenFailure={() => {}} />)
     expect(failure).toContain('<button')
     expect(failure).toContain('2 台同步失败 · 5 分钟后重试')
+  })
+
+  it('retries a failed remote sync once when that server recovers', () => {
+    const errorStatus: RemoteSyncStatusState = { ...baseStatus, phase: 'error', failedServerIds: ['server-a'] }
+    expect(shouldRetryRemoteSyncAfterRecovery(errorStatus, 'server-a', false)).toBe(true)
+    expect(shouldRetryRemoteSyncAfterRecovery(errorStatus, 'server-a', true)).toBe(false)
+    expect(shouldRetryRemoteSyncAfterRecovery(errorStatus, 'server-b', false)).toBe(false)
+    expect(shouldRetryRemoteSyncAfterRecovery({ ...errorStatus, phase: 'success' }, 'server-a', false)).toBe(false)
   })
 })
