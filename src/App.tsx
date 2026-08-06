@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react'
 import { flushSync } from 'react-dom'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -282,6 +282,7 @@ function App() {
 
   const selectedServer = servers.find((server) => server.id === selectedServerId)
   const selectedSnapshot = selectedServerId ? snapshots[selectedServerId] : undefined
+  const selectedGpuMemoryWarnings = useMemo(() => selectedServerId ? gpuMemoryStallWarnings.filter((warning) => warning.serverId === selectedServerId) : [], [gpuMemoryStallWarnings, selectedServerId])
   const remoteHistoryServerKey = servers.filter((server) => server.remoteHistoryEnabled).map((server) => server.id).sort().join('\n')
 
   useEffect(() => { remoteHistoryServersRef.current = servers }, [servers])
@@ -1068,7 +1069,7 @@ function App() {
               onRestoreNvidiaWarning={() => setNvidiaWarningIgnored(selectedServer.id, false)}
               isRefreshing={manualRefreshingServers.has(selectedServer.id)}
               animateCharts={manualRefreshingAll || manualRefreshingServers.has(selectedServer.id)}
-              gpuMemoryWarnings={gpuMemoryStallWarnings.filter((warning) => warning.serverId === selectedServer.id)}
+              gpuMemoryWarnings={selectedGpuMemoryWarnings}
             />
           ) : (
             <LoadingServer server={selectedServer} isRefreshing={selectedServer ? busy.has(selectedServer.id) : false} onRefresh={() => selectedServer && void refreshServer(selectedServer.id)} />
@@ -1187,7 +1188,7 @@ function PanelHeader({ icon, title, subtitle, action }: { icon?: React.ReactNode
   return <header className="panel__header"><div>{icon && <span>{icon}</span>}<div><h3>{title}</h3>{subtitle && <p>{subtitle}</p>}</div></div>{action}</header>
 }
 
-function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCpu, onRequestTerminate, terminatingPid, animateCharts, gpuMemoryWarnings }: { snapshot: Snapshot; points: HistoryPoint[]; idleThreshold: number; onSelectGpu: (gpuUuid: string) => void; onOpenCpu: () => void; onRequestTerminate: (target: ProcessTerminationTarget) => void; terminatingPid?: number; animateCharts: boolean; gpuMemoryWarnings: GpuMemoryStallWarning[] }) {
+const ServerOverview = memo(function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCpu, onRequestTerminate, terminatingPid, animateCharts, gpuMemoryWarnings }: { snapshot: Snapshot; points: HistoryPoint[]; idleThreshold: number; onSelectGpu: (gpuUuid: string) => void; onOpenCpu: () => void; onRequestTerminate: (target: ProcessTerminationTarget) => void; terminatingPid?: number; animateCharts: boolean; gpuMemoryWarnings: GpuMemoryStallWarning[] }) {
   const readableGpus = snapshot.gpus.filter(isGpuAvailable)
   const totalMemoryMb = readableGpus.reduce((sum, gpu) => sum + Math.max(0, gpu.memoryTotalMb), 0)
   const usedMemoryMb = readableGpus.reduce((sum, gpu) => sum + Math.max(0, gpu.memoryUsedMb), 0)
@@ -1221,7 +1222,12 @@ function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCp
   }
 
   return <div className="overview-stack">{modules.metrics}{modules.resources}{modules.processes}{modules.trends}</div>
-}
+}, (previous, next) => previous.snapshot === next.snapshot
+  && previous.points === next.points
+  && previous.idleThreshold === next.idleThreshold
+  && previous.terminatingPid === next.terminatingPid
+  && previous.animateCharts === next.animateCharts
+  && previous.gpuMemoryWarnings === next.gpuMemoryWarnings)
 
 function GpuCard({ gpu, processes, warning, onOpen }: { gpu: Snapshot['gpus'][number]; processes: Snapshot['processes']; warning?: GpuMemoryStallWarning; onOpen: () => void }) {
   const [showWarning, setShowWarning] = useState(false)
@@ -1301,6 +1307,7 @@ const HistoryView = memo(function HistoryView({ server, snapshot }: { server: Se
   const [usageUpdating, setUsageUpdating] = useState(false)
   const usageServerRef = useRef(server.id)
   const gpuUuidKey = snapshot.gpus.map((gpu) => gpu.uuid).join('\n')
+  const snapshotDayKey = Math.floor(snapshot.timestamp / 86_400)
 
   useEffect(() => {
     let cancelled = false
@@ -1316,7 +1323,7 @@ const HistoryView = memo(function HistoryView({ server, snapshot }: { server: Se
     void loadHeatmap()
     const interval = window.setInterval(() => { void loadHeatmap() }, 60_000)
     return () => { cancelled = true; window.clearInterval(interval) }
-  }, [gpuUuidKey, server.historyRetentionDays, server.id])
+  }, [gpuUuidKey, server.historyRetentionDays, server.id, snapshotDayKey])
 
   useEffect(() => {
     let cancelled = false
@@ -1349,7 +1356,8 @@ const HistoryView = memo(function HistoryView({ server, snapshot }: { server: Se
   && previous.server.historyRetentionDays === next.server.historyRetentionDays
   && previous.server.remoteHistoryEnabled === next.server.remoteHistoryEnabled
   && previous.snapshot.gpus.map((gpu) => `${gpu.uuid}:${gpu.memoryTotalMb}`).join('|') === next.snapshot.gpus.map((gpu) => `${gpu.uuid}:${gpu.memoryTotalMb}`).join('|')
-  && JSON.stringify(previous.snapshot.disks ?? []) === JSON.stringify(next.snapshot.disks ?? []))
+  && JSON.stringify(previous.snapshot.disks ?? []) === JSON.stringify(next.snapshot.disks ?? [])
+  && Math.floor(previous.snapshot.timestamp / 86_400) === Math.floor(next.snapshot.timestamp / 86_400))
 
 function LogsView({ server, snapshot }: { server: Server; snapshot: Snapshot }) {
   const items = [{ level: 'success', time: snapshot.timestamp, message: `采集成功：${snapshot.gpus.length} GPU，${snapshot.processes.length} 个 GPU 进程，${snapshot.cpuProcesses.length} 个 CPU 进程` }, ...(server.lastError ? [{ level: 'error', time: snapshot.timestamp, message: server.lastError }] : [])]
@@ -1689,24 +1697,29 @@ function SettingsSheet({ settings, onClose, onSave }: { settings: AppSettings; o
           <label className="switch-row"><span><strong>显示添加服务器引导</strong><small>重新开启地址、认证、Host Key 与远端历史提示</small></span><input type="checkbox" checked={value.showAddServerGuide} onChange={(event) => set('showAddServerGuide', event.target.checked)} /></label>
         </SettingsGroup>
         <SettingsGroup icon={<RefreshCw />} title="采样">
-          <label>后台最低采样间隔 <span>{value.backgroundSamplingIntervalSeconds} 秒</span><input type="range" min="5" max="120" value={value.backgroundSamplingIntervalSeconds} onChange={(event) => set('backgroundSamplingIntervalSeconds', Number(event.target.value))} /></label>
+          <label>后台最低采样间隔 <span>{value.backgroundSamplingIntervalSeconds} 秒</span><SettingsRange min={5} max={120} value={value.backgroundSamplingIntervalSeconds} onChange={(next) => set('backgroundSamplingIntervalSeconds', next)} /></label>
           <label>进程刷新 <select value={value.processIntervalSeconds} onChange={(event) => set('processIntervalSeconds', Number(event.target.value))}><option value="2">2 秒</option><option value="5">5 秒</option><option value="10">10 秒</option><option value="30">30 秒</option></select></label>
-          <label>实时趋势窗口 <span>{value.realtimeWindowMinutes} 分钟</span><input type="range" min="10" max="360" step="10" value={value.realtimeWindowMinutes} onChange={(event) => set('realtimeWindowMinutes', Number(event.target.value))} /></label>
+          <label>实时趋势窗口 <span>{value.realtimeWindowMinutes} 分钟</span><SettingsRange min={10} max={360} step={10} value={value.realtimeWindowMinutes} onChange={(next) => set('realtimeWindowMinutes', next)} /></label>
         </SettingsGroup>
         <SettingsGroup icon={<Database />} title="历史">
           <label className="switch-row"><span><strong>保存历史数据</strong><small>使用本地 SQLite，固定保留最近 90 天</small></span><input type="checkbox" checked={value.historyEnabled} onChange={(event) => set('historyEnabled', event.target.checked)} /></label>
         </SettingsGroup>
         <SettingsGroup icon={<CircleGauge />} title="空闲与告警">
-          <label>空闲 GPU 阈值 <span>{value.idleGpuThreshold}%</span><input type="range" min="0" max="30" value={value.idleGpuThreshold} onChange={(event) => set('idleGpuThreshold', Number(event.target.value))} /></label>
+          <label>空闲 GPU 阈值 <span>{value.idleGpuThreshold}%</span><SettingsRange min={0} max={30} value={value.idleGpuThreshold} onChange={(next) => set('idleGpuThreshold', next)} /></label>
           <label>空闲通知持续时间 <select value={value.idleDurationMinutes} onChange={(event) => set('idleDurationMinutes', Number(event.target.value))}><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option></select></label>
-          <label>显存释放阈值 <span>{(value.idleMemoryThresholdMb / 1024).toFixed(0)} GB</span><input type="range" min="0" max="163840" step="4096" value={value.idleMemoryThresholdMb} onChange={(event) => set('idleMemoryThresholdMb', Number(event.target.value))} /></label>
-          <label>温度告警 <span>{value.temperatureThresholdCelsius}°C</span><input type="range" min="60" max="95" value={value.temperatureThresholdCelsius} onChange={(event) => set('temperatureThresholdCelsius', Number(event.target.value))} /></label>
+          <label>显存释放阈值 <span>{(value.idleMemoryThresholdMb / 1024).toFixed(0)} GB</span><SettingsRange min={0} max={163840} step={4096} value={value.idleMemoryThresholdMb} onChange={(next) => set('idleMemoryThresholdMb', next)} /></label>
+          <label>温度告警 <span>{value.temperatureThresholdCelsius}°C</span><SettingsRange min={60} max={95} value={value.temperatureThresholdCelsius} onChange={(next) => set('temperatureThresholdCelsius', next)} /></label>
         </SettingsGroup>
         {error && <p className="form-error" role="alert">{error}</p>}
       </div>
       <footer className="sheet__footer"><button className="button button--secondary settings-reset" type="button" onClick={() => setValue({ ...DEFAULT_APP_SETTINGS })}><RotateCcw size={14} />恢复默认</button><button className="button button--secondary" data-modal-close>取消</button><button className="button button--primary" disabled={saving} onClick={async () => { setSaving(true); setError(null); try { await onSave(value) } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '保存中…' : '保存设置'}</button></footer>
     </section>
   </Modal>
+}
+
+function SettingsRange({ min, max, step = 1, value, onChange }: { min: number; max: number; step?: number; value: number; onChange: (value: number) => void }) {
+  const progress = max > min ? ((value - min) / (max - min)) * 100 : 0
+  return <input type="range" min={min} max={max} step={step} value={value} style={{ '--range-progress': `${Math.max(0, Math.min(100, progress))}%` } as CSSProperties} onChange={(event) => onChange(Number(event.target.value))} />
 }
 
 function ActivityLogSheet({ servers, snapshots, onClose }: { servers: Server[]; snapshots: Record<string, Snapshot>; onClose: () => void }) {

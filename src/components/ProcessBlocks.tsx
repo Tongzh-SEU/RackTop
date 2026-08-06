@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, memo, useEffect, useState } from 'react'
 import { CheckCircle2, ChevronUp, CircleX, Cpu, LoaderCircle, TerminalSquare } from 'lucide-react'
 import type { CpuProcessMetric, ProcessMetric, Snapshot } from '../types/models'
 import { formatGpuProcessMemory } from '../utils/gpu'
@@ -69,7 +69,7 @@ function CpuProcessRows({ processes, snapshot, selection, terminatingPid, onSele
   })}</tbody>
 }
 
-export function ProcessBlocks({ snapshot, compact = false, hideEmptyBlocks = false, terminatingPid, onRequestTerminate }: { snapshot: Snapshot; compact?: boolean; hideEmptyBlocks?: boolean; terminatingPid?: number; onRequestTerminate?: (target: ProcessTerminationTarget) => void }) {
+export const ProcessBlocks = memo(function ProcessBlocks({ snapshot, compact = false, hideEmptyBlocks = false, terminatingPid, onRequestTerminate }: { snapshot: Snapshot; compact?: boolean; hideEmptyBlocks?: boolean; terminatingPid?: number; onRequestTerminate?: (target: ProcessTerminationTarget) => void }) {
   const [selection, setSelection] = useState<ProcessSelection>(null)
   useEffect(() => {
     if (selection) {
@@ -86,4 +86,7 @@ export function ProcessBlocks({ snapshot, compact = false, hideEmptyBlocks = fal
     {(!hideEmptyBlocks || snapshot.processes.length > 0) && <section className="panel process-panel"><ProcessHeader kind="gpu" count={snapshot.processes.length} terminatingPid={terminatingGpuPid} />{gpuProcesses.length ? <div className="table-scroll"><table className="process-table process-table--gpu"><ProcessColGroup kind="gpu" compact={compact} /><thead><tr><th aria-label="操作" /><th>GPU</th><th>PID</th><th>用户</th><th>命令</th><th>显存</th>{!compact && <><th>CPU</th><th>运行时间</th></>}</tr></thead><GpuProcessRows processes={gpuProcesses} snapshot={snapshot} selection={selection} terminatingPid={terminatingPid} onSelect={setSelection} onRequestTerminate={onRequestTerminate} compact={compact} /></table></div> : <EmptyProcessBlock kind="gpu" />}{compact && snapshot.processes.length > gpuProcesses.length && <p className="process-block__more">另有 {snapshot.processes.length - gpuProcesses.length} 个 GPU 进程，请在“进程”页查看</p>}</section>}
     {(!hideEmptyBlocks || snapshot.cpuProcesses.length > 0) && <section className="panel process-panel"><ProcessHeader kind="cpu" count={snapshot.cpuProcesses.length} terminatingPid={terminatingCpuPid} />{cpuProcesses.length ? <div className="table-scroll"><table className="process-table process-table--cpu"><ProcessColGroup kind="cpu" compact={compact} /><thead><tr><th aria-label="操作" /><th>PID</th><th>用户</th><th>命令</th><th>CPU</th>{!compact && <><th>系统内存</th><th>运行时间</th></>}</tr></thead><CpuProcessRows processes={cpuProcesses} snapshot={snapshot} selection={selection} terminatingPid={terminatingPid} onSelect={setSelection} onRequestTerminate={onRequestTerminate} compact={compact} /></table></div> : <EmptyProcessBlock kind="cpu" />}{compact && snapshot.cpuProcesses.length > cpuProcesses.length && <p className="process-block__more">另有 {snapshot.cpuProcesses.length - cpuProcesses.length} 个 CPU 进程，请在“进程”页查看</p>}</section>}
   </div>
-}
+}, (previous, next) => previous.snapshot === next.snapshot
+  && previous.compact === next.compact
+  && previous.hideEmptyBlocks === next.hideEmptyBlocks
+  && previous.terminatingPid === next.terminatingPid)
