@@ -1,6 +1,6 @@
 [package]
 name = "racktop"
-version = "1.14.6"
+version = "1.14.7"
 description = "Live GPU & CPU monitoring for every server"
 authors = ["RackTop"]
 edition = "2024"
