@@ -8,10 +8,8 @@ use std::{
 use uuid::Uuid;
 
 const REMOTE_CLEANUP_TTL_SECONDS: i64 = 86_400;
-const RAW_HISTORY_SECONDS: i64 = 90 * 60;
-const MID_HISTORY_SECONDS: i64 = 3 * 60 * 60;
+const RAW_HISTORY_SECONDS: i64 = 3 * 60 * 60;
 const TREND_HISTORY_SECONDS: i64 = 72 * 60 * 60;
-const MID_HISTORY_BUCKET_SECONDS: i64 = 3 * 60;
 const LONG_HISTORY_BUCKET_SECONDS: i64 = 10 * 60;
 
 #[derive(Debug, Clone)]
@@ -178,9 +176,7 @@ fn compact_time_bucket(connection: &Connection, server_id: &str, start: i64, end
 }
 
 fn compact_completed_tiers(connection: &Connection, server_id: &str, latest: i64) -> Result<(), String> {
-    let mid_end = bucket_start(latest - RAW_HISTORY_SECONDS, MID_HISTORY_BUCKET_SECONDS);
-    compact_time_bucket(connection, server_id, mid_end - MID_HISTORY_BUCKET_SECONDS, mid_end)?;
-    let long_end = bucket_start(latest - MID_HISTORY_SECONDS, LONG_HISTORY_BUCKET_SECONDS);
+    let long_end = bucket_start(latest - RAW_HISTORY_SECONDS, LONG_HISTORY_BUCKET_SECONDS);
     compact_time_bucket(connection, server_id, long_end - LONG_HISTORY_BUCKET_SECONDS, long_end)?;
     connection.execute("DELETE FROM snapshots WHERE server_id=?1 AND timestamp<?2", params![server_id, latest - TREND_HISTORY_SECONDS]).map_err(|error| error.to_string())?;
     Ok(())
@@ -188,7 +184,6 @@ fn compact_completed_tiers(connection: &Connection, server_id: &str, latest: i64
 
 fn compact_server_snapshot_history(connection: &Connection, server_id: &str, latest: i64) -> Result<usize, String> {
     let raw_cutoff = latest - RAW_HISTORY_SECONDS;
-    let mid_cutoff = latest - MID_HISTORY_SECONDS;
     let trend_cutoff = latest - TREND_HISTORY_SECONDS;
     let mut buckets: BTreeMap<i64, TrendHistoryBucket> = BTreeMap::new();
     {
@@ -196,8 +191,7 @@ fn compact_server_snapshot_history(connection: &Connection, server_id: &str, lat
         let rows = statement.query_map(params![server_id, trend_cutoff, raw_cutoff], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?, row.get::<_, f64>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?))).map_err(|error| error.to_string())?;
         for row in rows {
             let (timestamp, cpu, memory, swap, gpu_json, gpu_memory_json, payload_json) = row.map_err(|error| error.to_string())?;
-            let bucket_seconds = if timestamp >= mid_cutoff { MID_HISTORY_BUCKET_SECONDS } else { LONG_HISTORY_BUCKET_SECONDS };
-            add_trend_sample(buckets.entry(bucket_start(timestamp, bucket_seconds)).or_default(), cpu, memory, swap, &gpu_json, &gpu_memory_json, &payload_json);
+            add_trend_sample(buckets.entry(bucket_start(timestamp, LONG_HISTORY_BUCKET_SECONDS)).or_default(), cpu, memory, swap, &gpu_json, &gpu_memory_json, &payload_json);
         }
     }
     let removed = connection.execute("DELETE FROM snapshots WHERE server_id=?1 AND timestamp<?2", params![server_id, raw_cutoff]).map_err(|error| error.to_string())?;
@@ -1149,16 +1143,16 @@ mod tests {
     }
 
     #[test]
-    fn compacts_three_day_trends_by_tier_and_preserves_peaks() {
+    fn keeps_three_hours_raw_then_compacts_older_trends_and_preserves_peaks() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.sqlite");
         let server_id = {
             let db = Database::open(&path).unwrap();
             let server = db.save_server(draft("Tiered trend", 30)).unwrap();
             let latest = 2_000_000;
-            let mid_bucket = bucket_start(latest - 2 * 3_600, MID_HISTORY_BUCKET_SECONDS);
+            let raw_start = latest - 2 * 3_600;
             for (offset, value) in [(10, 10.0), (70, 90.0), (130, 20.0)] {
-                let mut sample = snapshot(&server.id, mid_bucket + offset);
+                let mut sample = snapshot(&server.id, raw_start + offset);
                 sample.system.cpu_utilization = value;
                 db.save_snapshot(&sample).unwrap();
             }
@@ -1174,10 +1168,11 @@ mod tests {
 
         let reopened = Database::open(&path).unwrap();
         let history = reopened.get_history(&server_id, 0).unwrap();
-        assert_eq!(history.len(), 3);
-        let mid = history.iter().find(|point| point.cpu_max == 90.0).unwrap();
-        assert!((mid.cpu_utilization - 40.0).abs() < 0.01);
-        assert_eq!(mid.cpu_min, 10.0);
+        assert_eq!(history.len(), 5);
+        let raw_values: Vec<_> = history.iter().filter(|point| point.timestamp >= 2_000_000 - 3 * 3_600).map(|point| point.cpu_utilization).collect();
+        assert!(raw_values.contains(&10.0));
+        assert!(raw_values.contains(&90.0));
+        assert!(raw_values.contains(&20.0));
         let long = history.iter().find(|point| point.cpu_max == 75.0).unwrap();
         assert!((long.cpu_utilization - 40.0).abs() < 0.01);
         assert_eq!(long.cpu_min, 5.0);
