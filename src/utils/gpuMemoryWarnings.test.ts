@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Server, Snapshot } from '../types/models'
-import { deriveGpuMemoryStallWarnings, GPU_MEMORY_STALL_SECONDS } from './gpuMemoryWarnings'
+import { deriveGpuMemoryStallWarnings, GPU_MEMORY_STALL_SECONDS, gpuMemoryStallWarningId, ignoredGpuMemoryStallGpus } from './gpuMemoryWarnings'
 
 const server = { id: 's1', name: '训练机', host: 'host', port: 22, username: 'me', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'sshAgent', status: 'online' } as Server
 const snapshot = (timestamp: number, utilization: number, memoryUsedMb = 4096): Snapshot => ({ serverId: 's1', hostname: 'host', username: 'me', osId: 'linux', osName: 'Linux', timestamp, status: 'online', system: { cpuModel: 'CPU', cpuUtilization: 0, currentUserCpuUtilization: 0, load1: 0, load5: 0, load15: 0, memoryUsedBytes: 0, memoryTotalBytes: 1, swapUsedBytes: 0, swapTotalBytes: 1 }, gpus: [{ index: 0, uuid: 'gpu-0', name: 'NVIDIA A100', utilization, memoryUtilization: memoryUsedMb / 8192 * 100, memoryUsedMb, memoryTotalMb: 8192, temperatureCelsius: 40, powerWatts: 100 }], disks: [], processes: [{ gpuUuid: 'gpu-0', gpuIndex: 0, pid: 1, parentPid: 1, username: 'alice', command: 'train', memoryUsedMb, smUtilization: 0, cpuPercent: 0, elapsed: '1h', isCurrentUser: false, isGroupLeader: true }], cpuProcesses: [], processesSampled: true, nvidiaSmi: 'available' })
@@ -17,6 +17,15 @@ describe('deriveGpuMemoryStallWarnings', () => {
     const since = { 'gpu-memory-stall:s1:gpu-0': 1000 }
     expect(deriveGpuMemoryStallWarnings([server], { s1: snapshot(1100, 5) }, since, new Set(), 1100).since).toEqual({})
     expect(deriveGpuMemoryStallWarnings([server], { s1: snapshot(1000 + GPU_MEMORY_STALL_SECONDS, 0) }, since, new Set(['gpu-memory-stall:s1:gpu-0']), 1000 + GPU_MEMORY_STALL_SECONDS).warnings).toHaveLength(0)
+  })
+
+  it('keeps active ignored warnings discoverable on the connection page and restores them', () => {
+    const current = snapshot(1000 + GPU_MEMORY_STALL_SECONDS, 0)
+    const id = gpuMemoryStallWarningId(server.id, current.gpus[0].uuid)
+    const ignored = new Set([id])
+    expect(deriveGpuMemoryStallWarnings([server], { s1: current }, { [id]: 1000 }, ignored, current.timestamp).warnings).toHaveLength(0)
+    expect(ignoredGpuMemoryStallGpus(server.id, current, ignored).map((gpu) => gpu.index)).toEqual([0])
+    expect(deriveGpuMemoryStallWarnings([server], { s1: current }, { [id]: 1000 }, new Set(), current.timestamp).warnings).toHaveLength(1)
   })
 
   it('warns even when the driver cannot attribute occupied memory to a process', () => {
