@@ -56,7 +56,7 @@ import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint
 import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
-import { RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
+import { RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
 import { ResourceTrend } from './components/ResourceTrend'
 import { ServerForm } from './components/ServerForm'
 import { SshTerminal } from './components/SshTerminal'
@@ -69,7 +69,7 @@ import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, loadIdleFilters, rankIdleG
 import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservationFiltersEqual, idleReservationGpuKey, idleReservationSummary } from './utils/idleReservations'
 import { canOfferNvidiaDriverInstall, displayedNvidiaServerStatus, loadIgnoredNvidiaWarningIds, nvidiaIssueGuidance, nvidiaIssueTitle, saveIgnoredNvidiaWarningIds } from './utils/nvidiaStatus'
 import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
-import { deriveGpuMemoryStallWarnings } from './utils/gpuMemoryWarnings'
+import { deriveGpuMemoryStallWarnings, ignoredGpuMemoryStallGpus } from './utils/gpuMemoryWarnings'
 import { acquiredDataItems, interactionDurationSeconds, interactionVisualStatus } from './utils/activityLog'
 import { duplicateImportIndexes } from './utils/serverIdentity'
 import { currentUserProcessCount } from './utils/processRelations'
@@ -259,6 +259,7 @@ function App() {
   const remoteSyncInFlight = useRef(new Set<string>())
   const remoteSyncRecoveryQueued = useRef(new Set<string>())
   const remoteSyncStatusRef = useRef<RemoteSyncStatusState | null>(null)
+  const remoteSyncCoordinator = useRef(new RemoteSyncCoordinator())
   const remoteCleanupNoticeKeys = useRef(new Set<string>())
   const nextRetryAt = useRef<Record<string, number>>({})
   const inFlightServers = useRef(new Set<string>())
@@ -274,13 +275,13 @@ function App() {
     } catch { return {} }
   })())
   const notifiedGpuMemoryStalls = useRef(new Set<string>())
-  const ignoredGpuMemoryStallWarnings = useRef<Set<string>>((() => {
+  const [ignoredGpuMemoryStallWarningIds, setIgnoredGpuMemoryStallWarningIds] = useState<Set<string>>(() => {
     if (typeof localStorage === 'undefined') return new Set<string>()
     try {
       const value = JSON.parse(localStorage.getItem('racktop.ignoredGpuMemoryStallWarnings.v1') ?? '[]')
       return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [])
     } catch { return new Set() }
-  })())
+  })
 
   const selectedServer = servers.find((server) => server.id === selectedServerId)
   const selectedSnapshot = selectedServerId ? snapshots[selectedServerId] : undefined
@@ -486,7 +487,8 @@ function App() {
     let cancelled = false
     let feedbackTimer: number | null = null
     let successTimer: number | null = null
-    const syncAllRemoteHistory = async (initial: boolean) => {
+    const syncAllRemoteHistory = async (initial: boolean) => remoteSyncCoordinator.current.run(async () => {
+      if (cancelled) return
       const enabledServers = remoteHistoryServersRef.current.filter((server) => server.remoteHistoryEnabled && !remoteSyncInFlight.current.has(server.id))
       if (enabledServers.length === 0) return
       let completed = 0
@@ -532,13 +534,14 @@ function App() {
         setRemoteSyncStatus({ phase: 'success', completed, total: enabledServers.length, importedCount, failedServerIds: [] })
         successTimer = window.setTimeout(() => setRemoteSyncStatus(null), REMOTE_SYNC_SUCCESS_DURATION_MS)
       } else {
-        setRemoteSyncStatus((current) => current?.phase === 'error' ? null : current)
+        setRemoteSyncStatus(null)
       }
-    }
+    })
     void syncAllRemoteHistory(true)
     const interval = window.setInterval(() => { void syncAllRemoteHistory(false) }, 5 * 60_000)
     return () => {
       cancelled = true
+      setRemoteSyncStatus(null)
       window.clearInterval(interval)
       if (feedbackTimer !== null) window.clearTimeout(feedbackTimer)
       if (successTimer !== null) window.clearTimeout(successTimer)
@@ -652,17 +655,21 @@ function App() {
 
   useEffect(() => {
     const now = Math.max(...Object.values(snapshots).map((snapshot) => snapshot.timestamp), 0)
-    const result = deriveGpuMemoryStallWarnings(servers, snapshots, gpuMemoryStallSince.current, ignoredGpuMemoryStallWarnings.current, now)
+    const result = deriveGpuMemoryStallWarnings(servers, snapshots, gpuMemoryStallSince.current, ignoredGpuMemoryStallWarningIds, now)
     gpuMemoryStallSince.current = result.since
     localStorage.setItem('racktop.gpuMemoryStallSince.v1', JSON.stringify(result.since))
     setGpuMemoryStallWarnings(result.warnings)
     let ignoredChanged = false
-    for (const id of ignoredGpuMemoryStallWarnings.current) {
+    const retainedIgnoredIds = new Set(ignoredGpuMemoryStallWarningIds)
+    for (const id of ignoredGpuMemoryStallWarningIds) {
       if (id in result.since) continue
-      ignoredGpuMemoryStallWarnings.current.delete(id)
+      retainedIgnoredIds.delete(id)
       ignoredChanged = true
     }
-    if (ignoredChanged) localStorage.setItem('racktop.ignoredGpuMemoryStallWarnings.v1', JSON.stringify([...ignoredGpuMemoryStallWarnings.current]))
+    if (ignoredChanged) {
+      setIgnoredGpuMemoryStallWarningIds(retainedIgnoredIds)
+      localStorage.setItem('racktop.ignoredGpuMemoryStallWarnings.v1', JSON.stringify([...retainedIgnoredIds]))
+    }
     for (const warning of result.warnings) {
       if (notifiedGpuMemoryStalls.current.has(warning.id)) continue
       notifiedGpuMemoryStalls.current.add(warning.id)
@@ -678,7 +685,7 @@ function App() {
     for (const id of notifiedGpuMemoryStalls.current) {
       if (!(id in result.since)) notifiedGpuMemoryStalls.current.delete(id)
     }
-  }, [servers, snapshots])
+  }, [servers, snapshots, ignoredGpuMemoryStallWarningIds])
 
   useEffect(() => {
     const waiting = idleReservations.filter((reservation) => reservation.status === 'active' && !(reservation.currentAvailableGpuKeys?.length) && !(reservation.pendingConfirmationGpuKeys?.length)).length
@@ -715,10 +722,24 @@ function App() {
     }
   }, [snapshots, servers, settings, idleAvailableCount])
   const ignoreGpuMemoryStallWarning = useCallback((warning: GpuMemoryStallWarning) => {
-    const next = new Set(ignoredGpuMemoryStallWarnings.current).add(warning.id)
-    ignoredGpuMemoryStallWarnings.current = next
-    localStorage.setItem('racktop.ignoredGpuMemoryStallWarnings.v1', JSON.stringify([...next]))
+    setIgnoredGpuMemoryStallWarningIds((current) => {
+      const next = new Set(current).add(warning.id)
+      localStorage.setItem('racktop.ignoredGpuMemoryStallWarnings.v1', JSON.stringify([...next]))
+      return next
+    })
     setGpuMemoryStallWarnings((current) => current.filter((item) => item.id !== warning.id))
+    setToast('已忽略此 GPU 的显存占用预警，可在服务器连接页恢复')
+  }, [])
+
+  const restoreGpuMemoryStallWarning = useCallback((warningId: string) => {
+    setIgnoredGpuMemoryStallWarningIds((current) => {
+      const next = new Set(current)
+      next.delete(warningId)
+      localStorage.setItem('racktop.ignoredGpuMemoryStallWarnings.v1', JSON.stringify([...next]))
+      return next
+    })
+    notifiedGpuMemoryStalls.current.delete(warningId)
+    setToast('已恢复显存占用预警')
   }, [])
 
   async function saveIdleReservation(reservation: IdleReservation) {
@@ -1083,6 +1104,8 @@ function App() {
               isRefreshing={manualRefreshingServers.has(selectedServer.id)}
               animateCharts={manualRefreshingAll || manualRefreshingServers.has(selectedServer.id)}
               gpuMemoryWarnings={gpuMemoryStallWarnings.filter((warning) => warning.serverId === selectedServer.id)}
+              ignoredGpuMemoryStallWarningIds={ignoredGpuMemoryStallWarningIds}
+              onRestoreGpuMemoryStallWarning={restoreGpuMemoryStallWarning}
             />
           ) : (
             <LoadingServer server={selectedServer} isRefreshing={selectedServer ? busy.has(selectedServer.id) : false} onRefresh={() => selectedServer && void refreshServer(selectedServer.id)} />
@@ -1150,9 +1173,11 @@ interface ServerDetailProps {
   isRefreshing: boolean
   animateCharts: boolean
   gpuMemoryWarnings: GpuMemoryStallWarning[]
+  ignoredGpuMemoryStallWarningIds: Set<string>
+  onRestoreGpuMemoryStallWarning: (warningId: string) => void
 }
 
-function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid, onTab, onSelectGpu, onRefresh, onDelete, onEdit, onRequestTerminate, terminatingPid, nvidiaWarningIgnored, onIgnoreNvidiaWarning, onRestoreNvidiaWarning, isRefreshing, animateCharts, gpuMemoryWarnings }: ServerDetailProps) {
+function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid, onTab, onSelectGpu, onRefresh, onDelete, onEdit, onRequestTerminate, terminatingPid, nvidiaWarningIgnored, onIgnoreNvidiaWarning, onRestoreNvidiaWarning, isRefreshing, animateCharts, gpuMemoryWarnings, ignoredGpuMemoryStallWarningIds, onRestoreGpuMemoryStallWarning }: ServerDetailProps) {
   const [showLogs, setShowLogs] = useState(false)
   return (
     <div className={`detail-page ${tab === 'terminal' ? 'detail-page--terminal' : ''}`}>
@@ -1172,7 +1197,7 @@ function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid
         {tab === 'processes' && <ProcessBlocks snapshot={snapshot} terminatingPid={terminatingPid} onRequestTerminate={onRequestTerminate} />}
         {tab === 'terminal' && <SshTerminal serverId={server.id} serverName={server.name} />}
         {tab === 'history' && <HistoryView server={server} snapshot={snapshot} />}
-        {tab === 'connection' && <ConnectionView server={server} snapshot={snapshot} nvidiaWarningIgnored={nvidiaWarningIgnored} onRestoreNvidiaWarning={onRestoreNvidiaWarning} onRefresh={onRefresh} onDelete={onDelete} onEdit={onEdit} isRefreshing={isRefreshing} />}
+        {tab === 'connection' && <ConnectionView server={server} snapshot={snapshot} nvidiaWarningIgnored={nvidiaWarningIgnored} ignoredGpuMemoryStallWarningIds={ignoredGpuMemoryStallWarningIds} onRestoreNvidiaWarning={onRestoreNvidiaWarning} onRestoreGpuMemoryStallWarning={onRestoreGpuMemoryStallWarning} onRefresh={onRefresh} onDelete={onDelete} onEdit={onEdit} isRefreshing={isRefreshing} />}
       </div>
     </div>
   )
@@ -1382,9 +1407,11 @@ function LogsView({ server, snapshot }: { server: Server; snapshot: Snapshot }) 
   return <section className="panel logs-panel"><PanelHeader icon={<ListFilter />} title="采集与连接日志" subtitle={`${items.length} 条最近记录`} /><div className="log-list">{items.map((item, index) => <div className={`log-row log-row--${item.level}`} key={index}><span aria-hidden="true" /><time dateTime={new Date(item.time * 1000).toISOString()}>{new Date(item.time * 1000).toLocaleTimeString()}</time><p>{item.message}</p></div>)}</div></section>
 }
 
-function ConnectionView({ server, snapshot, nvidiaWarningIgnored, onRestoreNvidiaWarning, onRefresh, onDelete, onEdit, isRefreshing }: { server: Server; snapshot: Snapshot; nvidiaWarningIgnored: boolean; onRestoreNvidiaWarning: () => void; onRefresh: () => void; onDelete: () => void; onEdit: () => void; isRefreshing: boolean }) {
+function ConnectionView({ server, snapshot, nvidiaWarningIgnored, ignoredGpuMemoryStallWarningIds, onRestoreNvidiaWarning, onRestoreGpuMemoryStallWarning, onRefresh, onDelete, onEdit, isRefreshing }: { server: Server; snapshot: Snapshot; nvidiaWarningIgnored: boolean; ignoredGpuMemoryStallWarningIds: Set<string>; onRestoreNvidiaWarning: () => void; onRestoreGpuMemoryStallWarning: (warningId: string) => void; onRefresh: () => void; onDelete: () => void; onEdit: () => void; isRefreshing: boolean }) {
   const canRestoreNvidiaWarning = nvidiaWarningIgnored && snapshot.nvidiaSmi !== 'available'
-  return <div className="content-stack"><section className="panel connection-panel"><PanelHeader icon={<KeyRound />} title="SSH 连接" subtitle="认证信息仅在本机使用" /><dl className="definition-list"><div><dt>物理位置</dt><dd>{server.location || '未填写'}</dd></div><div><dt>连接地址</dt><dd className="mono">{server.username}@{server.host}:{server.port}</dd></div><div><dt>认证</dt><dd>{server.authMethod === 'sshAgent' ? 'SSH Agent / 默认密钥' : server.authMethod}</dd></div><div><dt>SSH Config</dt><dd>{server.sshAlias || '未使用别名'}</dd></div><div><dt>私钥</dt><dd className="mono">{server.identityFile || '由 OpenSSH 自动选择'}</dd></div><div><dt>ProxyJump</dt><dd className="mono">{server.proxyJump || '无'}</dd></div><div><dt>远端历史</dt><dd>{server.remoteHistoryEnabled ? `已启用 · ${server.remoteHistoryLastSyncAt ? `同步于 ${relativeTime(server.remoteHistoryLastSyncAt)}` : '等待首次同步'}` : '未启用'}</dd></div></dl><div className="panel__actions"><button className="button button--primary" onClick={onRefresh} disabled={isRefreshing}><RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />测试并重新连接</button><button className="button button--secondary" onClick={onEdit}><Settings size={16} />编辑配置</button></div></section>{canRestoreNvidiaWarning && <section className="panel ignored-warning-panel"><span><BellOff size={18} /></span><div><strong>GPU 异常提醒已忽略</strong><p>不可读取的显卡仍会显示，但服务器状态暂按在线处理。</p></div><button className="button button--secondary button--small" onClick={onRestoreNvidiaWarning}><Bell size={14} />恢复提醒</button></section>}<section className="panel danger-zone"><div><strong>删除服务器</strong><p>删除本机记录、历史数据、远端采集进程和服务器用户目录中的 RackTop 数据。</p></div><button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除</button></section></div>
+  const ignoredMemoryWarnings = ignoredGpuMemoryStallGpus(server.id, snapshot, ignoredGpuMemoryStallWarningIds)
+  const ignoredCount = ignoredMemoryWarnings.length + (canRestoreNvidiaWarning ? 1 : 0)
+  return <div className="content-stack"><section className="panel connection-panel"><PanelHeader icon={<KeyRound />} title="SSH 连接" subtitle="认证信息仅在本机使用" /><dl className="definition-list"><div><dt>物理位置</dt><dd>{server.location || '未填写'}</dd></div><div><dt>连接地址</dt><dd className="mono">{server.username}@{server.host}:{server.port}</dd></div><div><dt>认证</dt><dd>{server.authMethod === 'sshAgent' ? 'SSH Agent / 默认密钥' : server.authMethod}</dd></div><div><dt>SSH Config</dt><dd>{server.sshAlias || '未使用别名'}</dd></div><div><dt>私钥</dt><dd className="mono">{server.identityFile || '由 OpenSSH 自动选择'}</dd></div><div><dt>ProxyJump</dt><dd className="mono">{server.proxyJump || '无'}</dd></div><div><dt>远端历史</dt><dd>{server.remoteHistoryEnabled ? `已启用 · ${server.remoteHistoryLastSyncAt ? `同步于 ${relativeTime(server.remoteHistoryLastSyncAt)}` : '等待首次同步'}` : '未启用'}</dd></div></dl><div className="panel__actions"><button className="button button--primary" onClick={onRefresh} disabled={isRefreshing}><RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />测试并重新连接</button><button className="button button--secondary" onClick={onEdit}><Settings size={16} />编辑配置</button></div></section>{ignoredCount > 0 && <section className="panel ignored-warning-list"><PanelHeader icon={<BellOff />} title="已忽略的 GPU 提醒" subtitle={`${ignoredCount} 项提醒仅在此处保留`} /><div>{canRestoreNvidiaWarning && <div className="ignored-warning-row"><div><strong>GPU 读取异常</strong><p>不可读取的显卡仍会显示，但服务器状态暂按在线处理。</p></div><button className="button button--secondary button--small" onClick={onRestoreNvidiaWarning}><Bell size={14} />恢复提醒</button></div>}{ignoredMemoryWarnings.map((gpu) => <div className="ignored-warning-row" key={gpu.uuid}><div><strong>GPU {gpu.index} · {gpu.name.replace(/^NVIDIA\s+/i, '')} 显存占用预警</strong><p>当前占用 {(gpu.memoryUsedMb / 1024).toFixed(1)} / {(gpu.memoryTotalMb / 1024).toFixed(1)} GB，UTL {clampPercent(gpu.utilization).toFixed(0)}%。</p></div><button className="button button--secondary button--small" onClick={() => onRestoreGpuMemoryStallWarning(`gpu-memory-stall:${server.id}:${gpu.uuid}`)}><Bell size={14} />恢复提醒</button></div>)}</div></section>}<section className="panel danger-zone"><div><strong>删除服务器</strong><p>删除本机记录、历史数据、远端采集进程和服务器用户目录中的 RackTop 数据。</p></div><button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除</button></section></div>
 }
 
 function NvidiaWarning({ snapshot, onRefresh, onIgnore }: { snapshot: Snapshot; onRefresh: () => void; onIgnore: () => void }) {

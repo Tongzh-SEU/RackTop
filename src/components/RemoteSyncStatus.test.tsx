@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { RemoteSyncStatus, REMOTE_SYNC_STALE_SECONDS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './RemoteSyncStatus'
+import { RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_STALE_SECONDS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './RemoteSyncStatus'
 
 const baseStatus: RemoteSyncStatusState = { phase: 'syncing', completed: 2, total: 4, importedCount: 0, failedServerIds: [] }
 
@@ -26,5 +26,27 @@ describe('RemoteSyncStatus', () => {
     expect(shouldRetryRemoteSyncAfterRecovery(errorStatus, 'server-a', true)).toBe(false)
     expect(shouldRetryRemoteSyncAfterRecovery(errorStatus, 'server-b', false)).toBe(false)
     expect(shouldRetryRemoteSyncAfterRecovery({ ...errorStatus, phase: 'success' }, 'server-a', false)).toBe(false)
+  })
+
+  it('serializes replacement sync runs instead of leaving overlapping progress behind', async () => {
+    const coordinator = new RemoteSyncCoordinator()
+    const events: string[] = []
+    let releaseFirst!: () => void
+    let markFirstStarted!: () => void
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve })
+    const first = coordinator.run(async () => {
+      events.push('first:start')
+      markFirstStarted()
+      await firstGate
+      events.push('first:end')
+    })
+    await firstStarted
+    const second = coordinator.run(async () => { events.push('second') })
+    await Promise.resolve()
+    expect(events).toEqual(['first:start'])
+    releaseFirst()
+    await Promise.all([first, second])
+    expect(events).toEqual(['first:start', 'first:end', 'second'])
   })
 })

@@ -489,10 +489,12 @@ tr.is-current-user:not(.is-selected) td { background: color-mix(in srgb, var(--o
 .logs-panel, .connection-panel { overflow: hidden; }
 .logs-panel > .panel__header, .connection-panel > .panel__header { padding: 16px 16px 10px; }
 .floating-log-panel .logs-panel > .panel__header { padding-right: 38px; }
-.ignored-warning-panel { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 14px 16px; }
-.ignored-warning-panel > span { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--text-secondary); background: var(--surface-subtle); }
-.ignored-warning-panel strong { font-size: 11px; }
-.ignored-warning-panel p { margin: 3px 0 0; color: var(--text-tertiary); font-size: 10px; }
+.ignored-warning-list { overflow: hidden; }
+.ignored-warning-list > .panel__header { padding: 14px 16px 10px; }
+.ignored-warning-list > div:last-child { padding: 0 16px 6px; }
+.ignored-warning-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 54px; padding: 10px 0; border-top: 1px solid var(--border); }
+.ignored-warning-row strong { font-size: 11px; }
+.ignored-warning-row p { margin: 3px 0 0; color: var(--text-tertiary); font-size: 10px; }
 .log-list { padding: 0 16px 16px; }
 .log-row { display: grid; grid-template-columns: 8px max-content minmax(0, 1fr); align-items: start; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--border); }
 .log-row:last-child { border-bottom: 0; }
