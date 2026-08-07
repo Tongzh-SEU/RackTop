@@ -22,6 +22,13 @@ export function saveIgnoredNvidiaWarningIds(ids: Set<string>) {
   if (typeof localStorage !== 'undefined') localStorage.setItem(IGNORED_NVIDIA_WARNINGS_STORAGE_KEY, JSON.stringify([...ids]))
 }
 
+export function clearResolvedNvidiaWarningId(ids: Set<string>, serverId: string, state: NvidiaState): Set<string> {
+  if (state !== 'available' || !ids.has(serverId)) return ids
+  const next = new Set(ids)
+  next.delete(serverId)
+  return next
+}
+
 export function displayedNvidiaServerStatus(snapshot: Snapshot, ignored: boolean): Snapshot['status'] {
   return ignored && snapshot.nvidiaSmi !== 'available' ? 'online' : snapshot.status
 }

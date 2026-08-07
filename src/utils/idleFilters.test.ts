@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Server, Snapshot } from '../types/models'
-import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, normalizeIdleFilters, parseIdleFilters, rankIdleGpuItems } from './idleFilters'
+import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, idleFilterSummaryParts, normalizeIdleFilters, parseIdleFilters, rankIdleGpuItems } from './idleFilters'
 
 const server: Server = {
   id: 'server-1', name: 'server-1', host: '10.0.0.1', port: 22, username: 'tongzh', tags: ['lab'],
@@ -30,6 +30,13 @@ describe('idle filters', () => {
     expect(rankIdleGpuItems([server], snapshots, {}, { ...DEFAULT_IDLE_FILTERS, gpuMemoryGb: 20 })[0].available).toBe(true)
     expect(rankIdleGpuItems([server], snapshots, {}, { ...DEFAULT_IDLE_FILTERS, gpuMemoryGb: 23 })[0].available).toBe(false)
     expect(rankIdleGpuItems([server], snapshots, {}, { ...DEFAULT_IDLE_FILTERS, tag: 'other' })).toHaveLength(0)
+  })
+
+  it('adds model and tag summaries only after an explicit selection', () => {
+    expect(idleFilterSummaryParts(DEFAULT_IDLE_FILTERS)).toEqual(['GPU MEM ≥ 0 GB', 'CPU MEM ≥ 0 GB', '无人占用', '当前快照'])
+    expect(idleFilterSummaryParts({ ...DEFAULT_IDLE_FILTERS, gpuModel: 'NVIDIA A100', cpuModel: 'AMD Ryzen 9', tag: '实验室' })).toEqual([
+      'GPU MEM ≥ 0 GB', 'CPU MEM ≥ 0 GB', '无人占用', 'A100', 'AMD Ryzen 9', '当前快照', '实验室',
+    ])
   })
 
   it('uses the displayed one-decimal memory value at the filter boundary', () => {

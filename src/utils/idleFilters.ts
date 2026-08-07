@@ -49,6 +49,18 @@ export function saveIdleFilters(filters: IdleFilters) {
   if (typeof localStorage !== 'undefined') localStorage.setItem(IDLE_FILTERS_STORAGE_KEY, JSON.stringify(normalizeIdleFilters(filters)))
 }
 
+export function idleFilterSummaryParts(filters: IdleFilters): string[] {
+  return [
+    `GPU MEM ≥ ${filters.gpuMemoryGb} GB`,
+    `CPU MEM ≥ ${filters.cpuMemoryGb} GB`,
+    filters.otherUserProcess === 'all' ? '进程占用：不限' : '无人占用',
+    ...(filters.gpuModel === 'all' ? [] : [filters.gpuModel.replace(/^NVIDIA\s+/i, '')]),
+    ...(filters.cpuModel === 'all' ? [] : [filters.cpuModel]),
+    filters.duration ? `MEM 持续 ${filters.duration} 分钟` : '当前快照',
+    ...(filters.tag === 'all' ? [] : [filters.tag]),
+  ]
+}
+
 export type IdleGpuItem = {
   server: Server
   gpu: Snapshot['gpus'][number]

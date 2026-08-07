@@ -65,9 +65,9 @@ import { TrendChart } from './components/TrendChart'
 import { UsageDistribution } from './components/UsageDistribution'
 import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, countOtherUserGpuWorkloads, displayedGpuMemoryPercent, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, isGpuAvailable, isGpuIdle } from './utils/gpu'
 import { canDisplayServerDetails, serverStatusAfterFailure, shouldShowConnectingOnAttempt } from './utils/connectionStatus'
-import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, loadIdleFilters, rankIdleGpuItems, saveIdleFilters, type IdleFilters, type IdleGpuItem } from './utils/idleFilters'
+import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, idleFilterSummaryParts, loadIdleFilters, rankIdleGpuItems, saveIdleFilters, type IdleFilters, type IdleGpuItem } from './utils/idleFilters'
 import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservationFiltersEqual, idleReservationGpuKey, idleReservationSummary } from './utils/idleReservations'
-import { canOfferNvidiaDriverInstall, displayedNvidiaServerStatus, loadIgnoredNvidiaWarningIds, nvidiaIssueGuidance, nvidiaIssueTitle, saveIgnoredNvidiaWarningIds } from './utils/nvidiaStatus'
+import { canOfferNvidiaDriverInstall, clearResolvedNvidiaWarningId, displayedNvidiaServerStatus, loadIgnoredNvidiaWarningIds, nvidiaIssueGuidance, nvidiaIssueTitle, saveIgnoredNvidiaWarningIds } from './utils/nvidiaStatus'
 import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
 import { deriveGpuMemoryStallWarnings, ignoredGpuMemoryStallGpus } from './utils/gpuMemoryWarnings'
 import { acquiredDataItems, interactionDurationSeconds, interactionVisualStatus } from './utils/activityLog'
@@ -350,8 +350,14 @@ function App() {
       delete nextRetryAt.current[serverId]
       notifiedConditions.current.delete(`offline:${serverId}`)
       if (settings) evaluateAlerts(servers.find((server) => server.id === serverId), snapshot, previous, settings, conditionSince.current, notifiedConditions.current)
+      const retainedNvidiaWarnings = clearResolvedNvidiaWarningId(ignoredNvidiaWarningsRef.current, serverId, snapshot.nvidiaSmi)
+      if (retainedNvidiaWarnings !== ignoredNvidiaWarningsRef.current) {
+        ignoredNvidiaWarningsRef.current = retainedNvidiaWarnings
+        setIgnoredNvidiaWarnings(retainedNvidiaWarnings)
+        saveIgnoredNvidiaWarningIds(retainedNvidiaWarnings)
+      }
       setSnapshots((current) => ({ ...current, [serverId]: snapshot }))
-      setServers((current) => current.map((server) => server.id === serverId ? { ...server, status: displayedNvidiaServerStatus(snapshot, ignoredNvidiaWarningsRef.current.has(serverId)), lastSeenAt: snapshot.timestamp, lastError: snapshot.nvidiaMessage } : server))
+      setServers((current) => current.map((server) => server.id === serverId ? { ...server, status: displayedNvidiaServerStatus(snapshot, retainedNvidiaWarnings.has(serverId)), lastSeenAt: snapshot.timestamp, lastError: snapshot.nvidiaMessage } : server))
       if (recordHistory) {
         lastHistoryRecordedAt.current[serverId] = nowMs
         const from = snapshot.timestamp - (settings?.realtimeWindowMinutes ?? 30) * 60
@@ -1578,6 +1584,7 @@ function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentR
     setFilters({ [key]: input.trim() === '' ? 0 : Math.max(0, Number(input) || 0) })
   }
   const reset = () => { setGpuMemoryInput(String(DEFAULT_IDLE_FILTERS.gpuMemoryGb)); setCpuMemoryInput(String(DEFAULT_IDLE_FILTERS.cpuMemoryGb)); onFiltersChange({ ...DEFAULT_IDLE_FILTERS }) }
+  const filterSummary = idleFilterSummaryParts(filters)
 
   return <div className="detail-page idle-page">
     <section className="idle-filters" aria-label="空闲算力筛选条件">
@@ -1591,7 +1598,7 @@ function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentR
         <label>持续时间<select value={duration} onChange={(event) => setFilters({ duration: Number(event.target.value) })}><option value="0">当前快照</option><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option></select></label>
         <label>服务器标签<select value={tag} onChange={(event) => setFilters({ tag: event.target.value })}><option value="all">全部标签</option>{tags.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
       </div>
-      <footer><span>GPU MEM ≥ {gpuMemoryGb} GB</span><span>CPU MEM ≥ {cpuMemoryGb} GB</span><span>{otherUserProcess === 'all' ? '进程占用：不限' : '无人占用'}</span><span>{duration ? `MEM 持续 ${duration} 分钟` : '当前快照'}</span><strong>{availableCount} 张可用 · {items.length - availableCount} 张不可用</strong></footer>
+      <footer>{filterSummary.map((summary) => <span key={summary}>{summary}</span>)}<strong>{availableCount} 张可用 · {items.length - availableCount} 张不可用</strong></footer>
     </section>
     <section className="idle-grid">{items.map(({ server, gpu, available }) => {
       const snapshot = snapshots[server.id]
