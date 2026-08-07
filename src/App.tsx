@@ -67,7 +67,7 @@ import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, cou
 import { canDisplayServerDetails, serverStatusAfterFailure, shouldShowConnectingOnAttempt } from './utils/connectionStatus'
 import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, loadIdleFilters, rankIdleGpuItems, saveIdleFilters, type IdleFilters, type IdleGpuItem } from './utils/idleFilters'
 import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservationFiltersEqual, idleReservationGpuKey, idleReservationSummary } from './utils/idleReservations'
-import { canOfferNvidiaDriverInstall, displayedNvidiaServerStatus, loadIgnoredNvidiaWarningIds, nvidiaIssueGuidance, nvidiaIssueTitle, saveIgnoredNvidiaWarningIds } from './utils/nvidiaStatus'
+import { canOfferNvidiaDriverInstall, clearResolvedNvidiaWarningId, displayedNvidiaServerStatus, loadIgnoredNvidiaWarningIds, nvidiaIssueGuidance, nvidiaIssueTitle, saveIgnoredNvidiaWarningIds } from './utils/nvidiaStatus'
 import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
 import { deriveGpuMemoryStallWarnings, ignoredGpuMemoryStallGpus } from './utils/gpuMemoryWarnings'
 import { acquiredDataItems, interactionDurationSeconds, interactionVisualStatus } from './utils/activityLog'
@@ -350,8 +350,14 @@ function App() {
       delete nextRetryAt.current[serverId]
       notifiedConditions.current.delete(`offline:${serverId}`)
       if (settings) evaluateAlerts(servers.find((server) => server.id === serverId), snapshot, previous, settings, conditionSince.current, notifiedConditions.current)
+      const retainedNvidiaWarnings = clearResolvedNvidiaWarningId(ignoredNvidiaWarningsRef.current, serverId, snapshot.nvidiaSmi)
+      if (retainedNvidiaWarnings !== ignoredNvidiaWarningsRef.current) {
+        ignoredNvidiaWarningsRef.current = retainedNvidiaWarnings
+        setIgnoredNvidiaWarnings(retainedNvidiaWarnings)
+        saveIgnoredNvidiaWarningIds(retainedNvidiaWarnings)
+      }
       setSnapshots((current) => ({ ...current, [serverId]: snapshot }))
-      setServers((current) => current.map((server) => server.id === serverId ? { ...server, status: displayedNvidiaServerStatus(snapshot, ignoredNvidiaWarningsRef.current.has(serverId)), lastSeenAt: snapshot.timestamp, lastError: snapshot.nvidiaMessage } : server))
+      setServers((current) => current.map((server) => server.id === serverId ? { ...server, status: displayedNvidiaServerStatus(snapshot, retainedNvidiaWarnings.has(serverId)), lastSeenAt: snapshot.timestamp, lastError: snapshot.nvidiaMessage } : server))
       if (recordHistory) {
         lastHistoryRecordedAt.current[serverId] = nowMs
         const from = snapshot.timestamp - (settings?.realtimeWindowMinutes ?? 30) * 60
