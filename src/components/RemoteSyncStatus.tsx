@@ -17,6 +17,10 @@ export function shouldShowRemoteSyncImmediately(servers: Array<Pick<Server, 'rem
   return servers.some((server) => !server.remoteHistoryLastSyncAt || nowSeconds - server.remoteHistoryLastSyncAt > REMOTE_SYNC_STALE_SECONDS)
 }
 
+export function shouldRetryRemoteSyncAfterRecovery(status: RemoteSyncStatusState | null, serverId: string, alreadyQueued: boolean) {
+  return !alreadyQueued && status?.phase === 'error' && status.failedServerIds.includes(serverId)
+}
+
 export function RemoteSyncStatus({ status, onOpenFailure }: { status: RemoteSyncStatusState; onOpenFailure: () => void }) {
   if (status.phase === 'syncing') {
     return <span className="remote-sync-status remote-sync-status--syncing" role="status" aria-live="polite"><RefreshCw className="spin" size={13} />正在同步历史数据 · {status.completed}/{status.total} 台</span>
