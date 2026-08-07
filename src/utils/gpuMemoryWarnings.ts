@@ -3,6 +3,14 @@ import type { GpuMemoryStallWarning, Server, Snapshot } from '../types/models'
 export const GPU_MEMORY_STALL_SECONDS = 60 * 60
 const GPU_MEMORY_STALL_MINIMUM_MB = 1024
 
+export function gpuMemoryStallWarningId(serverId: string, gpuUuid: string) {
+  return `gpu-memory-stall:${serverId}:${gpuUuid}`
+}
+
+export function ignoredGpuMemoryStallGpus(serverId: string, snapshot: Pick<Snapshot, 'gpus'>, ignoredIds: Set<string>) {
+  return snapshot.gpus.filter((gpu) => ignoredIds.has(gpuMemoryStallWarningId(serverId, gpu.uuid)))
+}
+
 export function deriveGpuMemoryStallWarnings(
   servers: Server[],
   snapshots: Record<string, Snapshot>,
@@ -18,7 +26,7 @@ export function deriveGpuMemoryStallWarnings(
     if (!snapshot) continue
     const observedAt = Math.min(now, snapshot.timestamp)
     for (const gpu of snapshot.gpus) {
-      const id = `gpu-memory-stall:${server.id}:${gpu.uuid}`
+      const id = gpuMemoryStallWarningId(server.id, gpu.uuid)
       const gpuProcesses = snapshot.processes.filter((process) => process.gpuUuid === gpu.uuid && process.memoryUsedMb > 0)
       const defunctProcesses = gpuProcesses.filter((process) => process.command.toLowerCase().includes('<defunct>'))
       if (!(gpu.memoryUsedMb >= GPU_MEMORY_STALL_MINIMUM_MB && gpu.utilization <= 0.5)) {

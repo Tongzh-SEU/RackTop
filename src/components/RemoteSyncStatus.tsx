@@ -13,6 +13,23 @@ export interface RemoteSyncStatusState {
   failedServerIds: string[]
 }
 
+export class RemoteSyncCoordinator {
+  private active: Promise<void> | null = null
+
+  async run(task: () => Promise<void>) {
+    while (this.active) {
+      await this.active.catch(() => undefined)
+    }
+    const active = Promise.resolve().then(task)
+    this.active = active
+    try {
+      await active
+    } finally {
+      if (this.active === active) this.active = null
+    }
+  }
+}
+
 export function shouldShowRemoteSyncImmediately(servers: Array<Pick<Server, 'remoteHistoryLastSyncAt'>>, nowSeconds: number): boolean {
   return servers.some((server) => !server.remoteHistoryLastSyncAt || nowSeconds - server.remoteHistoryLastSyncAt > REMOTE_SYNC_STALE_SECONDS)
 }
