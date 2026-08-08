@@ -3,6 +3,7 @@ pub mod models;
 mod remote_history;
 mod host_key;
 mod ssh_config;
+mod ssh_keys;
 pub mod storage;
 mod terminal;
 
@@ -189,19 +190,26 @@ fn save_server(database: State<'_, Database>, draft: ServerDraft) -> Result<Serv
 }
 
 #[tauri::command]
-async fn delete_server(database: State<'_, Database>, server_id: String) -> Result<RemoteCleanupResult, String> {
+async fn delete_server(database: State<'_, Database>, server_id: String, revoke_ssh_access: bool) -> Result<RemoteCleanupResult, String> {
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
-    match remote_history::remove(&server, password.as_deref()).await {
+    let password = if server.auth_method == "password" { database.get_password(&server_id).unwrap_or(None) } else { None };
+    let managed_public_key = if revoke_ssh_access {
+        Some(ssh_keys::managed_public_key(&server)?.ok_or("这台服务器未使用 RackTop 专用密钥，无法自动撤销免密登录")?)
+    } else {
+        None
+    };
+    match remote_history::remove(&server, password.as_deref(), managed_public_key.as_deref()).await {
         Ok(()) => {
             database.delete_server(&server_id)?;
-            Ok(RemoteCleanupResult { remote_cleaned: true, cleanup_pending: false, message: format!("已删除“{}”及其本地与远端 RackTop 数据", server.name) })
+            let suffix = if revoke_ssh_access { "，并已撤销 RackTop 免密登录" } else { "" };
+            Ok(RemoteCleanupResult { remote_cleaned: true, cleanup_pending: false, message: format!("已删除“{}”及其本地与远端 RackTop 数据{}", server.name, suffix) })
         }
         Err(error) => {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|reason| reason.to_string())?.as_secs() as i64;
-            database.enqueue_remote_cleanup(&server, now, &error)?;
+            database.enqueue_remote_cleanup(&server, now, &error, managed_public_key.as_deref())?;
             database.delete_server_record(&server_id, false)?;
-            Ok(RemoteCleanupResult { remote_cleaned: false, cleanup_pending: true, message: format!("已删除“{}”的本地记录；远端清理将在重新连接后自动重试 24 小时", server.name) })
+            let scope = if revoke_ssh_access { "远端数据与免密授权" } else { "远端数据" };
+            Ok(RemoteCleanupResult { remote_cleaned: false, cleanup_pending: true, message: format!("已删除“{}”的本地记录；{}清理将在重新连接后自动重试 24 小时", server.name, scope) })
         }
     }
 }
@@ -336,7 +344,7 @@ async fn retry_remote_cleanups(database: State<'_, Database>) -> Result<RemoteCl
             continue;
         }
         let password = if task.server.auth_method == "password" { database.get_password(&task.server.id)? } else { None };
-        match remote_history::remove(&task.server, password.as_deref()).await {
+        match remote_history::remove(&task.server, password.as_deref(), task.managed_public_key.as_deref()).await {
             Ok(()) => {
                 database.finish_remote_cleanup(&task.server.id)?;
                 result.cleaned_names.push(task.server.name);

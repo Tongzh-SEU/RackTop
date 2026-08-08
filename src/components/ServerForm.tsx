@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { AlertTriangle, ArrowRight, Check, ChevronRight, Copy, Database, KeyRound, ShieldCheck, Terminal, X } from 'lucide-react'
 import type { ServerDraft } from '../types/models'
-import { sshSetupTargetValidationMessage, unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
+import { RACKTOP_MANAGED_IDENTITY_PATH, sshSetupTargetValidationMessage, unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
 
 interface ServerFormProps {
   initial?: Partial<ServerDraft>
@@ -52,6 +52,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
     }
     try {
       await navigator.clipboard.writeText(setupScript)
+      setDraft((current) => ({ ...current, authMethod: 'privateKey', identityFile: RACKTOP_MANAGED_IDENTITY_PATH }))
       setSetupCopyAttempted(false)
       setSetupCopied(true)
       window.setTimeout(() => setSetupCopied(false), 1600)
@@ -84,11 +85,11 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
             <button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button>
           </header>
           <div className="ssh-onboarding__body">
-            <div className="ssh-onboarding__lead"><span><KeyRound size={22} /></span><div><strong>Ed25519 密钥 + SSH Agent</strong><p>不在 RackTop 中保存服务器密码，终端和监控连接可复用同一份系统 SSH 凭据。</p></div><em>推荐</em></div>
+            <div className="ssh-onboarding__lead"><span><KeyRound size={22} /></span><div><strong>RackTop 专用 Ed25519 密钥</strong><p>与日常 SSH 密钥分开保存，删除服务器时可以精确撤销 RackTop 的免密授权。</p></div><em>推荐</em></div>
             <ol className="ssh-onboarding__steps">
               <li><span>1</span><div><strong>填写连接地址</strong><p>输入服务器 IP、端口和用户名；物理位置只用于现场查找机器。</p></div></li>
               <li><span>2</span><div><strong>复制快速配置</strong><p>在认证方式下展开“SSH 密钥快速配置”，复制为当前服务器生成的整段命令。</p></div></li>
-              <li><span>3</span><div><strong>在本机终端执行</strong><p>命令会在缺少密钥时创建 Ed25519 密钥、写入服务器并测试免密连接，再返回 RackTop 保存。</p></div></li>
+              <li><span>3</span><div><strong>在本机终端执行</strong><p>命令会创建 RackTop 专用密钥、写入服务器并验证专用密钥登录，再返回 RackTop 保存。</p></div></li>
             </ol>
             <div className="ssh-onboarding__notes"><span><Terminal size={16} /><p><strong>已有 SSH 配置？</strong>可直接选择 SSH Agent、私钥或 SSH Config。首次连接仍需核对 Host Key 指纹。</p></span><label><input type="checkbox" checked={dismissGuide} onChange={(event) => setDismissGuide(event.target.checked)} />以后新增服务器时直接进入表单</label></div>
           </div>
@@ -143,12 +144,12 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
                 <AlertTriangle size={20} />
                 <div>
                   <strong>不建议长期使用密码登录</strong>
-                  <p>优先使用 Ed25519 私钥或 SSH Agent。RackTop 不会把密码写入配置或 SQLite；选择保存时仅写入系统安全凭据存储。</p>
+                  <p>优先使用 SSH Agent。RackTop 不会把密码写入配置或 SQLite；选择保存时仅写入系统安全凭据存储。</p>
                   <label className="checkbox-row">
                     <input type="checkbox" checked={passwordAcknowledged} onChange={(event) => setPasswordAcknowledged(event.target.checked)} />
                     我理解风险并继续使用密码
                   </label>
-                  <button type="button" className="button button--secondary button--small" onClick={() => set('authMethod', 'privateKey')}><KeyRound size={14} />使用 SSH 私钥（推荐）</button>
+                  <button type="button" className="button button--secondary button--small" onClick={() => { set('authMethod', 'sshAgent'); setPasswordAcknowledged(false) }}><KeyRound size={14} />改用 SSH Agent（推荐）</button>
                 </div>
               </div>
             )}
@@ -161,7 +162,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
             <details className="key-guide">
               <summary>
                 <span className="key-guide__summary-icon"><KeyRound size={17} /></span>
-                <span className="key-guide__summary-copy"><strong>SSH 密钥快速配置</strong><small>生成并复制当前服务器的免密登录命令</small></span>
+                <span className="key-guide__summary-copy"><strong>SSH 密钥快速配置</strong><small>配置可独立撤销的 RackTop 专用密钥</small></span>
                 <ChevronRight className="key-guide__chevron" size={16} aria-hidden="true" />
               </summary>
               <div className="key-guide__toolbar">

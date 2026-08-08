@@ -1,4 +1,5 @@
 use crate::models::{CpuProcessMetric, DiskMetric, GpuMetric, ProcessMetric, Server, Snapshot, SystemMetric};
+use crate::ssh_keys::expand_identity_path;
 use std::{collections::{HashMap, HashSet}, process::Stdio, time::{SystemTime, UNIX_EPOCH}};
 use tokio::{process::Command, time::{timeout, Duration}};
 
@@ -113,7 +114,7 @@ pub async fn collect_with_password_detailed(server: &Server, password: Option<&s
         if include_disks { 1 } else { 0 },
         if server.remote_history_enabled { 1 } else { 0 },
     )).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let output = timeout(Duration::from_secs(15), command.output()).await.map_err(|_| format!("连接 {} 超时（15 秒）", server.name))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
+    let output = timeout(Duration::from_secs(30), command.output()).await.map_err(|_| format!("连接 {} 超时（30 秒）", server.name))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(classify_ssh_error(&stderr));
@@ -143,12 +144,6 @@ pub fn collection_display_command(server: &Server, include_processes: bool, incl
     } else {
         arguments.push("-o BatchMode=yes".to_string());
     }
-    #[cfg(unix)]
-    arguments.extend([
-        "-o ControlMaster=auto".to_string(),
-        "-o ControlPersist=600".to_string(),
-        "-o ControlPath=/tmp/racktop-%C".to_string(),
-    ]);
     if let Some(identity) = server.identity_file.as_deref().filter(|value| !value.is_empty()) {
         arguments.push(format!("-i {}", shell_quote(identity)));
     }
@@ -169,6 +164,14 @@ pub fn collection_display_command(server: &Server, include_processes: bool, incl
 }
 
 pub(crate) fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<(Command, String), String> {
+    configured_ssh_command_with_control(server, password, false)
+}
+
+pub(crate) fn configured_ssh_command_without_control(server: &Server, password: Option<&str>) -> Result<(Command, String), String> {
+    configured_ssh_command_with_control(server, password, false)
+}
+
+fn configured_ssh_command_with_control(server: &Server, password: Option<&str>, use_control_master: bool) -> Result<(Command, String), String> {
     let mut command = Command::new("ssh");
     command.args(["-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=yes"]);
     if server.auth_method == "password" {
@@ -185,9 +188,13 @@ pub(crate) fn configured_ssh_command(server: &Server, password: Option<&str>) ->
         command.args(["-o", "BatchMode=yes"]);
     }
     #[cfg(unix)]
-    command.args(["-o", "ControlMaster=auto", "-o", "ControlPersist=600", "-o", "ControlPath=/tmp/racktop-%C"]);
+    if use_control_master {
+        command.args(["-o", "ControlMaster=auto", "-o", "ControlPersist=600", "-o", "ControlPath=/tmp/racktop-%C"]);
+    } else {
+        command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
+    }
     if let Some(identity) = server.identity_file.as_deref().filter(|value| !value.is_empty()) {
-        command.args(["-i", identity]);
+        command.arg("-i").arg(expand_identity_path(identity));
     }
     if let Some(proxy) = server.proxy_jump.as_deref().filter(|value| !value.is_empty()) {
         command.args(["-J", proxy]);
