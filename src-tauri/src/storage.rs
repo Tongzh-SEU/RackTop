@@ -16,6 +16,7 @@ const LONG_HISTORY_BUCKET_SECONDS: i64 = 10 * 60;
 pub struct RemoteCleanupTask {
     pub server: Server,
     pub expires_at: i64,
+    pub managed_public_key: Option<String>,
 }
 
 pub struct Database {
@@ -396,9 +397,18 @@ impl Database {
                 server_json TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
-                last_error TEXT
+                last_error TEXT,
+                managed_public_key TEXT
              );"
         ).map_err(|error| error.to_string())?;
+        let cleanup_columns = {
+            let mut statement = connection.prepare("PRAGMA table_info(remote_cleanup_queue)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
+            columns.filter_map(Result::ok).collect::<HashSet<_>>()
+        };
+        if !cleanup_columns.contains("managed_public_key") {
+            connection.execute("ALTER TABLE remote_cleanup_queue ADD COLUMN managed_public_key TEXT", []).map_err(|error| error.to_string())?;
+        }
         connection.execute_batch("CREATE TABLE IF NOT EXISTS storage_migrations (key TEXT PRIMARY KEY, applied_at INTEGER NOT NULL);").map_err(|error| error.to_string())?;
         let snapshot_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(snapshots)").map_err(|error| error.to_string())?;
@@ -574,23 +584,23 @@ impl Database {
         Ok(())
     }
 
-    pub fn enqueue_remote_cleanup(&self, server: &Server, now: i64, error: &str) -> Result<(), String> {
+    pub fn enqueue_remote_cleanup(&self, server: &Server, now: i64, error: &str, managed_public_key: Option<&str>) -> Result<(), String> {
         let server_json = serde_json::to_string(server).map_err(|error| error.to_string())?;
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         connection.execute(
-            "INSERT INTO remote_cleanup_queue (server_id,server_json,created_at,expires_at,last_error) VALUES (?1,?2,?3,?4,?5)
-             ON CONFLICT(server_id) DO UPDATE SET server_json=excluded.server_json,expires_at=excluded.expires_at,last_error=excluded.last_error",
-            params![server.id, server_json, now, now + REMOTE_CLEANUP_TTL_SECONDS, error],
+            "INSERT INTO remote_cleanup_queue (server_id,server_json,created_at,expires_at,last_error,managed_public_key) VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(server_id) DO UPDATE SET server_json=excluded.server_json,expires_at=excluded.expires_at,last_error=excluded.last_error,managed_public_key=excluded.managed_public_key",
+            params![server.id, server_json, now, now + REMOTE_CLEANUP_TTL_SECONDS, error, managed_public_key],
         ).map_err(|error| error.to_string())?;
         Ok(())
     }
 
     pub fn list_remote_cleanup_tasks(&self) -> Result<Vec<RemoteCleanupTask>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let mut statement = connection.prepare("SELECT server_json,expires_at,last_error FROM remote_cleanup_queue ORDER BY created_at").map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT server_json,expires_at,last_error,managed_public_key FROM remote_cleanup_queue ORDER BY created_at").map_err(|error| error.to_string())?;
         let rows = statement.query_map([], |row| {
             let server_json: String = row.get(0)?;
-            Ok(RemoteCleanupTask { server: serde_json::from_str(&server_json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?, expires_at: row.get(1)? })
+            Ok(RemoteCleanupTask { server: serde_json::from_str(&server_json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?, expires_at: row.get(1)?, managed_public_key: row.get(3)? })
         }).map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
@@ -1318,13 +1328,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("cleanup.sqlite")).unwrap();
         let saved = db.save_server(ServerDraft { remote_history_enabled: true, ..draft("cleanup", 30) }).unwrap();
-        db.enqueue_remote_cleanup(&saved, 10_000, "offline").unwrap();
+        db.enqueue_remote_cleanup(&saved, 10_000, "offline", Some("ssh-ed25519 test-key")).unwrap();
         db.delete_server_record(&saved.id, false).unwrap();
 
         let tasks = db.list_remote_cleanup_tasks().unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].server.name, "cleanup");
         assert_eq!(tasks[0].expires_at, 10_000 + 86_400);
+        assert_eq!(tasks[0].managed_public_key.as_deref(), Some("ssh-ed25519 test-key"));
 
         db.finish_remote_cleanup(&saved.id).unwrap();
         assert!(db.list_remote_cleanup_tasks().unwrap().is_empty());

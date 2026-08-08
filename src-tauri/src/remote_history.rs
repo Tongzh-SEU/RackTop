@@ -1,5 +1,5 @@
 use crate::{
-    collector::{classify_ssh_error, configured_ssh_command},
+    collector::{classify_ssh_error, configured_ssh_command, configured_ssh_command_without_control},
     models::{HistoryPoint, Server, UsagePoint},
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -31,9 +31,37 @@ pub async fn configure(server: &Server, password: Option<&str>) -> Result<(), St
     }
 }
 
-pub async fn remove(server: &Server, password: Option<&str>) -> Result<(), String> {
-    let output = run_remote_command(server, password, REMOTE_REMOVE_SCRIPT, Duration::from_secs(20)).await?;
-    if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_REMOVED__") { Ok(()) } else { Err("远端 RackTop 数据清理后未返回确认标记".into()) }
+pub async fn remove(server: &Server, password: Option<&str>, managed_public_key: Option<&str>) -> Result<(), String> {
+    let script = build_remove_script(managed_public_key)?;
+    let output = run_remote_cleanup_command(server, password, &script, Duration::from_secs(8)).await?;
+    if !output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_REMOVED__") {
+        return Err("远端 RackTop 数据清理后未返回确认标记".into());
+    }
+    if managed_public_key.is_some() && !output.lines().any(|line| line.trim() == "__RACKTOP_SSH_ACCESS_REVOKED__") {
+        return Err("远端免密登录撤销后未返回确认标记".into());
+    }
+    Ok(())
+}
+
+fn build_remove_script(managed_public_key: Option<&str>) -> Result<String, String> {
+    let Some(public_key) = managed_public_key else {
+        return Ok(REMOTE_REMOVE_SCRIPT.to_string());
+    };
+    let key_blob = public_key.split_whitespace().nth(1)
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')))
+        .ok_or("RackTop 专用公钥格式无效，无法撤销免密登录")?;
+    STANDARD.decode(key_blob).map_err(|_| "RackTop 专用公钥格式无效，无法撤销免密登录".to_string())?;
+    Ok(format!(r#"{REMOTE_REMOVE_SCRIPT}
+authorized_keys="$HOME/.ssh/authorized_keys"
+if [ -f "$authorized_keys" ]; then
+  key_blob='{key_blob}'
+  temporary="$authorized_keys.racktop.$$"
+  awk -v key="$key_blob" '{{ keep=1; for (i=1; i<NF; i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/ && $(i+1) == key) keep=0; if (keep) print }}' "$authorized_keys" > "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$authorized_keys"
+fi
+printf '__RACKTOP_SSH_ACCESS_REVOKED__\n'
+"#))
 }
 
 pub async fn fetch(server: &Server, password: Option<&str>, since_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
@@ -113,6 +141,16 @@ async fn run_remote_command(server: &Server, password: Option<&str>, script: &st
     let (mut command, target) = configured_ssh_command(server, password)?;
     command.arg(target).arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = timeout(duration, command.output()).await.map_err(|_| format!("连接 {} 同步历史超时", server.name))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
+    if !output.status.success() {
+        return Err(classify_ssh_error(String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+async fn run_remote_cleanup_command(server: &Server, password: Option<&str>, script: &str, duration: Duration) -> Result<String, String> {
+    let (mut command, target) = configured_ssh_command_without_control(server, password)?;
+    command.arg(target).arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = timeout(duration, command.output()).await.map_err(|_| format!("连接 {} 删除远端数据超时", server.name))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
     if !output.status.success() {
         return Err(classify_ssh_error(String::from_utf8_lossy(&output.stderr).trim()));
     }
@@ -210,6 +248,42 @@ mod tests {
         assert!(REMOTE_REMOVE_SCRIPT.contains("kill -KILL \"$pid\""));
         assert!(REMOTE_REMOVE_SCRIPT.contains("rm -rf -- \"$state\""));
         assert!(!REMOTE_REMOVE_SCRIPT.contains("rm -rf -- $HOME"));
+    }
+
+    #[test]
+    fn revocation_removes_only_the_matching_public_key_blob() {
+        let directory = tempfile::tempdir().unwrap();
+        let ssh_directory = directory.path().join(".ssh");
+        std::fs::create_dir(&ssh_directory).unwrap();
+        let authorized_keys = ssh_directory.join("authorized_keys");
+        let matching_blob = STANDARD.encode(b"racktop-key-material");
+        let other_blob = STANDARD.encode(b"another-key-material");
+        let options_blob = STANDARD.encode(b"options-key-material");
+        let original = format!(
+            "ssh-ed25519 {matching_blob} racktop-managed:old-comment\nssh-ed25519 {other_blob} racktop-managed:same-looking-comment\nfrom=\"10.0.0.0/8\",no-agent-forwarding ssh-ed25519 {options_blob} constrained-key\nssh-ed25519 {matching_blob} duplicate-racktop-entry\n\n"
+        );
+        std::fs::write(&authorized_keys, original).unwrap();
+
+        let script = build_remove_script(Some(&format!("ssh-ed25519 {matching_blob} ignored-comment"))).unwrap();
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", directory.path())
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("__RACKTOP_SSH_ACCESS_REVOKED__"));
+        let filtered = std::fs::read_to_string(authorized_keys).unwrap();
+        assert!(!filtered.contains(&matching_blob));
+        assert!(filtered.contains(&format!("ssh-ed25519 {other_blob} racktop-managed:same-looking-comment")));
+        assert!(filtered.contains(&format!("from=\"10.0.0.0/8\",no-agent-forwarding ssh-ed25519 {options_blob} constrained-key")));
+        assert!(filtered.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn revocation_rejects_an_invalid_key_blob_before_running_ssh() {
+        assert!(build_remove_script(Some("ssh-ed25519 not-a/base64'value")).is_err());
     }
 
     #[test]

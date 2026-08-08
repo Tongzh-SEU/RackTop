@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
 import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
 import { clampPercent, gpuMemoryPercent } from '../utils/gpu'
+import { RACKTOP_MANAGED_IDENTITY_PATH } from '../utils/sshSetup'
 
 const isTauri = '__TAURI_INTERNALS__' in window
 
@@ -19,7 +20,8 @@ const demoServers: Server[] = [
     historyRetentionDays: 30,
     remoteHistoryEnabled: false,
     sortOrder: 0,
-    authMethod: 'sshAgent',
+    authMethod: 'privateKey',
+    identityFile: RACKTOP_MANAGED_IDENTITY_PATH,
     status: 'online',
     lastSeenAt: now,
   },
@@ -35,7 +37,8 @@ const demoServers: Server[] = [
     historyRetentionDays: 30,
     remoteHistoryEnabled: false,
     sortOrder: 1,
-    authMethod: 'sshAgent',
+    authMethod: 'privateKey',
+    identityFile: RACKTOP_MANAGED_IDENTITY_PATH,
     status: 'online',
     lastSeenAt: now,
   },
@@ -172,8 +175,8 @@ export const api = {
     browserServers = [...browserServers.filter((item) => item.id !== server.id), server]
     return server
   },
-  async deleteServer(serverId: string): Promise<RemoteCleanupResult> {
-    if (isTauri) return invoke('delete_server', { serverId })
+  async deleteServer(serverId: string, revokeSshAccess = false): Promise<RemoteCleanupResult> {
+    if (isTauri) return invoke('delete_server', { serverId, revokeSshAccess })
     browserServers = browserServers.filter((server) => server.id !== serverId)
     return { remoteCleaned: true, cleanupPending: false, message: '服务器已删除' }
   },

@@ -53,6 +53,8 @@ import {
 import { api } from './services/api'
 import { openExternalUrl } from './services/external'
 import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
+import { isRackTopManagedIdentity } from './utils/sshSetup'
+import { DeleteServerDialog } from './components/DeleteServerDialog'
 import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
@@ -806,10 +808,10 @@ function App() {
     await refreshServer(saved.id)
   }
 
-  async function removeServer(server: Server) {
+  async function removeServer(server: Server, revokeSshAccess: boolean) {
     deletedServerIds.current.add(server.id)
     try {
-      const deletion = await api.deleteServer(server.id)
+      const deletion = await api.deleteServer(server.id, revokeSshAccess)
       const nextSelectedId = servers.find((item) => item.id !== server.id)?.id ?? null
       setServers((current) => current.filter((item) => item.id !== server.id))
       setSelectedServerId((current) => current === server.id ? nextSelectedId : current)
@@ -1041,8 +1043,8 @@ function App() {
                 <span className="server-row__drag" aria-hidden="true" onMouseDown={(event) => beginServerMouseDrag(event, server.id)}><GripVertical size={13} /></span>
                 <span className={`server-row__status server-row__status--${server.status}`} />
                 <span className="server-row__content">
-                  <span className="server-row__title">{server.name}</span>
-                  <span className="server-row__meta">{snapshot ? `${snapshot.gpus.length} GPU ${Math.round(aggregateGpuMemoryPercent(snapshot.gpus))}% · CPU ${Math.round(clampPercent(snapshot.system.memoryTotalBytes ? snapshot.system.memoryUsedBytes / snapshot.system.memoryTotalBytes * 100 : 0))}%` : server.host}</span>
+                  <span className="server-row__title">{server.name || server.host}</span>
+                  <span className="server-row__meta">{snapshot ? `${snapshot.gpus.length} GPU ${Math.round(aggregateGpuMemoryPercent(snapshot.gpus))}% · CPU ${Math.round(clampPercent(snapshot.system.memoryTotalBytes ? snapshot.system.memoryUsedBytes / snapshot.system.memoryTotalBytes * 100 : 0))}%` : server.name.trim() === server.host.trim() ? (server.status === 'offline' ? '暂时离线 · 可重新连接' : '等待首次采样') : server.host}</span>
                 </span>
                 {snapshot?.processes.some((process) => process.isCurrentUser) && <span className="own-task-dot" title="有你的任务"><UserRound size={11} /></span>}
                 <ChevronRight size={14} className="server-row__chevron" />
@@ -1114,7 +1116,7 @@ function App() {
               onRestoreGpuMemoryStallWarning={restoreGpuMemoryStallWarning}
             />
           ) : (
-            <LoadingServer server={selectedServer} isRefreshing={selectedServer ? busy.has(selectedServer.id) : false} onRefresh={() => selectedServer && void refreshServer(selectedServer.id)} />
+            <LoadingServer server={selectedServer} isRefreshing={selectedServer ? busy.has(selectedServer.id) : false} onRefresh={() => selectedServer && void refreshServer(selectedServer.id)} onDelete={() => selectedServer && setServerPendingDelete(selectedServer)} />
           )}
         </div>
       </main>
@@ -1125,7 +1127,7 @@ function App() {
       {showAbout && <AboutSheet onClose={() => setShowAbout(false)} onNotice={setToast} />}
       {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setImportDrafts(null); setToast(`已导入 ${selected.length} 台服务器`) }} />}
       {pendingHostKey && <HostKeyDialog info={pendingHostKey} onClose={() => setPendingHostKey(null)} onTrust={async () => { const serverId = pendingHostKey.serverId; await api.trustHostKey(pendingHostKey); setPendingHostKey(null); setToast('已信任服务器指纹'); await refreshServer(serverId) }} />}
-      {serverPendingDelete && <DeleteServerDialog server={serverPendingDelete} onClose={() => setServerPendingDelete(null)} onDelete={() => removeServer(serverPendingDelete)} />}
+      {serverPendingDelete && <DeleteServerDialog server={serverPendingDelete} onClose={() => setServerPendingDelete(null)} onDelete={(revokeSshAccess) => removeServer(serverPendingDelete, revokeSshAccess)} />}
       {processPendingTermination && <TerminateProcessDialog target={processPendingTermination} onClose={() => setProcessPendingTermination(null)} onTerminate={() => { const target = processPendingTermination; setProcessPendingTermination(null); setTerminatingProcess({ serverId: target.serverId, pid: target.process.pid }); void api.terminateProcess(target.serverId, target.process.pid).then(async (result) => { setToast(result); await refreshServer(target.serverId) }).catch((reason) => setToast(`结束 PID ${target.process.pid} 失败：${String(reason)}`)).finally(() => setTerminatingProcess(null)) }} />}
       {reservationEditor && <IdleReservationSheet reservation={reservationEditor.reservation} filters={reservationEditor.filters} availableGpuKeys={reservationEditorItems.filter((item) => item.available).map(({ server, gpu }) => idleReservationGpuKey(server.id, gpu.uuid))} onClose={() => setReservationEditor(null)} onSave={saveIdleReservation} />}
       {showReservationCenter && <IdleReservationCenter reservations={idleReservations} warnings={gpuMemoryStallWarnings} onClose={() => setShowReservationCenter(false)} onEdit={(reservation) => { setShowReservationCenter(false); setReservationEditor({ filters: reservation.filters, reservation }) }} onStatusChange={setIdleReservationStatus} onClearPending={clearReservationPending} onDelete={removeIdleReservation} onIgnoreWarning={ignoreGpuMemoryStallWarning} />}
@@ -1146,7 +1148,7 @@ function EmptyState({ onAdd, onImport }: { onAdd: () => void; onImport: () => vo
   )
 }
 
-function LoadingServer({ server, isRefreshing, onRefresh }: { server?: Server; isRefreshing: boolean; onRefresh: () => void }) {
+function LoadingServer({ server, isRefreshing, onRefresh, onDelete }: { server?: Server; isRefreshing: boolean; onRefresh: () => void; onDelete: () => void }) {
   const isConnecting = isRefreshing || server?.status === 'connecting'
   const isOffline = server?.status === 'offline'
   return (
@@ -1154,7 +1156,7 @@ function LoadingServer({ server, isRefreshing, onRefresh }: { server?: Server; i
       <span className="empty-state__icon"><Network size={28} /></span>
       <h2>{isConnecting ? `正在连接 ${server ? serverDisplayName(server.name) : ''}` : isOffline ? `${server ? serverDisplayName(server.name) : '服务器'} 当前离线` : '尚无采样数据'}</h2>
       <p>{server?.lastError ?? '通过 SSH 获取第一份指标后，这里会显示完整服务器详情。'}</p>
-      <button className="button button--primary" onClick={onRefresh} disabled={isConnecting}><RefreshCw size={17} className={isConnecting ? 'spin' : ''} />{isConnecting ? '连接中…' : isOffline ? '重新连接' : '立即连接'}</button>
+      <div className="loading-server__actions"><button className="button button--primary" onClick={onRefresh} disabled={isConnecting}><RefreshCw size={17} className={isConnecting ? 'spin' : ''} />{isConnecting ? '连接中…' : isOffline ? '重新连接' : '立即连接'}</button>{server && <button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除服务器</button>}</div>
     </div>
   )
 }
@@ -1417,7 +1419,7 @@ function ConnectionView({ server, snapshot, nvidiaWarningIgnored, ignoredGpuMemo
   const canRestoreNvidiaWarning = nvidiaWarningIgnored && snapshot.nvidiaSmi !== 'available'
   const ignoredMemoryWarnings = ignoredGpuMemoryStallGpus(server.id, snapshot, ignoredGpuMemoryStallWarningIds)
   const ignoredCount = ignoredMemoryWarnings.length + (canRestoreNvidiaWarning ? 1 : 0)
-  return <div className="content-stack"><section className="panel connection-panel"><PanelHeader icon={<KeyRound />} title="SSH 连接" subtitle="认证信息仅在本机使用" /><dl className="definition-list"><div><dt>物理位置</dt><dd>{server.location || '未填写'}</dd></div><div><dt>连接地址</dt><dd className="mono">{server.username}@{server.host}:{server.port}</dd></div><div><dt>认证</dt><dd>{server.authMethod === 'sshAgent' ? 'SSH Agent / 默认密钥' : server.authMethod}</dd></div><div><dt>SSH Config</dt><dd>{server.sshAlias || '未使用别名'}</dd></div><div><dt>私钥</dt><dd className="mono">{server.identityFile || '由 OpenSSH 自动选择'}</dd></div><div><dt>ProxyJump</dt><dd className="mono">{server.proxyJump || '无'}</dd></div><div><dt>远端历史</dt><dd>{server.remoteHistoryEnabled ? `已启用 · ${server.remoteHistoryLastSyncAt ? `同步于 ${relativeTime(server.remoteHistoryLastSyncAt)}` : '等待首次同步'}` : '未启用'}</dd></div></dl><div className="panel__actions"><button className="button button--primary" onClick={onRefresh} disabled={isRefreshing}><RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />测试并重新连接</button><button className="button button--secondary" onClick={onEdit}><Settings size={16} />编辑配置</button></div></section>{ignoredCount > 0 && <section className="panel ignored-warning-list"><PanelHeader icon={<BellOff />} title="已忽略的 GPU 提醒" subtitle={`${ignoredCount} 项提醒仅在此处保留`} /><div>{canRestoreNvidiaWarning && <div className="ignored-warning-row"><div><strong>GPU 读取异常</strong><p>不可读取的显卡仍会显示，但服务器状态暂按在线处理。</p></div><button className="button button--secondary button--small" onClick={onRestoreNvidiaWarning}><Bell size={14} />恢复提醒</button></div>}{ignoredMemoryWarnings.map((gpu) => <div className="ignored-warning-row" key={gpu.uuid}><div><strong>GPU {gpu.index} · {gpu.name.replace(/^NVIDIA\s+/i, '')} 显存占用预警</strong><p>当前占用 {(gpu.memoryUsedMb / 1024).toFixed(1)} / {(gpu.memoryTotalMb / 1024).toFixed(1)} GB，UTL {clampPercent(gpu.utilization).toFixed(0)}%。</p></div><button className="button button--secondary button--small" onClick={() => onRestoreGpuMemoryStallWarning(`gpu-memory-stall:${server.id}:${gpu.uuid}`)}><Bell size={14} />恢复提醒</button></div>)}</div></section>}<section className="panel danger-zone"><div><strong>删除服务器</strong><p>删除本机记录、历史数据、远端采集进程和服务器用户目录中的 RackTop 数据。</p></div><button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除</button></section></div>
+  return <div className="content-stack"><section className="panel connection-panel"><PanelHeader icon={<KeyRound />} title="SSH 连接" subtitle="认证信息仅在本机使用" /><dl className="definition-list"><div><dt>物理位置</dt><dd>{server.location || '未填写'}</dd></div><div><dt>连接地址</dt><dd className="mono">{server.username}@{server.host}:{server.port}</dd></div><div><dt>认证</dt><dd>{isRackTopManagedIdentity(server.identityFile) ? 'RackTop 专用密钥' : server.authMethod === 'sshAgent' ? 'SSH Agent / 默认密钥' : server.authMethod === 'privateKey' ? '指定私钥' : server.authMethod === 'sshConfig' ? 'SSH Config' : '系统钥匙串密码'}</dd></div><div><dt>SSH Config</dt><dd>{server.sshAlias || '未使用别名'}</dd></div><div><dt>私钥</dt><dd className="mono">{server.identityFile || '由 OpenSSH 自动选择'}</dd></div><div><dt>ProxyJump</dt><dd className="mono">{server.proxyJump || '无'}</dd></div><div><dt>远端历史</dt><dd>{server.remoteHistoryEnabled ? `已启用 · ${server.remoteHistoryLastSyncAt ? `同步于 ${relativeTime(server.remoteHistoryLastSyncAt)}` : '等待首次同步'}` : '未启用'}</dd></div></dl><div className="panel__actions"><button className="button button--primary" onClick={onRefresh} disabled={isRefreshing}><RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />测试并重新连接</button><button className="button button--secondary" onClick={onEdit}><Settings size={16} />编辑配置</button></div></section>{ignoredCount > 0 && <section className="panel ignored-warning-list"><PanelHeader icon={<BellOff />} title="已忽略的 GPU 提醒" subtitle={`${ignoredCount} 项提醒仅在此处保留`} /><div>{canRestoreNvidiaWarning && <div className="ignored-warning-row"><div><strong>GPU 读取异常</strong><p>不可读取的显卡仍会显示，但服务器状态暂按在线处理。</p></div><button className="button button--secondary button--small" onClick={onRestoreNvidiaWarning}><Bell size={14} />恢复提醒</button></div>}{ignoredMemoryWarnings.map((gpu) => <div className="ignored-warning-row" key={gpu.uuid}><div><strong>GPU {gpu.index} · {gpu.name.replace(/^NVIDIA\s+/i, '')} 显存占用预警</strong><p>当前占用 {(gpu.memoryUsedMb / 1024).toFixed(1)} / {(gpu.memoryTotalMb / 1024).toFixed(1)} GB，UTL {clampPercent(gpu.utilization).toFixed(0)}%。</p></div><button className="button button--secondary button--small" onClick={() => onRestoreGpuMemoryStallWarning(`gpu-memory-stall:${server.id}:${gpu.uuid}`)}><Bell size={14} />恢复提醒</button></div>)}</div></section>}<section className="panel danger-zone"><div><strong>删除服务器</strong><p>删除本机记录、历史数据、远端采集进程和服务器用户目录中的 RackTop 数据。</p></div><button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除</button></section></div>
 }
 
 function NvidiaWarning({ snapshot, onRefresh, onIgnore }: { snapshot: Snapshot; onRefresh: () => void; onIgnore: () => void }) {
@@ -1860,12 +1862,6 @@ function TerminateProcessDialog({ target, onClose, onTerminate }: { target: Proc
     }
   }
   return <div className="scrim"><section className="sheet terminate-process-sheet" role="alertdialog" aria-modal="true" aria-labelledby="terminate-process-title"><header className="sheet__header"><div><p className="eyebrow">结束远程进程</p><h2 id="terminate-process-title">{stage === 'review' ? `确认结束 PID ${pid}？` : '再次确认进程 PID'}</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header><div className="terminate-process-body"><span className="terminate-process-icon"><OctagonX size={24} /></span><div className="terminate-process-copy">{stage === 'review' ? <><p>将在 <strong>{target.serverName}</strong> 上结束当前 SSH 用户的 PID {pid}，并递归清理它下面的 CPU 子进程。同一终端中不相关的兄弟进程不会被结束。</p><dl><div><dt>进程</dt><dd>{target.kind.toUpperCase()} · PID {pid}</dd></div><div><dt>命令</dt><dd className="mono">{target.process.command}</dd></div></dl><small>先发送 TERM，3 秒后仍存在则发送 KILL。未保存的计算状态可能丢失。</small></> : <><p>点击下方 PID 可自动复制，然后将数字输入确认框。</p><button type="button" className={`copy-pid-button ${copied ? 'is-copied' : ''}`} onClick={() => void copyPid()} aria-label={`复制 PID ${pid}`}>{copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}<code>{copied ? `已复制 PID ${pid}` : `PID ${pid}`}</code></button><label>输入 PID 以确认<input autoFocus inputMode="numeric" value={confirmation} onChange={(event) => setConfirmation(event.target.value.replace(/\D/g, ''))} placeholder={expected} /></label></>}{error && <p className="form-error" role="alert">{error}</p>}</div></div><footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>取消</button>{stage === 'review' ? <button className="button button--danger" onClick={() => setStage('verify')}>继续确认</button> : <button className="button button--danger" disabled={confirmation !== expected} onClick={onTerminate}>结束进程</button>}</footer></section></div>
-}
-
-function DeleteServerDialog({ server, onClose, onDelete }: { server: Server; onClose: () => void; onDelete: () => Promise<void> }) {
-  const [deleting, setDeleting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  return <div className="scrim"><section className="sheet delete-server-sheet" role="alertdialog" aria-modal="true" aria-labelledby="delete-server-title"><header className="sheet__header"><div><p className="eyebrow">删除服务器</p><h2 id="delete-server-title">确认删除“{server.name}”？</h2></div><button className="icon-button" onClick={onClose} disabled={deleting} aria-label="关闭"><X size={18} /></button></header><div className="delete-server-body"><span className="delete-server-icon"><Trash2 size={24} /></span><div><p>将从 RackTop 移除 <strong>{server.username}@{server.host}:{server.port}</strong>，并删除本机历史、远端采集进程及 <code>~/.racktop</code> 中的 RackTop 数据。</p><small>服务器上的其他文件不会受到影响；远端暂时不可达时会在 24 小时内自动重试。</small></div>{error && <p className="form-error" role="alert">删除失败：{error}</p>}</div><footer className="sheet__footer"><button className="button button--secondary" onClick={onClose} disabled={deleting}>取消</button><button className="button button--danger" disabled={deleting} onClick={async () => { setDeleting(true); setError(null); try { await onDelete() } catch (reason) { setError(String(reason)); setDeleting(false) } }}>{deleting ? '删除中…' : '删除全部数据'}</button></footer></section></div>
 }
 
 function HostKeyDialog({ info, onClose, onTrust }: { info: HostKeyInfo; onClose: () => void; onTrust: () => Promise<void> }) {
