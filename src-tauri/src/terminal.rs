@@ -1,4 +1,5 @@
 use crate::models::Server;
+use crate::ssh_keys::expand_identity_path;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -132,7 +133,8 @@ fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<Com
     #[cfg(unix)]
     command.args(["-o", "ControlMaster=auto", "-o", "ControlPersist=600", "-o", "ControlPath=/tmp/racktop-%C"]);
     if let Some(identity) = server.identity_file.as_deref().filter(|value| !value.is_empty()) {
-        command.args(["-i", identity]);
+        command.arg("-i");
+        command.arg(expand_identity_path(identity));
     }
     if let Some(proxy) = server.proxy_jump.as_deref().filter(|value| !value.is_empty()) {
         command.args(["-J", proxy]);
