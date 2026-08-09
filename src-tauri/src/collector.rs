@@ -127,6 +127,13 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+pub(crate) fn explicit_identity_file(server: &Server) -> Option<&str> {
+    matches!(server.auth_method.as_str(), "privateKey" | "sshConfig")
+        .then(|| server.identity_file.as_deref())
+        .flatten()
+        .filter(|value| !value.is_empty())
+}
+
 pub fn collection_display_command(server: &Server, include_processes: bool, include_disks: bool) -> String {
     let mut arguments = vec![
         "-o ConnectTimeout=8".to_string(),
@@ -144,7 +151,8 @@ pub fn collection_display_command(server: &Server, include_processes: bool, incl
     } else {
         arguments.push("-o BatchMode=yes".to_string());
     }
-    if let Some(identity) = server.identity_file.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(identity) = explicit_identity_file(server) {
+        arguments.push("-o IdentitiesOnly=yes".to_string());
         arguments.push(format!("-i {}", shell_quote(identity)));
     }
     if let Some(proxy) = server.proxy_jump.as_deref().filter(|value| !value.is_empty()) {
@@ -193,7 +201,8 @@ fn configured_ssh_command_with_control(server: &Server, password: Option<&str>, 
     } else {
         command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
     }
-    if let Some(identity) = server.identity_file.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(identity) = explicit_identity_file(server) {
+        command.args(["-o", "IdentitiesOnly=yes"]);
         command.arg("-i").arg(expand_identity_path(identity));
     }
     if let Some(proxy) = server.proxy_jump.as_deref().filter(|value| !value.is_empty()) {
@@ -629,6 +638,36 @@ mod tests {
         assert!(REMOTE_SCRIPT.contains("used_gpu_memory"));
         assert!(REMOTE_SCRIPT.contains("used_memory"));
         assert!(REMOTE_SCRIPT.contains("query_gpu_processes \"-i $gpu_index\""));
+    }
+
+    #[test]
+    fn ssh_agent_ignores_stale_identity_file() {
+        let server = Server {
+            id: "server-1".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22,
+            username: "user".into(), ssh_alias: None, identity_file: Some("~/.ssh/stale_key".into()), proxy_jump: None,
+            tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
+            remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(), status: "unknown".into(),
+            last_error: None, last_seen_at: None,
+        };
+
+        assert_eq!(explicit_identity_file(&server), None);
+        assert!(!collection_display_command(&server, false, false).contains("stale_key"));
+    }
+
+    #[test]
+    fn explicit_private_key_is_restricted_to_that_identity() {
+        let server = Server {
+            id: "server-1".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22,
+            username: "user".into(), ssh_alias: None, identity_file: Some("~/.ssh/id_ed25519".into()), proxy_jump: None,
+            tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
+            remote_history_last_sync_at: None, sort_order: 0, auth_method: "privateKey".into(), status: "unknown".into(),
+            last_error: None, last_seen_at: None,
+        };
+        let command = collection_display_command(&server, false, false);
+
+        assert_eq!(explicit_identity_file(&server), Some("~/.ssh/id_ed25519"));
+        assert!(command.contains("-o IdentitiesOnly=yes"));
+        assert!(command.contains("-i '~/.ssh/id_ed25519'"));
     }
 
     #[test]

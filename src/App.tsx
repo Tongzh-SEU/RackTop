@@ -235,6 +235,7 @@ function App() {
   const [paused, setPaused] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [remoteSyncStatus, setRemoteSyncStatus] = useState<RemoteSyncStatusState | null>(null)
+  const [initialCollectionComplete, setInitialCollectionComplete] = useState(false)
   const [remoteSyncRetryRevision, setRemoteSyncRetryRevision] = useState(0)
   const [ignoredNvidiaWarnings, setIgnoredNvidiaWarnings] = useState<Set<string>>(loadIgnoredNvidiaWarningIds)
   const [pendingHostKey, setPendingHostKey] = useState<HostKeyInfo | null>(null)
@@ -477,7 +478,7 @@ function App() {
   useEffect(() => {
     if (servers.length === 0 || initialLoad.current) return
     initialLoad.current = true
-    void refreshAll(true)
+    void refreshAll(true).finally(() => setInitialCollectionComplete(true))
   }, [servers.length, refreshAll])
 
   useEffect(() => {
@@ -487,7 +488,7 @@ function App() {
   }, [settings, servers.length, refreshAll, paused])
 
   useEffect(() => {
-    if (!api.isDesktop || !remoteHistoryServerKey) {
+    if (!api.isDesktop || !remoteHistoryServerKey || !initialCollectionComplete) {
       remoteSyncRecoveryQueued.current.clear()
       setRemoteSyncStatus(null)
       return
@@ -554,7 +555,7 @@ function App() {
       if (feedbackTimer !== null) window.clearTimeout(feedbackTimer)
       if (successTimer !== null) window.clearTimeout(successTimer)
     }
-  }, [remoteHistoryServerKey, remoteSyncRetryRevision])
+  }, [remoteHistoryServerKey, remoteSyncRetryRevision, initialCollectionComplete])
 
   useEffect(() => {
     if (!api.isDesktop) return

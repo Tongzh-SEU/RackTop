@@ -38,6 +38,12 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
   const [guideOpen, setGuideOpen] = useState(!initial?.id && showGuide)
 
   const set = <K extends keyof ServerDraft>(key: K, value: ServerDraft[K]) => setDraft((current) => ({ ...current, [key]: value }))
+  const selectAuthMethod = (authMethod: ServerDraft['authMethod']) => setDraft((current) => ({
+    ...current,
+    authMethod,
+    identityFile: authMethod === 'sshAgent' || authMethod === 'password' ? '' : current.identityFile,
+    sshAlias: authMethod === 'sshConfig' ? current.sshAlias : '',
+  }))
   const setupPlatform = /Windows/i.test(navigator.userAgent) ? 'windows' : 'unix'
   const setupTarget = { username: draft.username, host: draft.host, port: draft.port }
   const setupScript = setupPlatform === 'unix' ? unixSshSetupScript(setupTarget) : windowsSshSetupScript(setupTarget)
@@ -129,7 +135,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
                   ['sshConfig', 'SSH Config'],
                   ['password', '密码'],
                 ] as const).map(([value, label]) => (
-                  <button key={value} type="button" className={draft.authMethod === value ? 'is-selected' : ''} onClick={() => set('authMethod', value)}>{label}</button>
+                  <button key={value} type="button" className={draft.authMethod === value ? 'is-selected' : ''} onClick={() => selectAuthMethod(value)}>{label}</button>
                 ))}
               </div>
             </fieldset>
@@ -149,7 +155,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
                     <input type="checkbox" checked={passwordAcknowledged} onChange={(event) => setPasswordAcknowledged(event.target.checked)} />
                     我理解风险并继续使用密码
                   </label>
-                  <button type="button" className="button button--secondary button--small" onClick={() => { set('authMethod', 'sshAgent'); setPasswordAcknowledged(false) }}><KeyRound size={14} />改用 SSH Agent（推荐）</button>
+                  <button type="button" className="button button--secondary button--small" onClick={() => { selectAuthMethod('sshAgent'); setPasswordAcknowledged(false) }}><KeyRound size={14} />改用 SSH Agent（推荐）</button>
                 </div>
               </div>
             )}
@@ -159,19 +165,21 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
                 <label className="checkbox-card"><input type="checkbox" checked={draft.savePassword ?? false} onChange={(event) => set('savePassword', event.target.checked)} /><ShieldCheck size={18} /><span>保存到系统钥匙串</span></label>
               </div>
             )}
-            <details className="key-guide">
-              <summary>
-                <span className="key-guide__summary-icon"><KeyRound size={17} /></span>
-                <span className="key-guide__summary-copy"><strong>SSH 密钥快速配置</strong><small>配置可独立撤销的 RackTop 专用密钥</small></span>
-                <ChevronRight className="key-guide__chevron" size={16} aria-hidden="true" />
-              </summary>
-              <div className="key-guide__toolbar">
-                <span className="key-guide__platform-label">已检测：{setupPlatform === 'windows' ? '本机 Windows PowerShell → 远程 Linux' : '本机 macOS Terminal → 远程 Linux'}</span>
-                <button type="button" className="button button--secondary button--small" onClick={() => void copySetupScript()}>{setupCopied ? <Check size={13} /> : <Copy size={13} />}{setupCopied ? '已复制' : '复制整段'}</button>
-              </div>
-              {setupValidationMessage && <p className="key-guide__validation" role="alert"><AlertTriangle size={14} />{setupValidationMessage}</p>}
-              <pre><code>{setupScript}</code></pre>
-            </details>
+            {draft.authMethod === 'sshAgent' && (
+              <details className="key-guide">
+                <summary>
+                  <span className="key-guide__summary-icon"><KeyRound size={17} /></span>
+                  <span className="key-guide__summary-copy"><strong>SSH 密钥快速配置</strong><small>配置可独立撤销的 RackTop 专用密钥</small></span>
+                  <ChevronRight className="key-guide__chevron" size={16} aria-hidden="true" />
+                </summary>
+                <div className="key-guide__toolbar">
+                  <span className="key-guide__platform-label">已检测：{setupPlatform === 'windows' ? '本机 Windows PowerShell → 远程 Linux' : '本机 macOS Terminal → 远程 Linux'}</span>
+                  <button type="button" className="button button--secondary button--small" onClick={() => void copySetupScript()}>{setupCopied ? <Check size={13} /> : <Copy size={13} />}{setupCopied ? '已复制' : '复制整段'}</button>
+                </div>
+                {setupValidationMessage && <p className="key-guide__validation" role="alert"><AlertTriangle size={14} />{setupValidationMessage}</p>}
+                <pre><code>{setupScript}</code></pre>
+              </details>
+            )}
             <div className="form-grid form-grid--2">
               <label>跳板机 ProxyJump<input value={draft.proxyJump ?? ''} onChange={(event) => set('proxyJump', event.target.value)} placeholder="可选" /></label>
               <label>标签<input value={draft.tags.join(', ')} onChange={(event) => set('tags', event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean))} placeholder="lab, h100" /></label>

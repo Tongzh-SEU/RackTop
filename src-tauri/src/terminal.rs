@@ -1,4 +1,4 @@
-use crate::models::Server;
+use crate::{collector::explicit_identity_file, models::Server};
 use crate::ssh_keys::expand_identity_path;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -132,7 +132,8 @@ fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<Com
     }
     #[cfg(unix)]
     command.args(["-o", "ControlMaster=auto", "-o", "ControlPersist=600", "-o", "ControlPath=/tmp/racktop-%C"]);
-    if let Some(identity) = server.identity_file.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(identity) = explicit_identity_file(server) {
+        command.args(["-o", "IdentitiesOnly=yes"]);
         command.arg("-i");
         command.arg(expand_identity_path(identity));
     }
