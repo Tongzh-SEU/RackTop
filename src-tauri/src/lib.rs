@@ -14,7 +14,7 @@ use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::Database;
 use terminal::TerminalManager;
-use tauri::{image::Image, menu::{Menu, MenuBuilder, MenuItemBuilder}, tray::TrayIconBuilder, AppHandle, Emitter, Manager, State};
+use tauri::{image::Image, menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID}, tray::TrayIconBuilder, AppHandle, Emitter, Manager, State};
 
 #[derive(Default)]
 struct InteractionLogStore {
@@ -448,6 +448,38 @@ fn build_tray_menu(app: &AppHandle, summary: &str) -> Result<Menu<tauri::Wry>, B
     Ok(MenuBuilder::new(app).items(&[&open, &reservations, &quit]).build()?)
 }
 
+fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
+    let about = MenuItemBuilder::with_id("menu-about", "关于 RackTop").build(app)?;
+    let settings = MenuItemBuilder::with_id("menu-settings", "设置…").accelerator("CmdOrCtrl+,").build(app)?;
+    let quit = MenuItemBuilder::with_id("menu-quit", "退出 RackTop").accelerator("CmdOrCtrl+Q").build(app)?;
+    let racktop = SubmenuBuilder::new(app, "RackTop").items(&[&about, &settings]).separator().item(&quit).build()?;
+
+    let add_server = MenuItemBuilder::with_id("menu-add-server", "添加服务器…").accelerator("CmdOrCtrl+N").build(app)?;
+    let import_config = MenuItemBuilder::with_id("menu-import-config", "导入 SSH Config…").build(app)?;
+    let refresh_all = MenuItemBuilder::with_id("menu-refresh-all", "刷新全部服务器").accelerator("CmdOrCtrl+R").build(app)?;
+    let servers = SubmenuBuilder::new(app, "服务器").items(&[&add_server, &import_config]).separator().item(&refresh_all).build()?;
+
+    let fleet = MenuItemBuilder::with_id("menu-view-fleet", "算力总览").accelerator("CmdOrCtrl+1").build(app)?;
+    let idle = MenuItemBuilder::with_id("menu-view-idle", "空闲算力").accelerator("CmdOrCtrl+2").build(app)?;
+    let mine = MenuItemBuilder::with_id("menu-view-mine", "我的进程").accelerator("CmdOrCtrl+3").build(app)?;
+    let logs = MenuItemBuilder::with_id("menu-view-logs", "日志").accelerator("CmdOrCtrl+L").build(app)?;
+    let view = SubmenuBuilder::new(app, "查看").items(&[&fleet, &idle, &mine]).separator().item(&logs).build()?;
+
+    let window = SubmenuBuilder::with_id(app, WINDOW_SUBMENU_ID, "窗口")
+        .minimize_with_text("最小化")
+        .maximize_with_text("缩放")
+        .fullscreen_with_text("进入全屏幕")
+        .separator()
+        .bring_all_to_front_with_text("全部置于顶层")
+        .build()?;
+
+    let guide = MenuItemBuilder::with_id("menu-help-guide", "使用说明").build(app)?;
+    let project = MenuItemBuilder::with_id("menu-help-project", "打开项目主页").build(app)?;
+    let help = SubmenuBuilder::with_id(app, HELP_SUBMENU_ID, "帮助").items(&[&guide, &project]).build()?;
+
+    Ok(MenuBuilder::new(app).items(&[&racktop, &servers, &view, &window, &help]).build()?)
+}
+
 #[tauri::command]
 fn update_tray_summary(app: AppHandle, waiting: usize, current: usize, pending: usize) -> Result<(), String> {
     let summary = if waiting + current + pending == 0 { "预约摘要".to_string() } else { format!("预约 {} · 可用 {} · 待确认 {}", waiting, current, pending) };
@@ -468,6 +500,8 @@ pub fn run() {
             app.manage(database);
             app.manage(TerminalManager::default());
             app.manage(InteractionLogStore::default());
+
+            app.set_menu(build_application_menu(&app.handle())?)?;
 
             let menu = build_tray_menu(&app.handle(), "预约摘要")?;
             TrayIconBuilder::with_id("racktop-tray")
@@ -490,6 +524,20 @@ pub fn run() {
                 })
                 .build(app)?;
             Ok(())
+        })
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "menu-quit" => {
+                app.state::<TerminalManager>().close_all();
+                app.exit(0);
+            }
+            id if id.starts_with("menu-") => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                let _ = app.emit("app-menu-action", id);
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
         .run(tauri::generate_context!())
