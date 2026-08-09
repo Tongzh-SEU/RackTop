@@ -22,6 +22,7 @@ pub struct RemoteCleanupTask {
 pub struct Database {
     connection: Mutex<Connection>,
     session_passwords: Mutex<HashMap<String, String>>,
+    credential_errors: Mutex<HashMap<String, String>>,
     path: PathBuf,
 }
 
@@ -334,7 +335,8 @@ impl Database {
                     auth_method TEXT NOT NULL DEFAULT 'sshAgent',
                     status TEXT NOT NULL DEFAULT 'unknown',
                     last_error TEXT,
-                    last_seen_at INTEGER
+                    last_seen_at INTEGER,
+                    credential_storage_state TEXT NOT NULL DEFAULT 'none'
                  );
                  CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -438,6 +440,10 @@ impl Database {
         if !server_columns.contains("sort_order") {
             connection.execute("ALTER TABLE servers ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0", []).map_err(|error| error.to_string())?;
         }
+        if !server_columns.contains("credential_storage_state") {
+            connection.execute("ALTER TABLE servers ADD COLUMN credential_storage_state TEXT NOT NULL DEFAULT 'none'", []).map_err(|error| error.to_string())?;
+            connection.execute("UPDATE servers SET credential_storage_state='enabled' WHERE auth_method='password'", []).map_err(|error| error.to_string())?;
+        }
         let reservation_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(idle_reservations)").map_err(|error| error.to_string())?;
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
@@ -475,7 +481,7 @@ impl Database {
                 connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;").map_err(|error| error.to_string())?;
             }
         }
-        Ok(Self { connection: Mutex::new(connection), session_passwords: Mutex::new(HashMap::new()), path: path.to_path_buf() })
+        Ok(Self { connection: Mutex::new(connection), session_passwords: Mutex::new(HashMap::new()), credential_errors: Mutex::new(HashMap::new()), path: path.to_path_buf() })
     }
 
     pub fn storage_size_bytes(&self) -> u64 {
@@ -524,6 +530,9 @@ impl Database {
         if draft.host.trim().is_empty() || draft.username.trim().is_empty() {
             return Err("主机地址和用户名不能为空".into());
         }
+        if draft.auth_method == "password" && draft.id.is_none() && draft.password.as_deref().is_none_or(|value| value.trim().is_empty()) {
+            return Err("使用密码认证时必须输入 SSH 密码".into());
+        }
         if draft.port == 0 {
             return Err("SSH 端口必须在 1–65535 之间".into());
         }
@@ -550,11 +559,19 @@ impl Database {
         if draft.auth_method == "password" {
             if let Some(password) = draft.password.filter(|value| !value.is_empty()) {
                 self.session_passwords.lock().map_err(|error| error.to_string())?.insert(id.clone(), password.clone());
+                self.credential_errors.lock().map_err(|error| error.to_string())?.remove(&id);
                 if draft.save_password {
                     let entry = keyring::Entry::new("com.racktop.desktop", &id).map_err(|error| error.to_string())?;
                     entry.set_password(&password).map_err(|error| format!("无法写入系统安全凭据存储：{error}"))?;
+                    self.set_credential_storage_state(&id, "enabled")?;
+                } else {
+                    self.set_credential_storage_state(&id, "none")?;
                 }
             }
+        } else {
+            self.session_passwords.lock().map_err(|error| error.to_string())?.remove(&id);
+            self.credential_errors.lock().map_err(|error| error.to_string())?.remove(&id);
+            self.set_credential_storage_state(&id, "none")?;
         }
         self.get_server(&id)
     }
@@ -574,12 +591,16 @@ impl Database {
 
     pub fn delete_server_record(&self, id: &str, delete_credential: bool) -> Result<(), String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let auth_method = connection.query_row("SELECT auth_method FROM servers WHERE id=?1", [id], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())?;
         connection.execute("DELETE FROM servers WHERE id=?1", [id]).map_err(|error| error.to_string())?;
-        if delete_credential {
+        if delete_credential && auth_method.as_deref() == Some("password") {
             if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", id) {
                 let _ = entry.delete_credential();
             }
+        }
+        if delete_credential {
             self.session_passwords.lock().map_err(|error| error.to_string())?.remove(id);
+            self.credential_errors.lock().map_err(|error| error.to_string())?.remove(id);
         }
         Ok(())
     }
@@ -611,27 +632,70 @@ impl Database {
         Ok(())
     }
 
-    pub fn finish_remote_cleanup(&self, server_id: &str) -> Result<(), String> {
+    pub fn finish_remote_cleanup(&self, server_id: &str, delete_credential: bool) -> Result<(), String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         connection.execute("DELETE FROM remote_cleanup_queue WHERE server_id=?1", [server_id]).map_err(|error| error.to_string())?;
         drop(connection);
-        if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", server_id) {
-            let _ = entry.delete_credential();
+        if delete_credential {
+            if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", server_id) {
+                let _ = entry.delete_credential();
+            }
         }
         self.session_passwords.lock().map_err(|error| error.to_string())?.remove(server_id);
+        self.credential_errors.lock().map_err(|error| error.to_string())?.remove(server_id);
         Ok(())
     }
 
-    pub fn get_password(&self, id: &str) -> Result<Option<String>, String> {
+    pub fn get_password(&self, id: &str, allow_prompt: bool) -> Result<Option<String>, String> {
         if let Some(password) = self.session_passwords.lock().map_err(|error| error.to_string())?.get(id).cloned() {
             return Ok(Some(password));
         }
+        let credential_state = self.credential_storage_state(id)?;
+        if credential_state == "denied" && !allow_prompt {
+            return Err("系统钥匙串访问已被拒绝；请在服务器详情页手动重新连接".into());
+        }
+        if credential_state == "none" {
+            return Ok(None);
+        }
+        if !allow_prompt {
+            if let Some(error) = self.credential_errors.lock().map_err(|error| error.to_string())?.get(id).cloned() {
+                return Err(error);
+            }
+        } else {
+            self.credential_errors.lock().map_err(|error| error.to_string())?.remove(id);
+        }
+        if let Some(error) = self.credential_errors.lock().map_err(|error| error.to_string())?.get(id).cloned() {
+            return Err(error);
+        }
         let entry = keyring::Entry::new("com.racktop.desktop", id).map_err(|error| error.to_string())?;
         match entry.get_password() {
-            Ok(password) => Ok(Some(password)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(format!("无法读取系统安全凭据：{error}")),
+            Ok(password) => {
+                self.session_passwords.lock().map_err(|error| error.to_string())?.insert(id.to_string(), password.clone());
+                self.set_credential_storage_state(id, "enabled")?;
+                Ok(Some(password))
+            }
+            Err(keyring::Error::NoEntry) => {
+                self.set_credential_storage_state(id, "none")?;
+                Ok(None)
+            }
+            Err(error) => {
+                let message = format!("无法读取系统安全凭据：{error}");
+                self.set_credential_storage_state(id, "denied")?;
+                self.credential_errors.lock().map_err(|lock_error| lock_error.to_string())?.insert(id.to_string(), message.clone());
+                Err(message)
+            }
         }
+    }
+
+    fn credential_storage_state(&self, id: &str) -> Result<String, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection.query_row("SELECT credential_storage_state FROM servers WHERE id=?1", [id], |row| row.get(0)).map_err(|error| error.to_string())
+    }
+
+    fn set_credential_storage_state(&self, id: &str, state: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection.execute("UPDATE servers SET credential_storage_state=?2 WHERE id=?1", params![id, state]).map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     pub fn update_status(&self, id: &str, status: &str, error: Option<&str>, timestamp: Option<i64>) -> Result<(), String> {
@@ -1061,6 +1125,39 @@ mod tests {
     }
 
     #[test]
+    fn new_password_server_requires_a_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let result = db.save_server(ServerDraft { auth_method: "password".into(), password: None, ..draft("Password", 30) });
+
+        assert_eq!(result.unwrap_err(), "使用密码认证时必须输入 SSH 密码");
+        assert!(db.list_servers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unsaved_password_does_not_read_the_keychain_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sqlite");
+        let db = Database::open(&path).unwrap();
+        let saved = db.save_server(ServerDraft { auth_method: "password".into(), password: Some("session-only".into()), save_password: false, ..draft("Password", 30) }).unwrap();
+        drop(db);
+
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(reopened.credential_storage_state(&saved.id).unwrap(), "none");
+        assert_eq!(reopened.get_password(&saved.id, false).unwrap(), None);
+    }
+
+    #[test]
+    fn denied_keychain_access_requires_manual_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let saved = db.save_server(draft("Password", 30)).unwrap();
+        db.set_credential_storage_state(&saved.id, "denied").unwrap();
+
+        assert_eq!(db.get_password(&saved.id, false).unwrap_err(), "系统钥匙串访问已被拒绝；请在服务器详情页手动重新连接");
+    }
+
+    #[test]
     fn server_order_can_be_rearranged_and_persisted() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
@@ -1337,7 +1434,7 @@ mod tests {
         assert_eq!(tasks[0].expires_at, 10_000 + 86_400);
         assert_eq!(tasks[0].managed_public_key.as_deref(), Some("ssh-ed25519 test-key"));
 
-        db.finish_remote_cleanup(&saved.id).unwrap();
+        db.finish_remote_cleanup(&saved.id, false).unwrap();
         assert!(db.list_remote_cleanup_tasks().unwrap().is_empty());
     }
 

@@ -30,8 +30,12 @@ export class RemoteSyncCoordinator {
   }
 }
 
+export function isRemoteSyncFresh(server: Pick<Server, 'remoteHistoryLastSyncAt'>, nowSeconds: number): boolean {
+  return Boolean(server.remoteHistoryLastSyncAt && nowSeconds - server.remoteHistoryLastSyncAt <= REMOTE_SYNC_STALE_SECONDS)
+}
+
 export function shouldShowRemoteSyncImmediately(servers: Array<Pick<Server, 'remoteHistoryLastSyncAt'>>, nowSeconds: number): boolean {
-  return servers.some((server) => !server.remoteHistoryLastSyncAt || nowSeconds - server.remoteHistoryLastSyncAt > REMOTE_SYNC_STALE_SECONDS)
+  return servers.some((server) => !isRemoteSyncFresh(server, nowSeconds))
 }
 
 export function shouldRetryRemoteSyncAfterRecovery(status: RemoteSyncStatusState | null, serverId: string, alreadyQueued: boolean) {

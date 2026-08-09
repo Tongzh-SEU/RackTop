@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { AlertTriangle, ArrowRight, Check, ChevronRight, Copy, Database, KeyRound, ShieldCheck, Terminal, X } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Check, ChevronRight, Copy, Database, KeyRound, Terminal, X } from 'lucide-react'
 import type { ServerDraft } from '../types/models'
 import { RACKTOP_MANAGED_IDENTITY_PATH, sshSetupTargetValidationMessage, unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
 
@@ -28,6 +28,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
     historyRetentionDays: 90,
     remoteHistoryEnabled: initial?.remoteHistoryEnabled ?? defaultRemoteHistoryEnabled,
     authMethod: initial?.authMethod ?? 'sshAgent',
+    savePassword: initial?.savePassword ?? true,
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -70,6 +71,10 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (draft.authMethod === 'password' && !passwordAcknowledged) return
+    if (draft.authMethod === 'password' && !initial?.id && !draft.password?.trim()) {
+      setError('请输入 SSH 密码后再保存服务器。')
+      return
+    }
     setSaving(true)
     setError(null)
     try {
@@ -162,7 +167,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
             {draft.authMethod === 'password' && passwordAcknowledged && (
               <div className="form-grid form-grid--2">
                 <label>密码<input type="password" value={draft.password ?? ''} onChange={(event) => set('password', event.target.value)} autoComplete="new-password" /></label>
-                <label className="checkbox-card"><input type="checkbox" checked={draft.savePassword ?? false} onChange={(event) => set('savePassword', event.target.checked)} /><ShieldCheck size={18} /><span>保存到系统钥匙串</span></label>
+                <label className="checkbox-card"><input type="checkbox" checked={draft.savePassword ?? true} onChange={(event) => set('savePassword', event.target.checked)} /><span>保存到系统钥匙串</span></label>
               </div>
             )}
             {draft.authMethod === 'sshAgent' && (

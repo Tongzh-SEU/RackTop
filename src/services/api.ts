@@ -205,8 +205,8 @@ export const api = {
   async updateTraySummary(waiting: number, current: number, pending: number): Promise<void> {
     if (isTauri) return invoke('update_tray_summary', { waiting, current, pending })
   },
-  async collectServer(serverId: string, includeProcesses = true, includeDisks = true, recordHistory = true): Promise<Snapshot> {
-    if (isTauri) return invoke('collect_server', { serverId, includeProcesses, includeDisks, recordHistory })
+  async collectServer(serverId: string, includeProcesses = true, includeDisks = true, recordHistory = true, allowCredentialPrompt = false): Promise<Snapshot> {
+    if (isTauri) return invoke('collect_server', { serverId, includeProcesses, includeDisks, recordHistory, allowCredentialPrompt })
     const server = browserServers.find((item) => item.id === serverId)
     const remoteCommand = `RACKTOP_INCLUDE_PROCESSES=${includeProcesses ? 1 : 0} RACKTOP_INCLUDE_DISKS=${includeDisks ? 1 : 0}; export LANG=C LC_ALL=C; printf '__RACKTOP_USER__\\n'; id -un; printf '__RACKTOP_HOST__\\n'; hostname; head -n 1 /proc/stat; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo; nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits; ps -eo user:64=,uid=,pid=,ppid=,pgid=,pcpu=,pmem=,rss=,etime=,args= --sort=-pcpu`
     const command = `ssh -o BatchMode=yes ${server?.username ?? 'user'}@${server?.host ?? 'host'} '${remoteCommand}'`
@@ -288,7 +288,7 @@ export const api = {
     return settings
   },
   async retryNvidia(serverId: string): Promise<Snapshot> {
-    return this.collectServer(serverId, true, true)
+    return this.collectServer(serverId, true, true, true, true)
   },
   async scanHostKey(serverId: string): Promise<HostKeyInfo> {
     if (isTauri) return invoke('scan_host_key', { serverId })
