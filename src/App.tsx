@@ -230,6 +230,7 @@ function App() {
   const [quickTerminal, setQuickTerminal] = useState<{ server: Server; gpu?: Snapshot['gpus'][number] } | null>(null)
   const [busy, setBusy] = useState<Set<string>>(new Set())
   const [manualRefreshingAll, setManualRefreshingAll] = useState(false)
+  const [manualRefreshProgress, setManualRefreshProgress] = useState<{ completed: number; total: number } | null>(null)
   const [manualRefreshRevision, setManualRefreshRevision] = useState(0)
   const [manualRefreshingServers, setManualRefreshingServers] = useState<Set<string>>(new Set())
   const [paused, setPaused] = useState(false)
@@ -243,8 +244,10 @@ function App() {
   const [processPendingTermination, setProcessPendingTermination] = useState<(ProcessTerminationTarget & { serverId: string; serverName: string }) | null>(null)
   const [terminatingProcess, setTerminatingProcess] = useState<{ serverId: string; pid: number } | null>(null)
   const initialLoad = useRef(false)
+  const manualRefreshFeedbackTimerRef = useRef<number | null>(null)
   const snapshotsRef = useRef<Record<string, Snapshot>>({})
   const sharedGpuWatchesRef = useRef<SharedGpuWatchMap>(new Map())
+  const expectedProcessExitsRef = useRef(new Set<string>())
   const ignoredMineProcessWarningsRef = useRef<Set<string>>((() => {
     try {
       const value = JSON.parse(localStorage.getItem('racktop.ignoredMineProcessWarnings.v1') ?? '[]')
@@ -325,11 +328,16 @@ function App() {
         ...(!collected.processesSampled ? { processes: previous?.processes ?? [], cpuProcesses: previous?.cpuProcesses ?? [] } : {}),
         ...(!includeDisks ? { disks: previous?.disks ?? [] } : {}),
       }
-      const exited = previous?.processes.filter((process) => process.isCurrentUser && !snapshot.processes.some((current) => current.pid === process.pid)) ?? []
+      const exited = (previous?.processes.filter((process) => process.isCurrentUser && !snapshot.processes.some((current) => current.pid === process.pid)) ?? []).filter((process) => {
+        const key = `exit:${serverId}:${process.pid}`
+        if (!expectedProcessExitsRef.current.has(key)) return true
+        expectedProcessExitsRef.current.delete(key)
+        return false
+      })
       const serverName = serverDisplayName(serverConfig?.name ?? snapshot.hostname)
       const sharedWarnings = updateSharedGpuWarnings(serverName, snapshot, sharedGpuWatchesRef.current)
       const nextServerWarnings: MineProcessWarning[] = [
-        ...exited.map((process) => ({ id: `exit:${serverId}:${process.pid}`, serverId, message: `${serverName} · 你的 GPU 进程已退出：PID ${process.pid}`, tone: 'info' as const })),
+        ...exited.map((process) => ({ id: `exit:${serverId}:${process.pid}`, serverId, message: `${serverName} · 你的 GPU 进程意外退出：PID ${process.pid}`, tone: 'warning' as const })),
         ...sharedWarnings,
       ]
       const activeWarningIds = new Set(nextServerWarnings.map((warning) => warning.id))
@@ -417,15 +425,32 @@ function App() {
     setToast(ignored ? '已忽略此服务器的 GPU 异常提醒，可在采集与连接日志中恢复' : '已恢复 GPU 异常提醒')
   }, [])
 
-  const refreshAll = useCallback(async (quiet = false) => {
-    await Promise.allSettled(servers.map((server) => refreshServer(server.id, quiet)))
+  const refreshAll = useCallback(async (quiet = false, onSettled?: () => void) => {
+    await Promise.allSettled(servers.map(async (server) => {
+      try { await refreshServer(server.id, quiet) } finally { onSettled?.() }
+    }))
   }, [servers, refreshServer])
 
   const runManualRefreshAll = useCallback(async () => {
     if (manualRefreshingAll) return
+    if (manualRefreshFeedbackTimerRef.current !== null) window.clearTimeout(manualRefreshFeedbackTimerRef.current)
     setManualRefreshingAll(true)
-    try { await refreshAll(false); setManualRefreshRevision((value) => value + 1) } finally { setManualRefreshingAll(false) }
-  }, [manualRefreshingAll, refreshAll])
+    setManualRefreshProgress({ completed: 0, total: servers.length })
+    try {
+      await refreshAll(false, () => setManualRefreshProgress((current) => current ? { ...current, completed: current.completed + 1 } : current))
+      setManualRefreshRevision((value) => value + 1)
+    } finally {
+      setManualRefreshingAll(false)
+      manualRefreshFeedbackTimerRef.current = window.setTimeout(() => {
+        setManualRefreshProgress(null)
+        manualRefreshFeedbackTimerRef.current = null
+      }, 900)
+    }
+  }, [manualRefreshingAll, refreshAll, servers.length])
+
+  useEffect(() => () => {
+    if (manualRefreshFeedbackTimerRef.current !== null) window.clearTimeout(manualRefreshFeedbackTimerRef.current)
+  }, [])
 
   const runManualRefreshServer = useCallback(async (serverId: string) => {
     setManualRefreshingServers((current) => new Set(current).add(serverId))
@@ -566,6 +591,7 @@ function App() {
     if (!api.isDesktop) return
     const unlistenTray = listen<string>('tray-action', ({ payload }) => {
       if (payload === 'reservations') setShowReservationCenter(true)
+      else if (payload === 'mine-processes') setMainView('mine')
     })
     const unlistenMenu = listen<string>('app-menu-action', ({ payload }) => {
       if (payload === 'menu-about') setShowAbout(true)
@@ -718,11 +744,11 @@ function App() {
   }, [servers, snapshots, ignoredGpuMemoryStallWarningIds])
 
   useEffect(() => {
-    const waiting = idleReservations.filter((reservation) => reservation.status === 'active' && !(reservation.currentAvailableGpuKeys?.length) && !(reservation.pendingConfirmationGpuKeys?.length)).length
-    const current = idleReservations.reduce((sum, reservation) => sum + (reservation.currentAvailableGpuKeys?.length ?? 0), 0)
-    const pending = new Set(idleReservations.flatMap((reservation) => reservation.pendingConfirmationGpuKeys ?? [])).size
-    void api.updateTraySummary(waiting, current, pending)
-  }, [idleReservations])
+    if (!settings) return
+    const reservationPending = new Set(idleReservations.flatMap((reservation) => reservation.pendingConfirmationGpuKeys ?? [])).size
+    const processWarnings = mineProcessWarnings.filter((warning) => warning.tone === 'warning').length
+    void api.updateTraySummary(settings.menuBarMode, reservationPending, processWarnings)
+  }, [idleReservations, mineProcessWarnings, settings])
 
   const visibleServers = useMemo(() => {
     return servers.filter((server) => serverMatchesSearch(server, snapshots[server.id], search))
@@ -1090,7 +1116,7 @@ function App() {
             <h1>{mainView === 'idle' ? '寻找空闲算力' : mainView === 'mine' ? '我的进程' : mainView === 'fleet' ? '算力总览' : selectedServer ? serverDisplayName(selectedServer.name) : 'RackTop 总览'}</h1>
           </div>
           <div className="topbar__actions">
-            {remoteHistoryServerKey && <span className="remote-sync-slot">{remoteSyncStatus && <RemoteSyncStatus status={remoteSyncStatus} onOpenFailure={() => {
+            {(manualRefreshProgress || (remoteHistoryServerKey && remoteSyncStatus)) && <span className="remote-sync-slot">{manualRefreshProgress ? <span className="remote-sync-status remote-sync-status--syncing" role="status" aria-live="polite"><RefreshCw className={manualRefreshingAll ? 'spin' : ''} size={13} />正在重新连接 · {manualRefreshProgress.completed}/{manualRefreshProgress.total} 台</span> : remoteSyncStatus && <RemoteSyncStatus status={remoteSyncStatus} onOpenFailure={() => {
               const serverId = remoteSyncStatus.failedServerIds[0]
               if (!serverId) return
               setSelectedServerId(serverId)
@@ -1150,7 +1176,7 @@ function App() {
       {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setImportDrafts(null); setToast(`已导入 ${selected.length} 台服务器`) }} />}
       {pendingHostKey && <HostKeyDialog info={pendingHostKey} onClose={() => setPendingHostKey(null)} onTrust={async () => { const serverId = pendingHostKey.serverId; await api.trustHostKey(pendingHostKey); setPendingHostKey(null); setToast('已信任服务器指纹'); await refreshServer(serverId) }} />}
       {serverPendingDelete && <DeleteServerDialog server={serverPendingDelete} onClose={() => setServerPendingDelete(null)} onDelete={(revokeSshAccess) => removeServer(serverPendingDelete, revokeSshAccess)} />}
-      {processPendingTermination && <TerminateProcessDialog target={processPendingTermination} onClose={() => setProcessPendingTermination(null)} onTerminate={() => { const target = processPendingTermination; setProcessPendingTermination(null); setTerminatingProcess({ serverId: target.serverId, pid: target.process.pid }); void api.terminateProcess(target.serverId, target.process.pid).then(async (result) => { setToast(result); await refreshServer(target.serverId) }).catch((reason) => setToast(`结束 PID ${target.process.pid} 失败：${String(reason)}`)).finally(() => setTerminatingProcess(null)) }} />}
+      {processPendingTermination && <TerminateProcessDialog target={processPendingTermination} onClose={() => setProcessPendingTermination(null)} onTerminate={() => { const target = processPendingTermination; setProcessPendingTermination(null); setTerminatingProcess({ serverId: target.serverId, pid: target.process.pid }); void api.terminateProcess(target.serverId, target.process.pid).then(async (result) => { expectedProcessExitsRef.current.add(`exit:${target.serverId}:${target.process.pid}`); setToast(result); await refreshServer(target.serverId) }).catch((reason) => setToast(`结束 PID ${target.process.pid} 失败：${String(reason)}`)).finally(() => setTerminatingProcess(null)) }} />}
       {reservationEditor && <IdleReservationSheet reservation={reservationEditor.reservation} filters={reservationEditor.filters} availableGpuKeys={reservationEditorItems.filter((item) => item.available).map(({ server, gpu }) => idleReservationGpuKey(server.id, gpu.uuid))} onClose={() => setReservationEditor(null)} onSave={saveIdleReservation} />}
       {showReservationCenter && <IdleReservationCenter reservations={idleReservations} warnings={gpuMemoryStallWarnings} onClose={() => setShowReservationCenter(false)} onEdit={(reservation) => { setShowReservationCenter(false); setReservationEditor({ filters: reservation.filters, reservation }) }} onStatusChange={setIdleReservationStatus} onClearPending={clearReservationPending} onDelete={removeIdleReservation} onIgnoreWarning={ignoreGpuMemoryStallWarning} />}
       {quickTerminal && <div className="scrim quick-terminal-scrim" onMouseDown={(event) => event.target === event.currentTarget && setQuickTerminal(null)}><section className="sheet quick-terminal-sheet" role="dialog" aria-modal="true" aria-label={`${quickTerminal.server.name}${quickTerminal.gpu ? ` GPU ${quickTerminal.gpu.index}` : ''} 终端`}><header className="sheet__header"><div><p className="eyebrow">{quickTerminal.gpu ? 'GPU 固定终端' : 'SSH 终端'}</p><h2>{quickTerminal.server.name}{quickTerminal.gpu ? ` · GPU ${quickTerminal.gpu.index}` : ''}</h2></div><button className="icon-button" onClick={() => setQuickTerminal(null)} aria-label="关闭"><X size={18} /></button></header><SshTerminal serverId={quickTerminal.server.id} serverName={quickTerminal.server.name} gpuIndex={quickTerminal.gpu?.index} onNotice={setToast} /></section></div>}
@@ -1767,6 +1793,7 @@ function SettingsSheet({ settings, onClose, onSave }: { settings: AppSettings; o
       <div className="settings-body">
         <SettingsGroup icon={<SlidersHorizontal />} title="外观">
           <label>主题<select value={value.theme} onChange={(event) => set('theme', event.target.value as AppSettings['theme'])}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
+          <div className="settings-choice-row"><span><strong>菜单栏状态</strong><small>扩展模式固定显示待处理预约和异常进程数量</small></span><div className="segmented settings-mode" role="group" aria-label="菜单栏状态模式"><button type="button" className={value.menuBarMode === 'compact' ? 'is-selected' : ''} aria-pressed={value.menuBarMode === 'compact'} onClick={() => set('menuBarMode', 'compact')}>紧凑</button><button type="button" className={value.menuBarMode === 'expanded' ? 'is-selected' : ''} aria-pressed={value.menuBarMode === 'expanded'} onClick={() => set('menuBarMode', 'expanded')}>扩展</button></div></div>
           <label className="switch-row"><span><strong>我的任务标记色</strong><small>用于显存光标、你的任务标签与侧栏提示</small></span><input type="color" value={value.currentUserAccent} onChange={(event) => set('currentUserAccent', event.target.value)} /></label>
           <label className="switch-row"><span><strong>减少非必要动效</strong><small>也会自动尊重系统“减少动态效果”设置</small></span><input type="checkbox" checked={value.reduceMotion} onChange={(event) => set('reduceMotion', event.target.checked)} /></label>
           <label className="switch-row"><span><strong>显示添加服务器引导</strong><small>重新开启地址、认证、Host Key 与远端历史提示</small></span><input type="checkbox" checked={value.showAddServerGuide} onChange={(event) => set('showAddServerGuide', event.target.checked)} /></label>

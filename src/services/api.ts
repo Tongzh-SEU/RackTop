@@ -57,6 +57,7 @@ const defaultSettings: AppSettings = {
   temperatureThresholdCelsius: 85,
   currentUserAccent: '#0a84ff',
   theme: 'system',
+  menuBarMode: 'compact',
   reduceMotion: false,
   showAddServerGuide: true,
 }
@@ -140,6 +141,7 @@ const a100Snapshot: Snapshot = {
 let browserServers = [...demoServers]
 let browserSettings = { ...defaultSettings }
 let browserReservations: IdleReservation[] = []
+const historyRequests = new Map<string, { expiresAt: number; request: Promise<HistoryPoint[]> }>()
 const browserInteractionSummary: InteractionLogSummary = { sentBytes: 0, responseBytes: 0, storedBytes: 0, localStorageBytes: 36.3 * 1024 ** 2, failureCount: 0, servers: [] }
 
 function rollingHistory(snapshot: Snapshot): HistoryPoint[] {
@@ -202,8 +204,8 @@ export const api = {
   async closeTerminal(sessionId: string): Promise<void> {
     if (isTauri) return invoke('close_terminal', { sessionId })
   },
-  async updateTraySummary(waiting: number, current: number, pending: number): Promise<void> {
-    if (isTauri) return invoke('update_tray_summary', { waiting, current, pending })
+  async updateTraySummary(mode: AppSettings['menuBarMode'], reservationPending: number, processWarnings: number): Promise<void> {
+    if (isTauri) return invoke('update_tray_summary', { mode, reservationPending, processWarnings })
   },
   async collectServer(serverId: string, includeProcesses = true, includeDisks = true, recordHistory = true, allowCredentialPrompt = false): Promise<Snapshot> {
     if (isTauri) return invoke('collect_server', { serverId, includeProcesses, includeDisks, recordHistory, allowCredentialPrompt })
@@ -229,10 +231,26 @@ export const api = {
   async getInteractionLogSummary(): Promise<InteractionLogSummary> {
     return isTauri ? invoke('get_interaction_log_summary') : { ...browserInteractionSummary, servers: browserInteractionSummary.servers.map((item) => ({ ...item })) }
   },
-  async getHistory(serverId: string, fromTimestamp: number): Promise<HistoryPoint[]> {
-    if (isTauri) return invoke('get_history', { serverId, fromTimestamp })
-    const source = serverId === 'demo-132' ? a100Snapshot : demoSnapshot
-    return rollingHistory({ ...source, serverId })
+  async getHistory(serverId: string, fromTimestamp: number, bucketSeconds?: number): Promise<HistoryPoint[]> {
+    const cacheKey = `${serverId}:${Math.floor(fromTimestamp / 30)}:${bucketSeconds ?? 0}`
+    const cached = historyRequests.get(cacheKey)
+    if (cached && cached.expiresAt > Date.now()) return cached.request
+    const request = (async () => {
+      if (isTauri) return invoke<HistoryPoint[]>('get_history', { serverId, fromTimestamp, bucketSeconds: bucketSeconds ?? null })
+      const source = serverId === 'demo-132' ? a100Snapshot : demoSnapshot
+      const points = rollingHistory({ ...source, serverId })
+      if (!bucketSeconds) return points
+      return Object.values(points.reduce<Record<number, HistoryPoint>>((buckets, point) => {
+        const timestamp = Math.floor(point.timestamp / bucketSeconds) * bucketSeconds
+        const current = buckets[timestamp]
+        if (!current) return { ...buckets, [timestamp]: { ...point, timestamp, isCompacted: true } }
+        const next = { ...current, cpuUtilization: (current.cpuUtilization + point.cpuUtilization) / 2, memoryUtilization: (current.memoryUtilization + point.memoryUtilization) / 2, swapUtilization: (current.swapUtilization + point.swapUtilization) / 2 }
+        return { ...buckets, [timestamp]: next }
+      }, {})).sort((left, right) => left.timestamp - right.timestamp)
+    })()
+    historyRequests.set(cacheKey, { expiresAt: Date.now() + 5_000, request })
+    request.catch(() => historyRequests.delete(cacheKey))
+    return request
   },
   async getHistoryHeatmap(serverId: string, fromTimestamp: number, timezoneOffsetSeconds: number, gpuUuids: string[]): Promise<HistoryHeatmapPoint[]> {
     if (isTauri) return invoke('get_history_heatmap', { serverId, fromTimestamp, timezoneOffsetSeconds, gpuUuids })

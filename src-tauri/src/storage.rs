@@ -160,6 +160,37 @@ fn insert_compacted_trend(connection: &Connection, server_id: &str, timestamp: i
     Ok(())
 }
 
+fn trend_history_point(timestamp: i64, bucket: TrendHistoryBucket) -> HistoryPoint {
+    let samples = bucket.sample_count.max(1) as f64;
+    let gpu_utilizations = bucket.gpu_utilization_sums.iter().filter_map(|(uuid, sum)| {
+        let count = bucket.gpu_utilization_counts.get(uuid).copied().unwrap_or_default();
+        (count > 0).then_some((uuid.clone(), sum / count as f64))
+    }).collect();
+    let gpu_memory_utilizations = bucket.gpu_memory_sums.iter().filter_map(|(uuid, sum)| {
+        let count = bucket.gpu_memory_counts.get(uuid).copied().unwrap_or_default();
+        (count > 0).then_some((uuid.clone(), sum / count as f64))
+    }).collect();
+    HistoryPoint {
+        timestamp,
+        is_compacted: true,
+        cpu_utilization: bucket.cpu_sum / samples,
+        memory_utilization: bucket.memory_sum / samples,
+        swap_utilization: bucket.swap_sum / samples,
+        cpu_min: bucket.cpu_min.unwrap_or_default(),
+        cpu_max: bucket.cpu_max.unwrap_or_default(),
+        memory_min: bucket.memory_min.unwrap_or_default(),
+        memory_max: bucket.memory_max.unwrap_or_default(),
+        swap_min: bucket.swap_min.unwrap_or_default(),
+        swap_max: bucket.swap_max.unwrap_or_default(),
+        gpu_mins: bucket.gpu_mins,
+        gpu_maxes: bucket.gpu_maxes,
+        gpu_memory_mins: bucket.gpu_memory_mins,
+        gpu_memory_maxes: bucket.gpu_memory_maxes,
+        gpu_utilizations,
+        gpu_memory_utilizations,
+    }
+}
+
 fn compact_time_bucket(connection: &Connection, server_id: &str, start: i64, end: i64) -> Result<(), String> {
     let mut bucket = TrendHistoryBucket::default();
     {
@@ -891,9 +922,26 @@ impl Database {
             let gpu_memory_utilizations: HashMap<String, f64> = serde_json::from_str(&gpu_memory_json).unwrap_or_default();
             let range: CompactedHistoryRange = serde_json::from_str(&payload_json).unwrap_or_default();
             let compacted = range.history_range_version == 1;
-            Ok(HistoryPoint { timestamp: row.get(0)?, cpu_utilization, memory_utilization, swap_utilization, cpu_min: if compacted { range.cpu_min } else { cpu_utilization }, cpu_max: if compacted { range.cpu_max } else { cpu_utilization }, memory_min: if compacted { range.memory_min } else { memory_utilization }, memory_max: if compacted { range.memory_max } else { memory_utilization }, swap_min: if compacted { range.swap_min } else { swap_utilization }, swap_max: if compacted { range.swap_max } else { swap_utilization }, gpu_mins: if compacted { range.gpu_mins } else { gpu_utilizations.clone() }, gpu_maxes: if compacted { range.gpu_maxes } else { gpu_utilizations.clone() }, gpu_memory_mins: if compacted { range.gpu_memory_mins } else { gpu_memory_utilizations.clone() }, gpu_memory_maxes: if compacted { range.gpu_memory_maxes } else { gpu_memory_utilizations.clone() }, gpu_utilizations, gpu_memory_utilizations })
+            Ok(HistoryPoint { timestamp: row.get(0)?, is_compacted: compacted, cpu_utilization, memory_utilization, swap_utilization, cpu_min: if compacted { range.cpu_min } else { cpu_utilization }, cpu_max: if compacted { range.cpu_max } else { cpu_utilization }, memory_min: if compacted { range.memory_min } else { memory_utilization }, memory_max: if compacted { range.memory_max } else { memory_utilization }, swap_min: if compacted { range.swap_min } else { swap_utilization }, swap_max: if compacted { range.swap_max } else { swap_utilization }, gpu_mins: if compacted { range.gpu_mins } else { gpu_utilizations.clone() }, gpu_maxes: if compacted { range.gpu_maxes } else { gpu_utilizations.clone() }, gpu_memory_mins: if compacted { range.gpu_memory_mins } else { gpu_memory_utilizations.clone() }, gpu_memory_maxes: if compacted { range.gpu_memory_maxes } else { gpu_memory_utilizations.clone() }, gpu_utilizations, gpu_memory_utilizations })
         }).map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
+    pub fn get_compacted_history(&self, server_id: &str, from_timestamp: i64, bucket_seconds: i64) -> Result<Vec<HistoryPoint>, String> {
+        let bucket_seconds = bucket_seconds.max(60);
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut buckets: BTreeMap<i64, TrendHistoryBucket> = BTreeMap::new();
+        let mut statement = connection.prepare(
+            "SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement.query_map(params![server_id, from_timestamp], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?, row.get::<_, f64>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?))
+        }).map_err(|error| error.to_string())?;
+        for row in rows {
+            let (timestamp, cpu, memory, swap, gpu_json, gpu_memory_json, payload_json) = row.map_err(|error| error.to_string())?;
+            add_trend_sample(buckets.entry(bucket_start(timestamp, bucket_seconds)).or_default(), cpu, memory, swap, &gpu_json, &gpu_memory_json, &payload_json);
+        }
+        Ok(buckets.into_iter().map(|(timestamp, bucket)| trend_history_point(timestamp, bucket)).collect())
     }
 
     pub fn get_history_heatmap(&self, server_id: &str, from_timestamp: i64, timezone_offset_seconds: i64, gpu_uuids: &[String]) -> Result<Vec<HistoryHeatmapPoint>, String> {
@@ -1283,6 +1331,11 @@ mod tests {
         let long = history.iter().find(|point| point.cpu_max == 75.0).unwrap();
         assert!((long.cpu_utilization - 40.0).abs() < 0.01);
         assert_eq!(long.cpu_min, 5.0);
+
+        let uniform = reopened.get_compacted_history(&server_id, 2_000_000 - 36 * 3_600, LONG_HISTORY_BUCKET_SECONDS).unwrap();
+        assert!(uniform.iter().all(|point| point.is_compacted));
+        assert!(uniform.iter().any(|point| point.cpu_max == 90.0));
+        assert!(uniform.iter().any(|point| point.cpu_max == 75.0));
     }
 
     #[test]
@@ -1313,6 +1366,7 @@ mod tests {
         let server = db.save_server(ServerDraft { remote_history_enabled: true, ..draft("Remote", 30) }).unwrap();
         let point = HistoryPoint {
             timestamp: 1_722_700_800,
+            is_compacted: false,
             cpu_utilization: 12.5,
             memory_utilization: 40.0,
             swap_utilization: 3.0,

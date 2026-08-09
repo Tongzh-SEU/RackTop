@@ -104,6 +104,7 @@ export interface DiskMetric {
 
 export interface HistoryPoint {
   timestamp: number
+  isCompacted?: boolean
   cpuUtilization: number
   memoryUtilization: number
   swapUtilization: number
@@ -170,6 +171,7 @@ export interface AppSettings {
   temperatureThresholdCelsius: number
   currentUserAccent: string
   theme: 'system' | 'light' | 'dark'
+  menuBarMode: 'compact' | 'expanded'
   reduceMotion: boolean
   showAddServerGuide: boolean
 }

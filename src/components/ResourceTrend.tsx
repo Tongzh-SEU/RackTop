@@ -24,7 +24,7 @@ export function ResourceTrend({ snapshot, kind, gpuUuid, title, animate }: { sna
     let cancelled = false
     setLoading(true)
     setError(null)
-    const load = () => api.getHistory(snapshot.serverId, Math.floor(Date.now() / 1000) - range * 3600).then((value) => { if (!cancelled) setPoints(value) }).catch((reason) => { if (!cancelled) setError(String(reason)) }).finally(() => { if (!cancelled) setLoading(false) })
+    const load = () => api.getHistory(snapshot.serverId, Math.floor(Date.now() / 1000) - range * 3600, range > 3 ? 10 * 60 : undefined).then((value) => { if (!cancelled) setPoints(value) }).catch((reason) => { if (!cancelled) setError(String(reason)) }).finally(() => { if (!cancelled) setLoading(false) })
     void load()
     const interval = window.setInterval(() => void load(), 30_000)
     return () => { cancelled = true; window.clearInterval(interval) }

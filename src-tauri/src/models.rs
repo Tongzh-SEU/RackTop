@@ -194,6 +194,8 @@ pub struct Snapshot {
 #[serde(rename_all = "camelCase")]
 pub struct HistoryPoint {
     pub timestamp: i64,
+    #[serde(default)]
+    pub is_compacted: bool,
     pub cpu_utilization: f64,
     pub memory_utilization: f64,
     #[serde(default)]
@@ -313,12 +315,15 @@ pub struct AppSettings {
     pub temperature_threshold_celsius: f64,
     pub current_user_accent: String,
     pub theme: String,
+    #[serde(default = "default_menu_bar_mode")]
+    pub menu_bar_mode: String,
     pub reduce_motion: bool,
     #[serde(default = "default_true")]
     pub show_add_server_guide: bool,
 }
 
 fn default_true() -> bool { true }
+fn default_menu_bar_mode() -> String { "compact".into() }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -335,6 +340,7 @@ impl Default for AppSettings {
             temperature_threshold_celsius: 85.0,
             current_user_accent: "#0a84ff".into(),
             theme: "system".into(),
+            menu_bar_mode: default_menu_bar_mode(),
             reduce_motion: false,
             show_add_server_guide: true,
         }
@@ -350,5 +356,14 @@ mod tests {
         let settings = AppSettings::default();
         assert_eq!(settings.history_retention_days, 90);
         assert!(settings.history_enabled);
+        assert_eq!(settings.menu_bar_mode, "compact");
+    }
+
+    #[test]
+    fn existing_settings_default_to_compact_menu_bar() {
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("menuBarMode");
+        let settings: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings.menu_bar_mode, "compact");
     }
 }

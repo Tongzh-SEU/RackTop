@@ -288,8 +288,14 @@ async fn collect_server(database: State<'_, Database>, logs: State<'_, Interacti
 }
 
 #[tauri::command]
-fn get_history(database: State<'_, Database>, server_id: String, from_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
-    database.get_history(&server_id, from_timestamp)
+async fn get_history(app: AppHandle, server_id: String, from_timestamp: i64, bucket_seconds: Option<i64>) -> Result<Vec<HistoryPoint>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let database = app.state::<Database>();
+        match bucket_seconds.filter(|seconds| *seconds > 0) {
+            Some(seconds) => database.get_compacted_history(&server_id, from_timestamp, seconds),
+            None => database.get_history(&server_id, from_timestamp),
+        }
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -427,25 +433,120 @@ async fn terminate_process(database: State<'_, Database>, server_id: String, pid
     collector::terminate_process_tree(&server, password.as_deref(), pid).await
 }
 
-fn tray_image() -> Image<'static> {
-    let width = 18usize;
-    let height = 18usize;
-    let mut rgba = vec![0u8; width * height * 4];
+fn tray_pixel(rgba: &mut [u8], width: usize, x: usize, y: usize, alpha: u8) {
+    if x >= width || y >= 18 { return; }
+    let index = (y * width + x) * 4;
+    rgba[index..index + 4].copy_from_slice(&[0, 0, 0, alpha]);
+}
+
+fn tray_rect(rgba: &mut [u8], width: usize, x: usize, y: usize, rect_width: usize, rect_height: usize, alpha: u8) {
+    for draw_y in y..y + rect_height {
+        for draw_x in x..x + rect_width {
+            tray_pixel(rgba, width, draw_x, draw_y, alpha);
+        }
+    }
+}
+
+const TRAY_DIGITS: [[u8; 15]; 10] = [
+    [1,1,1, 1,0,1, 1,0,1, 1,0,1, 1,1,1],
+    [0,1,0, 1,1,0, 0,1,0, 0,1,0, 1,1,1],
+    [1,1,1, 0,0,1, 1,1,1, 1,0,0, 1,1,1],
+    [1,1,1, 0,0,1, 0,1,1, 0,0,1, 1,1,1],
+    [1,0,1, 1,0,1, 1,1,1, 0,0,1, 0,0,1],
+    [1,1,1, 1,0,0, 1,1,1, 0,0,1, 1,1,1],
+    [1,1,1, 1,0,0, 1,1,1, 1,0,1, 1,1,1],
+    [1,1,1, 0,0,1, 0,1,0, 0,1,0, 0,1,0],
+    [1,1,1, 1,0,1, 1,1,1, 1,0,1, 1,1,1],
+    [1,1,1, 1,0,1, 1,1,1, 0,0,1, 1,1,1],
+];
+
+fn tray_digit(rgba: &mut [u8], width: usize, x: usize, value: usize, alpha: u8) {
+    for (index, pixel) in TRAY_DIGITS[value].iter().enumerate() {
+        if *pixel == 0 { continue; }
+        tray_rect(rgba, width, x + (index % 3) * 2, 4 + (index / 3) * 2, 2, 2, alpha);
+    }
+}
+
+fn tray_count(rgba: &mut [u8], width: usize, x: usize, count: usize, alpha: u8) {
+    let count = count.min(99);
+    if count >= 10 {
+        tray_digit(rgba, width, x, count / 10, alpha);
+        tray_digit(rgba, width, x + 8, count % 10, alpha);
+    } else {
+        tray_digit(rgba, width, x + 4, count, alpha);
+    }
+}
+
+fn render_tray_image(mode: &str, reservation_pending: usize, process_warnings: usize) -> (Vec<u8>, u32, u32) {
+    let expanded = mode == "expanded";
+    let width = if expanded { 78usize } else { 18usize };
+    let mut rgba = vec![0u8; width * 18 * 4];
     for x in 2..16 {
         let y = if x < 6 { 10 } else if x < 9 { 5 } else if x < 12 { 12 } else { 7 };
         for offset in 0..2 {
-            let index = ((y + offset) * width + x) * 4;
-            rgba[index..index + 4].copy_from_slice(&[255, 255, 255, 255]);
+            tray_pixel(&mut rgba, width, x, y + offset, 255);
         }
     }
-    Image::new_owned(rgba, width as u32, height as u32)
+
+    if !expanded && reservation_pending + process_warnings > 0 {
+        tray_rect(&mut rgba, width, 13, 2, 3, 3, 255);
+    }
+    if expanded {
+        let reservation_alpha = if reservation_pending > 0 { 255 } else { 76 };
+        let process_alpha = if process_warnings > 0 { 255 } else { 76 };
+
+        // Bell and its fixed-width two-digit counter.
+        tray_rect(&mut rgba, width, 22, 3, 5, 1, reservation_alpha);
+        tray_rect(&mut rgba, width, 20, 5, 1, 6, reservation_alpha);
+        tray_rect(&mut rgba, width, 28, 5, 1, 6, reservation_alpha);
+        tray_rect(&mut rgba, width, 21, 11, 7, 2, reservation_alpha);
+        tray_rect(&mut rgba, width, 24, 14, 2, 1, reservation_alpha);
+        tray_count(&mut rgba, width, 31, reservation_pending, reservation_alpha);
+
+        // Terminal window with an exclamation mark and its warning counter.
+        tray_rect(&mut rgba, width, 49, 4, 11, 1, process_alpha);
+        tray_rect(&mut rgba, width, 49, 5, 1, 9, process_alpha);
+        tray_rect(&mut rgba, width, 59, 5, 1, 9, process_alpha);
+        tray_rect(&mut rgba, width, 49, 13, 11, 1, process_alpha);
+        tray_rect(&mut rgba, width, 54, 7, 2, 4, process_alpha);
+        tray_rect(&mut rgba, width, 54, 12, 2, 1, process_alpha);
+        tray_count(&mut rgba, width, 62, process_warnings, process_alpha);
+    }
+    (rgba, width as u32, 18)
 }
 
-fn build_tray_menu(app: &AppHandle, summary: &str) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
+fn tray_image(mode: &str, reservation_pending: usize, process_warnings: usize) -> Image<'static> {
+    let (rgba, width, height) = render_tray_image(mode, reservation_pending, process_warnings);
+    Image::new_owned(rgba, width, height)
+}
+
+#[cfg(test)]
+mod tray_image_tests {
+    use super::render_tray_image;
+
+    #[test]
+    fn compact_and_expanded_images_keep_stable_dimensions() {
+        let (compact, compact_width, compact_height) = render_tray_image("compact", 0, 0);
+        let (compact_alert, alert_width, alert_height) = render_tray_image("compact", 1, 2);
+        let (expanded, expanded_width, expanded_height) = render_tray_image("expanded", 0, 0);
+        let (expanded_alert, expanded_alert_width, expanded_alert_height) = render_tray_image("expanded", 12, 3);
+
+        assert_eq!((compact_width, compact_height), (18, 18));
+        assert_eq!((alert_width, alert_height), (18, 18));
+        assert_eq!((expanded_width, expanded_height), (78, 18));
+        assert_eq!((expanded_alert_width, expanded_alert_height), (78, 18));
+        assert_ne!(compact, compact_alert);
+        assert_eq!(expanded.len(), expanded_alert.len());
+        assert_ne!(expanded, expanded_alert);
+    }
+}
+
+fn build_tray_menu(app: &AppHandle, reservation_pending: usize, process_warnings: usize) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
     let open = MenuItemBuilder::with_id("open", "打开 RackTop").build(app)?;
-    let reservations = MenuItemBuilder::with_id("reservations", summary).build(app)?;
+    let reservations = MenuItemBuilder::with_id("reservations", format!("预约待处理  {}", reservation_pending)).build(app)?;
+    let processes = MenuItemBuilder::with_id("mine-processes", format!("我的进程异常  {}", process_warnings)).build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
-    Ok(MenuBuilder::new(app).items(&[&open, &reservations, &quit]).build()?)
+    Ok(MenuBuilder::new(app).item(&open).separator().items(&[&reservations, &processes]).separator().item(&quit).build()?)
 }
 
 fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
@@ -481,12 +582,13 @@ fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn s
 }
 
 #[tauri::command]
-fn update_tray_summary(app: AppHandle, waiting: usize, current: usize, pending: usize) -> Result<(), String> {
-    let summary = if waiting + current + pending == 0 { "预约摘要".to_string() } else { format!("预约 {} · 可用 {} · 待确认 {}", waiting, current, pending) };
-    let menu = build_tray_menu(&app, &summary).map_err(|error| error.to_string())?;
+fn update_tray_summary(app: AppHandle, mode: String, reservation_pending: usize, process_warnings: usize) -> Result<(), String> {
+    let mode = if mode == "expanded" { "expanded" } else { "compact" };
+    let menu = build_tray_menu(&app, reservation_pending, process_warnings).map_err(|error| error.to_string())?;
     let tray = app.tray_by_id("racktop-tray").ok_or("找不到 RackTop 菜单栏图标")?;
     tray.set_menu(Some(menu)).map_err(|error| error.to_string())?;
-    tray.set_tooltip(Some(&format!("RackTop · {summary}"))).map_err(|error| error.to_string())?;
+    tray.set_icon_with_as_template(Some(tray_image(mode, reservation_pending, process_warnings)), true).map_err(|error| error.to_string())?;
+    tray.set_tooltip(Some(&format!("RackTop · 预约待处理 {} · 我的进程异常 {}", reservation_pending, process_warnings))).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -503,13 +605,14 @@ pub fn run() {
 
             app.set_menu(build_application_menu(&app.handle())?)?;
 
-            let menu = build_tray_menu(&app.handle(), "预约摘要")?;
+            let menu = build_tray_menu(&app.handle(), 0, 0)?;
             TrayIconBuilder::with_id("racktop-tray")
-                .icon(tray_image())
+                .icon(tray_image("compact", 0, 0))
+                .icon_as_template(true)
                 .tooltip("RackTop · GPU 与 CPU 监控")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
-                    "open" | "reservations" => {
+                    "open" | "reservations" | "mine-processes" => {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
                             let _ = window.set_focus();
