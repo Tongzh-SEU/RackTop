@@ -96,6 +96,85 @@ pub struct InteractionLogSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectTarget {
+    pub server_id: String,
+    pub path: String,
+    pub status: String,
+    pub exists: bool,
+    pub is_directory: bool,
+    pub size_bytes: u64,
+    pub file_count: u64,
+    pub last_checked_at: Option<i64>,
+    pub last_synced_at: Option<i64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub source_server_id: String,
+    pub source_path: String,
+    pub source_exists: bool,
+    pub source_is_directory: bool,
+    pub source_size_bytes: u64,
+    pub source_file_count: u64,
+    pub dataset_ids: Vec<String>,
+    pub targets: Vec<ProjectTarget>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_sync_at: Option<i64>,
+    pub status: String,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTargetDraft {
+    pub server_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDraft {
+    pub id: Option<String>,
+    pub name: String,
+    pub kind: String,
+    pub source_server_id: String,
+    pub source_path: String,
+    #[serde(default)]
+    pub dataset_ids: Vec<String>,
+    pub targets: Vec<ProjectTargetDraft>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPathCheck {
+    pub server_id: String,
+    pub requested_path: String,
+    pub suggested_path: String,
+    pub exists: bool,
+    pub is_directory: bool,
+    pub size_bytes: u64,
+    pub file_count: u64,
+    pub matches: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSyncResult {
+    pub project_id: String,
+    pub target_server_id: String,
+    pub transferred_bytes: u64,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GpuMetric {
     pub index: u32,
     pub uuid: String,

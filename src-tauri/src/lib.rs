@@ -1,13 +1,14 @@
 pub mod collector;
 pub mod models;
 mod remote_history;
+mod project_sync;
 mod host_key;
 mod ssh_config;
 mod ssh_keys;
 pub mod storage;
 mod terminal;
 
-use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
+use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, Project, ProjectDraft, ProjectPathCheck, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
@@ -380,6 +381,45 @@ fn delete_idle_reservation(database: State<'_, Database>, reservation_id: String
 }
 
 #[tauri::command]
+fn list_projects(database: State<'_, Database>) -> Result<Vec<Project>, String> {
+    database.list_projects()
+}
+
+#[tauri::command]
+fn save_project(database: State<'_, Database>, draft: ProjectDraft) -> Result<Project, String> {
+    database.save_project(draft)
+}
+
+#[tauri::command]
+fn delete_project(database: State<'_, Database>, project_id: String) -> Result<(), String> {
+    database.delete_project(&project_id)
+}
+
+#[tauri::command]
+async fn probe_project_paths(database: State<'_, Database>, draft: ProjectDraft) -> Result<Vec<ProjectPathCheck>, String> {
+    project_sync::probe(&database, &draft).await
+}
+
+#[tauri::command]
+async fn suggest_project_paths(database: State<'_, Database>, server_id: String, query: String) -> Result<Vec<String>, String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server.id, false)? } else { None };
+    project_sync::suggest_paths(&server, password.as_deref(), &query).await
+}
+
+#[tauri::command]
+async fn inspect_project(database: State<'_, Database>, project_id: String) -> Result<Project, String> {
+    let project = database.get_project(&project_id)?;
+    project_sync::inspect(&database, &project).await
+}
+
+#[tauri::command]
+async fn sync_project(database: State<'_, Database>, project_id: String, target_server_id: String) -> Result<ProjectSyncResult, String> {
+    let project = database.get_project(&project_id)?;
+    project_sync::sync(&database, &project, &target_server_id).await
+}
+
+#[tauri::command]
 fn import_ssh_config(path: Option<String>) -> Result<Vec<ServerDraft>, String> {
     let path = path.map(PathBuf::from).map(Ok).unwrap_or_else(ssh_config::default_config_path)?;
     ssh_config::import(&path)
@@ -642,7 +682,7 @@ pub fn run() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, list_projects, save_project, delete_project, probe_project_paths, suggest_project_paths, inspect_project, sync_project, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }

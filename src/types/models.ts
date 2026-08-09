@@ -272,3 +272,67 @@ export interface InteractionLogSummary {
   failureCount: number
   servers: InteractionServerSummary[]
 }
+
+export type ProjectKind = 'project' | 'dataset'
+export type ProjectTargetStatus = 'unknown' | 'found' | 'missing' | 'offline' | 'synced' | 'error'
+
+export interface ProjectTarget {
+  serverId: string
+  path: string
+  status: ProjectTargetStatus
+  exists: boolean
+  isDirectory: boolean
+  sizeBytes: number
+  fileCount: number
+  lastCheckedAt?: number | null
+  lastSyncedAt?: number | null
+  error?: string | null
+}
+
+export interface Project {
+  id: string
+  name: string
+  kind: ProjectKind
+  sourceServerId: string
+  sourcePath: string
+  sourceExists: boolean
+  sourceIsDirectory: boolean
+  sourceSizeBytes: number
+  sourceFileCount: number
+  datasetIds: string[]
+  targets: ProjectTarget[]
+  createdAt: number
+  updatedAt: number
+  lastSyncAt?: number | null
+  status: ProjectTargetStatus
+  lastError?: string | null
+}
+
+export interface ProjectDraft {
+  id?: string
+  name: string
+  kind: ProjectKind
+  sourceServerId: string
+  sourcePath: string
+  datasetIds: string[]
+  targets: Array<{ serverId: string; path: string }>
+}
+
+export interface ProjectPathCheck {
+  serverId: string
+  requestedPath: string
+  suggestedPath: string
+  exists: boolean
+  isDirectory: boolean
+  sizeBytes: number
+  fileCount: number
+  matches: string[]
+  error?: string | null
+}
+
+export interface ProjectSyncResult {
+  projectId: string
+  targetServerId: string
+  transferredBytes: number
+  message: string
+}

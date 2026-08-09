@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
+import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, Project, ProjectDraft, ProjectPathCheck, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
 import { clampPercent, gpuMemoryPercent } from '../utils/gpu'
 import { RACKTOP_MANAGED_IDENTITY_PATH } from '../utils/sshSetup'
 
@@ -141,6 +141,7 @@ const a100Snapshot: Snapshot = {
 let browserServers = [...demoServers]
 let browserSettings = { ...defaultSettings }
 let browserReservations: IdleReservation[] = []
+let browserProjects: Project[] = []
 const historyRequests = new Map<string, { expiresAt: number; request: Promise<HistoryPoint[]> }>()
 const browserInteractionSummary: InteractionLogSummary = { sentBytes: 0, responseBytes: 0, storedBytes: 0, localStorageBytes: 36.3 * 1024 ** 2, failureCount: 0, servers: [] }
 
@@ -292,6 +293,58 @@ export const api = {
   async deleteIdleReservation(reservationId: string): Promise<void> {
     if (isTauri) return invoke('delete_idle_reservation', { reservationId })
     browserReservations = browserReservations.filter((item) => item.id !== reservationId)
+  },
+  async listProjects(): Promise<Project[]> {
+    return isTauri ? invoke('list_projects') : browserProjects
+  },
+  async saveProject(draft: ProjectDraft): Promise<Project> {
+    if (isTauri) return invoke('save_project', { draft })
+    const previous = browserProjects.find((item) => item.id === draft.id)
+    const timestamp = Math.floor(Date.now() / 1000)
+    const project: Project = {
+      id: draft.id ?? crypto.randomUUID(), name: draft.name, kind: draft.kind,
+      sourceServerId: draft.sourceServerId, sourcePath: draft.sourcePath,
+      sourceExists: previous?.sourceExists ?? false, sourceIsDirectory: previous?.sourceIsDirectory ?? true,
+      sourceSizeBytes: previous?.sourceSizeBytes ?? 0, sourceFileCount: previous?.sourceFileCount ?? 0,
+      datasetIds: draft.kind === 'project' ? draft.datasetIds : [],
+      targets: draft.targets.map((target) => ({ serverId: target.serverId, path: target.path, status: 'unknown', exists: false, isDirectory: true, sizeBytes: 0, fileCount: 0 })),
+      createdAt: previous?.createdAt ?? timestamp, updatedAt: timestamp, lastSyncAt: previous?.lastSyncAt ?? null,
+      status: 'unknown', lastError: null,
+    }
+    browserProjects = [project, ...browserProjects.filter((item) => item.id !== project.id)]
+    return project
+  },
+  async deleteProject(projectId: string): Promise<void> {
+    if (isTauri) return invoke('delete_project', { projectId })
+    browserProjects = browserProjects.filter((item) => item.id !== projectId)
+  },
+  async probeProjectPaths(draft: ProjectDraft): Promise<ProjectPathCheck[]> {
+    if (isTauri) return invoke('probe_project_paths', { draft })
+    return [
+      { serverId: draft.sourceServerId, requestedPath: draft.sourcePath, suggestedPath: draft.sourcePath, exists: true, isDirectory: true, sizeBytes: 8.6 * 1024 ** 3, fileCount: 1240, matches: [] },
+      ...draft.targets.map((target, index) => ({ serverId: target.serverId, requestedPath: target.path, suggestedPath: target.path, exists: index === 0, isDirectory: true, sizeBytes: index === 0 ? 8.4 * 1024 ** 3 : 0, fileCount: index === 0 ? 1214 : 0, matches: [] })),
+    ]
+  },
+  async suggestProjectPaths(serverId: string, query: string): Promise<string[]> {
+    if (isTauri) return invoke('suggest_project_paths', { serverId, query })
+    const examples = serverId === 'demo-132'
+      ? ['~/datasets/', '~/llama-finetune/', '~/models/', '~/projects/', '~/shared/']
+      : ['~/checkpoints/', '~/datasets/', '~/llama-finetune/', '~/projects/', '~/workspace/']
+    const normalized = query.toLowerCase().replace(/\/$/, '')
+    return examples.filter((path) => path.toLowerCase().startsWith(normalized)).slice(0, 12)
+  },
+  async inspectProject(projectId: string): Promise<Project> {
+    if (isTauri) return invoke('inspect_project', { projectId })
+    const project = browserProjects.find((item) => item.id === projectId)
+    if (!project) throw new Error('项目不存在')
+    return project
+  },
+  async syncProject(projectId: string, targetServerId: string): Promise<ProjectSyncResult> {
+    if (isTauri) return invoke('sync_project', { projectId, targetServerId })
+    await new Promise((resolve) => window.setTimeout(resolve, 600))
+    const timestamp = Math.floor(Date.now() / 1000)
+    browserProjects = browserProjects.map((project) => project.id === projectId ? { ...project, status: 'synced', lastSyncAt: timestamp, targets: project.targets.map((target) => target.serverId === targetServerId ? { ...target, status: 'synced', exists: true, lastSyncedAt: timestamp } : target) } : project)
+    return { projectId, targetServerId, transferredBytes: 8.6 * 1024 ** 3, message: '同步完成' }
   },
   async importSshConfig(path?: string): Promise<ServerDraft[]> {
     if (isTauri) return invoke('import_ssh_config', { path: path || null })

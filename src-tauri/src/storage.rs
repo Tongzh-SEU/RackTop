@@ -1,9 +1,10 @@
-use crate::models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Server, ServerDraft, Snapshot, UsageDistribution, UsagePoint, UsageUserAggregate};
+use crate::models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Project, ProjectDraft, ProjectTarget, Server, ServerDraft, Snapshot, UsageDistribution, UsagePoint, UsageUserAggregate};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
@@ -421,6 +422,26 @@ impl Database {
                     PRIMARY KEY(server_id,timestamp,gpu_uuid,username),
                     FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
                  );
+                 CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    source_server_id TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    source_exists INTEGER NOT NULL DEFAULT 0,
+                    source_is_directory INTEGER NOT NULL DEFAULT 0,
+                    source_size_bytes INTEGER NOT NULL DEFAULT 0,
+                    source_file_count INTEGER NOT NULL DEFAULT 0,
+                    dataset_ids_json TEXT NOT NULL DEFAULT '[]',
+                    targets_json TEXT NOT NULL DEFAULT '[]',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    last_sync_at INTEGER,
+                    status TEXT NOT NULL DEFAULT 'unknown',
+                    last_error TEXT,
+                    FOREIGN KEY(source_server_id) REFERENCES servers(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_projects_updated ON projects(updated_at DESC);
                  CREATE INDEX IF NOT EXISTS idx_usage_lookup ON usage_buckets(server_id,timestamp);",
             )
             .map_err(|error| error.to_string())?;
@@ -485,6 +506,14 @@ impl Database {
         }
         if !reservation_columns.contains("pending_confirmation_gpu_keys_json") {
             connection.execute("ALTER TABLE idle_reservations ADD COLUMN pending_confirmation_gpu_keys_json TEXT NOT NULL DEFAULT '[]'", []).map_err(|error| error.to_string())?;
+        }
+        let project_columns = {
+            let mut statement = connection.prepare("PRAGMA table_info(projects)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
+            columns.filter_map(Result::ok).collect::<HashSet<_>>()
+        };
+        if !project_columns.contains("dataset_ids_json") {
+            connection.execute("ALTER TABLE projects ADD COLUMN dataset_ids_json TEXT NOT NULL DEFAULT '[]'", []).map_err(|error| error.to_string())?;
         }
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS local_usage_minutes (
@@ -1064,6 +1093,103 @@ impl Database {
         connection.execute("DELETE FROM idle_reservations WHERE id=?1", [id]).map_err(|error| error.to_string())?;
         Ok(())
     }
+
+    pub fn list_projects(&self) -> Result<Vec<Project>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT id,name,kind,source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,dataset_ids_json,targets_json,created_at,updated_at,last_sync_at,status,last_error FROM projects ORDER BY CASE kind WHEN 'project' THEN 0 ELSE 1 END, updated_at DESC").map_err(|error| error.to_string())?;
+        let rows = statement.query_map([], |row| {
+            let dataset_ids_json: String = row.get(9)?;
+            let targets_json: String = row.get(10)?;
+            Ok(Project {
+                id: row.get(0)?, name: row.get(1)?, kind: row.get(2)?, source_server_id: row.get(3)?, source_path: row.get(4)?,
+                source_exists: row.get::<_, i64>(5)? != 0, source_is_directory: row.get::<_, i64>(6)? != 0, source_size_bytes: row.get::<_, i64>(7)?.max(0) as u64, source_file_count: row.get::<_, i64>(8)?.max(0) as u64,
+                dataset_ids: serde_json::from_str(&dataset_ids_json).unwrap_or_default(), targets: serde_json::from_str(&targets_json).unwrap_or_default(), created_at: row.get(11)?, updated_at: row.get(12)?, last_sync_at: row.get(13)?, status: row.get(14)?, last_error: row.get(15)?,
+            })
+        }).map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
+    pub fn get_project(&self, project_id: &str) -> Result<Project, String> {
+        self.list_projects()?.into_iter().find(|project| project.id == project_id).ok_or_else(|| "项目不存在".into())
+    }
+
+    pub fn save_project(&self, draft: ProjectDraft) -> Result<Project, String> {
+        let name = draft.name.trim();
+        let source_path = draft.source_path.trim();
+        if name.is_empty() || source_path.is_empty() { return Err("项目名称和主目录不能为空".into()); }
+        if !matches!(draft.kind.as_str(), "project" | "dataset") { return Err("项目类型无效".into()); }
+        if draft.kind == "dataset" && !draft.dataset_ids.is_empty() { return Err("数据集不能附属其他数据集".into()); }
+        let existing_projects = self.list_projects()?;
+        if let Some(existing) = draft.id.as_ref().and_then(|id| existing_projects.iter().find(|project| &project.id == id)) {
+            if existing.kind != draft.kind { return Err("创建后不能修改项目或数据集的类型".into()); }
+        }
+        self.get_server(&draft.source_server_id)?;
+        for target in &draft.targets { self.get_server(&target.server_id)?; }
+        let known_dataset_ids: HashSet<String> = existing_projects.into_iter().filter(|project| project.kind == "dataset").map(|project| project.id).collect();
+        if draft.dataset_ids.iter().any(|dataset_id| !known_dataset_ids.contains(dataset_id)) { return Err("关联数据集不存在或类型无效".into()); }
+        if draft.dataset_ids.iter().collect::<HashSet<_>>().len() != draft.dataset_ids.len() { return Err("关联数据集不能重复".into()); }
+        if draft.targets.iter().any(|target| target.server_id == draft.source_server_id) { return Err("主服务器不能同时作为目标服务器".into()); }
+        if draft.targets.iter().map(|target| &target.server_id).collect::<HashSet<_>>().len() != draft.targets.len() { return Err("目标服务器不能重复".into()); }
+        if draft.targets.iter().any(|target| target.path.trim().is_empty()) { return Err("每个目标服务器都必须指定目录".into()); }
+        let id = draft.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let previous_source: Option<(String, String, i64, i64, i64, i64)> = connection.query_row("SELECT source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count FROM projects WHERE id=?1", [&id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))).optional().map_err(|error| error.to_string())?;
+        let same_source = previous_source.as_ref().is_some_and(|(server_id, path, ..)| server_id == &draft.source_server_id && path == source_path);
+        let source_exists = if same_source { previous_source.as_ref().map(|value| value.2).unwrap_or(0) } else { 0 };
+        let source_is_directory = if same_source { previous_source.as_ref().map(|value| value.3).unwrap_or(0) } else { 0 };
+        let source_size_bytes = if same_source { previous_source.as_ref().map(|value| value.4).unwrap_or(0) } else { 0 };
+        let source_file_count = if same_source { previous_source.as_ref().map(|value| value.5).unwrap_or(0) } else { 0 };
+        let previous_targets: Vec<ProjectTarget> = connection.query_row("SELECT targets_json FROM projects WHERE id=?1", [&id], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())?.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default();
+        let targets: Vec<ProjectTarget> = draft.targets.into_iter().map(|target| {
+            let previous = previous_targets.iter().find(|item| item.server_id == target.server_id && item.path == target.path.trim());
+            ProjectTarget { server_id: target.server_id, path: target.path.trim().to_string(), status: previous.map(|item| item.status.clone()).unwrap_or_else(|| "unknown".into()), exists: previous.map(|item| item.exists).unwrap_or(false), is_directory: previous.map(|item| item.is_directory).unwrap_or(false), size_bytes: previous.map(|item| item.size_bytes).unwrap_or(0), file_count: previous.map(|item| item.file_count).unwrap_or(0), last_checked_at: previous.and_then(|item| item.last_checked_at), last_synced_at: previous.and_then(|item| item.last_synced_at), error: None }
+        }).collect();
+        let targets_json = serde_json::to_string(&targets).map_err(|error| error.to_string())?;
+        let dataset_ids_json = serde_json::to_string(&draft.dataset_ids).map_err(|error| error.to_string())?;
+        connection.execute("INSERT INTO projects(id,name,kind,source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,dataset_ids_json,targets_json,created_at,updated_at,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'unknown') ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,source_server_id=excluded.source_server_id,source_path=excluded.source_path,dataset_ids_json=excluded.dataset_ids_json,targets_json=excluded.targets_json,updated_at=excluded.updated_at", params![id, name, draft.kind, draft.source_server_id, source_path, source_exists, source_is_directory, source_size_bytes, source_file_count, dataset_ids_json, targets_json, now, now]).map_err(|error| error.to_string())?;
+        drop(connection);
+        self.list_projects()?.into_iter().find(|project| project.id == id).ok_or_else(|| "保存项目后无法读取项目".into())
+    }
+
+    pub fn update_project_checks(&self, project_id: &str, source_exists: bool, source_is_directory: bool, source_size_bytes: u64, source_file_count: u64, targets: &[ProjectTarget], status: &str, error: Option<&str>) -> Result<Project, String> {
+        let targets_json = serde_json::to_string(targets).map_err(|error| error.to_string())?;
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection.execute("UPDATE projects SET source_exists=?2,source_is_directory=?3,source_size_bytes=?4,source_file_count=?5,targets_json=?6,status=?7,last_error=?8,updated_at=unixepoch() WHERE id=?1", params![project_id, source_exists, source_is_directory, source_size_bytes as i64, source_file_count as i64, targets_json, status, error]).map_err(|error| error.to_string())?;
+        drop(connection);
+        self.list_projects()?.into_iter().find(|project| project.id == project_id).ok_or_else(|| "项目不存在".into())
+    }
+
+    pub fn mark_project_synced(&self, project_id: &str, target_server_id: &str, bytes: u64) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
+        let project_json: String = connection.query_row("SELECT targets_json FROM projects WHERE id=?1", [project_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+        let mut targets: Vec<ProjectTarget> = serde_json::from_str(&project_json).map_err(|error| error.to_string())?;
+        if let Some(target) = targets.iter_mut().find(|item| item.server_id == target_server_id) { target.status = "synced".into(); target.last_synced_at = Some(now); target.error = None; }
+        let all_synced = targets.iter().all(|target| target.status == "synced");
+        let targets_json = serde_json::to_string(&targets).map_err(|error| error.to_string())?;
+        connection.execute("UPDATE projects SET targets_json=?2,last_sync_at=?3,status=?4,last_error=NULL,updated_at=?3 WHERE id=?1", params![project_id, targets_json, now, if all_synced { "synced" } else { "unknown" }]).map_err(|error| error.to_string())?;
+        let _ = bytes;
+        Ok(())
+    }
+
+    pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let affected = {
+            let mut statement = connection.prepare("SELECT id,dataset_ids_json FROM projects WHERE kind='project'").map_err(|error| error.to_string())?;
+            statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|error| error.to_string())?.filter_map(Result::ok).filter_map(|(id, json)| {
+                let mut dataset_ids: Vec<String> = serde_json::from_str(&json).ok()?;
+                let previous_len = dataset_ids.len();
+                dataset_ids.retain(|dataset_id| dataset_id != project_id);
+                (dataset_ids.len() != previous_len).then_some((id, dataset_ids))
+            }).collect::<Vec<_>>()
+        };
+        for (id, dataset_ids) in affected {
+            connection.execute("UPDATE projects SET dataset_ids_json=?2,updated_at=unixepoch() WHERE id=?1", params![id, serde_json::to_string(&dataset_ids).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
+        }
+        connection.execute("DELETE FROM projects WHERE id=?1", [project_id]).map_err(|error| error.to_string())?;
+        Ok(())
+    }
 }
 
 fn blank_to_none(value: Option<String>) -> Option<String> {
@@ -1543,5 +1669,43 @@ mod tests {
             ..draft("Legacy GPU", 30)
         }).unwrap();
         assert_eq!(updated.location.as_deref(), Some("Lab 301 / Rack R2 / U18"));
+    }
+
+    #[test]
+    fn project_round_trip_preserves_target_paths_and_priority() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("projects.sqlite")).unwrap();
+        let source = db.save_server(draft("Source", 30)).unwrap();
+        let target = db.save_server(ServerDraft { host: "10.0.0.2".into(), ..draft("Target", 30) }).unwrap();
+        let dataset = db.save_project(ProjectDraft {
+            id: None,
+            name: "Shared data".into(),
+            kind: "dataset".into(),
+            source_server_id: source.id.clone(),
+            source_path: "~/datasets/shared".into(),
+            dataset_ids: vec![],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: target.id.clone(), path: "~/datasets/shared-copy".into() }],
+        }).unwrap();
+        let project = db.save_project(ProjectDraft {
+            id: None,
+            name: "Training".into(),
+            kind: "project".into(),
+            source_server_id: source.id,
+            source_path: "~/training".into(),
+            dataset_ids: vec![dataset.id.clone()],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: target.id, path: "~/training".into() }],
+        }).unwrap();
+
+        let projects = db.list_projects().unwrap();
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0].id, project.id);
+        assert_eq!(projects[0].dataset_ids, vec![dataset.id.clone()]);
+        assert_eq!(projects[1].id, dataset.id);
+        assert_eq!(projects[1].targets[0].path, "~/datasets/shared-copy");
+
+        db.delete_project(&dataset.id).unwrap();
+        let remaining = db.list_projects().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].dataset_ids.is_empty());
     }
 }

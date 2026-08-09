@@ -19,6 +19,7 @@ import {
   Database,
   Download,
   ExternalLink,
+  FolderGit2,
   Gauge,
   Github,
   GripVertical,
@@ -52,12 +53,14 @@ import {
 } from 'lucide-react'
 import { api } from './services/api'
 import { openExternalUrl } from './services/external'
-import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
+import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, Project, ProjectDraft, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
 import { isRackTopManagedIdentity } from './utils/sshSetup'
 import { DeleteServerDialog } from './components/DeleteServerDialog'
 import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
+import { ProjectForm } from './components/ProjectForm'
+import { ProjectDeleteDialog, ProjectView } from './components/ProjectView'
 import { isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
 import { ResourceTrend } from './components/ResourceTrend'
 import { ServerForm } from './components/ServerForm'
@@ -218,7 +221,11 @@ function App() {
   const [showAbout, setShowAbout] = useState(false)
   const [importingConfig, setImportingConfig] = useState(false)
   const [importDrafts, setImportDrafts] = useState<ServerDraft[] | null>(null)
-  const [mainView, setMainView] = useState<'server' | 'fleet' | 'idle' | 'mine'>('fleet')
+  const [mainView, setMainView] = useState<'server' | 'fleet' | 'idle' | 'mine' | 'projects'>('fleet')
+  const [projects, setProjects] = useState<Project[]>([])
+  const [projectEditor, setProjectEditor] = useState<Project | null | 'new'>(null)
+  const [projectPendingDelete, setProjectPendingDelete] = useState<Project | null>(null)
+  const [busyProjectTargets, setBusyProjectTargets] = useState<Set<string>>(new Set())
   const [mineProcessWarnings, setMineProcessWarnings] = useState<MineProcessWarning[]>([])
   const [fleetSort, setFleetSort] = useState<'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount'>(() => (localStorage.getItem('racktop.fleetSort') as 'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount') || 'name')
   const [fleetDescending, setFleetDescending] = useState(() => localStorage.getItem('racktop.fleetDescending') === 'true')
@@ -464,11 +471,12 @@ function App() {
   }, [refreshServer])
 
   useEffect(() => {
-    void Promise.all([api.listServers(), api.getSettings(), api.listIdleReservations()]).then(([loadedServers, loadedSettings, loadedReservations]) => {
+    void Promise.all([api.listServers(), api.getSettings(), api.listIdleReservations(), api.listProjects()]).then(([loadedServers, loadedSettings, loadedReservations, loadedProjects]) => {
       setServers(loadedServers)
       setSettings(loadedSettings)
       idleReservationsRef.current = loadedReservations
       setIdleReservations(loadedReservations)
+      setProjects(loadedProjects)
       setSelectedServerId((current) => current ?? loadedServers[0]?.id ?? null)
     })
   }, [])
@@ -856,6 +864,41 @@ function App() {
     await refreshServer(saved.id)
   }
 
+  async function saveProject(draft: ProjectDraft, syncAfterSave: boolean) {
+    const saved = await api.saveProject(draft)
+    const inspected = await api.inspectProject(saved.id)
+    setProjects((current) => [inspected, ...current.filter((item) => item.id !== inspected.id)])
+    if (syncAfterSave) {
+      for (const target of inspected.targets) await syncProjectTarget(inspected, target.serverId)
+    }
+    setProjectEditor(null)
+    setToast(syncAfterSave ? `“${saved.name}”已保存并完成同步` : `“${saved.name}”已保存`)
+  }
+
+  async function inspectProject(project: Project) {
+    try {
+      const inspected = await api.inspectProject(project.id)
+      setProjects((current) => current.map((item) => item.id === inspected.id ? inspected : item))
+      setToast(`“${project.name}”路径检测完成`)
+    } catch (reason) { setToast(`路径检测失败：${String(reason)}`) }
+  }
+
+  async function syncProjectTarget(project: Project, targetServerId: string) {
+    const key = `${project.id}:${targetServerId}`
+    setBusyProjectTargets((current) => new Set(current).add(key))
+    try {
+      const result = await api.syncProject(project.id, targetServerId)
+      const refreshed = await api.inspectProject(project.id)
+      setProjects((current) => current.map((item) => item.id === refreshed.id ? refreshed : item))
+      setToast(`${result.message} · ${formatDataBytes(result.transferredBytes)}`)
+    } catch (reason) {
+      setToast(`同步失败：${String(reason)}`)
+      throw reason
+    } finally {
+      setBusyProjectTargets((current) => { const next = new Set(current); next.delete(key); return next })
+    }
+  }
+
   async function removeServer(server: Server, revokeSshAccess: boolean) {
     deletedServerIds.current.add(server.id)
     try {
@@ -1075,6 +1118,7 @@ function App() {
           <button className={mainView === 'fleet' ? 'is-active' : ''} onClick={() => setMainView('fleet')}><LayoutDashboard size={17} />总览 <span className="nav-count">{totals.gpus}</span></button>
           <button className={mainView === 'idle' ? 'is-active' : ''} onClick={() => setMainView('idle')}><Zap size={17} />空闲算力 <span className="nav-count">{totals.idle}</span></button>
           <button className={mainView === 'mine' ? 'is-active' : ''} onClick={() => setMainView('mine')}><UserRound size={17} />我的进程 <span className="nav-count">{servers.reduce((sum, server) => sum + (snapshots[server.id] ? currentUserProcessCount(snapshots[server.id]) : 0), 0)}</span></button>
+          <button className={mainView === 'projects' ? 'is-active' : ''} onClick={() => setMainView('projects')}><FolderGit2 size={17} />我的项目 <span className="nav-count">{projects.length}</span></button>
         </nav>
         <div className="sidebar__section-header"><span>服务器</span><span>{totals.online}/{servers.length}</span></div>
         <div className="search-field"><Search size={14} /><input aria-label="搜索服务器" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索" />{search && <button onClick={() => setSearch('')} aria-label="清除搜索"><X size={13} /></button>}</div>
@@ -1112,8 +1156,8 @@ function App() {
       <main className="workspace">
         <header className="topbar" onMouseDown={startWindowDrag} onDoubleClick={(event) => void toggleWindowMaximize(event)}>
           <div className="topbar__title">
-            <p className="eyebrow">{mainView === 'idle' ? '资源发现' : mainView === 'mine' ? '当前用户任务' : mainView === 'fleet' ? `${totals.online} / ${servers.length} 台在线` : selectedServer ? selectedServer.host : '所有服务器'}</p>
-            <h1>{mainView === 'idle' ? '寻找空闲算力' : mainView === 'mine' ? '我的进程' : mainView === 'fleet' ? '算力总览' : selectedServer ? serverDisplayName(selectedServer.name) : 'RackTop 总览'}</h1>
+            <p className="eyebrow">{mainView === 'projects' ? '跨服务器文件同步' : mainView === 'idle' ? '资源发现' : mainView === 'mine' ? '当前用户任务' : mainView === 'fleet' ? `${totals.online} / ${servers.length} 台在线` : selectedServer ? selectedServer.host : '所有服务器'}</p>
+            <h1>{mainView === 'projects' ? '我的项目' : mainView === 'idle' ? '寻找空闲算力' : mainView === 'mine' ? '我的进程' : mainView === 'fleet' ? '算力总览' : selectedServer ? serverDisplayName(selectedServer.name) : 'RackTop 总览'}</h1>
           </div>
           <div className="topbar__actions">
             {(manualRefreshProgress || (remoteHistoryServerKey && remoteSyncStatus)) && <span className="remote-sync-slot">{manualRefreshProgress ? <span className="remote-sync-status remote-sync-status--syncing" role="status" aria-live="polite"><RefreshCw className={manualRefreshingAll ? 'spin' : ''} size={13} />正在重新连接 · {manualRefreshProgress.completed}/{manualRefreshProgress.total} 台</span> : remoteSyncStatus && <RemoteSyncStatus status={remoteSyncStatus} onOpenFailure={() => {
@@ -1133,6 +1177,8 @@ function App() {
         <div className="workspace__scroll">
           {servers.length === 0 ? (
             <EmptyState onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
+          ) : mainView === 'projects' ? (
+            <ProjectView projects={projects} servers={servers} busyTargets={busyProjectTargets} onAdd={() => setProjectEditor('new')} onEdit={setProjectEditor} onDelete={setProjectPendingDelete} onInspect={(project) => void inspectProject(project)} onSync={(project, targetServerId) => void syncProjectTarget(project, targetServerId)} />
           ) : mainView === 'idle' ? (
             <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} currentReservation={currentIdleReservation} onFiltersChange={setIdleFilters} onReserve={() => setReservationEditor({ filters: { ...idleFilters }, reservation: currentIdleReservation })} sortRevision={manualRefreshRevision} onSelect={(serverId) => { setSelectedServerId(serverId); setSelectedGpuUuid(null); setSelectedTab('overview'); setMainView('server') }} onQuickTerminal={(server, gpu) => setQuickTerminal({ server, gpu })} onReserveGpu={(server, gpu) => setReservationEditor({ filters: { ...idleFilters, duration: 0, targetServerId: server.id, targetGpuUuid: gpu.uuid } })} />
           ) : mainView === 'mine' ? (
@@ -1170,6 +1216,8 @@ function App() {
       </main>
 
       {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultRemoteHistoryEnabled showGuide={settings?.showAddServerGuide ?? true} onGuideDismiss={() => { if (settings) void api.saveSettings({ ...settings, showAddServerGuide: false }).then(setSettings) }} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
+      {projectEditor && <ProjectForm initial={projectEditor === 'new' ? null : projectEditor} projects={projects} servers={servers} onClose={() => setProjectEditor(null)} onSave={saveProject} />}
+      {projectPendingDelete && <ProjectDeleteDialog project={projectPendingDelete} onClose={() => setProjectPendingDelete(null)} onDelete={async () => { await api.deleteProject(projectPendingDelete.id); setProjects((current) => current.filter((item) => item.id !== projectPendingDelete.id)); setProjectPendingDelete(null); setToast(`已移除“${projectPendingDelete.name}”的同步配置，服务器文件未删除`) }} />}
       {showSettings && settings && <SettingsSheet settings={settings} onClose={() => setShowSettings(false)} onSave={async (value) => { setSettings(await api.saveSettings(value)); setShowSettings(false); setToast('设置已保存') }} />}
       {showActivityLog && <ActivityLogSheet servers={servers} snapshots={snapshots} onClose={() => setShowActivityLog(false)} />}
       {showAbout && <AboutSheet onClose={() => setShowAbout(false)} onNotice={setToast} />}
