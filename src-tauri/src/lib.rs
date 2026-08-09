@@ -192,7 +192,7 @@ fn save_server(database: State<'_, Database>, draft: ServerDraft) -> Result<Serv
 #[tauri::command]
 async fn delete_server(database: State<'_, Database>, server_id: String, revoke_ssh_access: bool) -> Result<RemoteCleanupResult, String> {
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id).unwrap_or(None) } else { None };
+    let password = if server.auth_method == "password" { database.get_password(&server_id, false).unwrap_or(None) } else { None };
     let managed_public_key = if revoke_ssh_access {
         Some(ssh_keys::managed_public_key(&server)?.ok_or("这台服务器未使用 RackTop 专用密钥，无法自动撤销免密登录")?)
     } else {
@@ -222,7 +222,7 @@ fn reorder_servers(database: State<'_, Database>, server_ids: Vec<String>) -> Re
 #[tauri::command]
 fn start_terminal(app: tauri::AppHandle, database: State<'_, Database>, terminals: State<'_, TerminalManager>, server_id: String, columns: u16, rows: u16, gpu_index: Option<u32>) -> Result<String, String> {
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
+    let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
     terminals.start(app, &server, password.as_deref(), columns, rows, gpu_index)
 }
 
@@ -242,10 +242,10 @@ fn close_terminal(terminals: State<'_, TerminalManager>, session_id: String) -> 
 }
 
 #[tauri::command]
-async fn collect_server(database: State<'_, Database>, logs: State<'_, InteractionLogStore>, server_id: String, include_processes: bool, include_disks: bool, record_history: bool) -> Result<Snapshot, String> {
+async fn collect_server(database: State<'_, Database>, logs: State<'_, InteractionLogStore>, server_id: String, include_processes: bool, include_disks: bool, record_history: bool, allow_credential_prompt: bool) -> Result<Snapshot, String> {
     let server = database.get_server(&server_id)?;
     let log_id = logs.begin(&server, collector::collection_display_command(&server, include_processes, include_disks));
-    let password = match if server.auth_method == "password" { database.get_password(&server_id) } else { Ok(None) } {
+    let password = match if server.auth_method == "password" { database.get_password(&server_id, allow_credential_prompt) } else { Ok(None) } {
         Ok(password) => password,
         Err(error) => {
             logs.finish(log_id, 0, 0, Some(error.clone()));
@@ -305,7 +305,7 @@ fn get_usage_distribution(database: State<'_, Database>, server_id: String, from
 #[tauri::command]
 async fn configure_remote_history(database: State<'_, Database>, server_id: String) -> Result<(), String> {
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
+    let password = if server.auth_method == "password" { database.get_password(&server_id, false)? } else { None };
     remote_history::configure(&server, password.as_deref()).await
 }
 
@@ -320,7 +320,7 @@ async fn sync_remote_history(database: State<'_, Database>, server_id: String) -
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
     let since = database.remote_history_cursor(&server_id, now)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
+    let password = if server.auth_method == "password" { database.get_password(&server_id, false)? } else { None };
     let fetched_points = remote_history::fetch(&server, password.as_deref(), since).await?;
     let usage_points = remote_history::fetch_usage(&server, password.as_deref(), since).await?;
     let points: Vec<_> = fetched_points.iter().filter(|point| point.timestamp >= now - 31 * 86_400 && point.timestamp <= now + 300).cloned().collect();
@@ -339,14 +339,14 @@ async fn retry_remote_cleanups(database: State<'_, Database>) -> Result<RemoteCl
     let mut result = RemoteCleanupSweepResult { cleaned_names: Vec::new(), pending_names: Vec::new(), expired_names: Vec::new() };
     for task in database.list_remote_cleanup_tasks()? {
         if task.expires_at <= now {
-            database.finish_remote_cleanup(&task.server.id)?;
+            database.finish_remote_cleanup(&task.server.id, task.server.auth_method == "password")?;
             result.expired_names.push(task.server.name);
             continue;
         }
-        let password = if task.server.auth_method == "password" { database.get_password(&task.server.id)? } else { None };
+        let password = if task.server.auth_method == "password" { database.get_password(&task.server.id, false)? } else { None };
         match remote_history::remove(&task.server, password.as_deref(), task.managed_public_key.as_deref()).await {
             Ok(()) => {
-                database.finish_remote_cleanup(&task.server.id)?;
+                database.finish_remote_cleanup(&task.server.id, task.server.auth_method == "password")?;
                 result.cleaned_names.push(task.server.name);
             }
             Err(error) => {
@@ -415,7 +415,7 @@ fn trust_host_key(database: State<'_, Database>, info: HostKeyInfo) -> Result<()
 async fn install_nvidia_driver(database: State<'_, Database>, server_id: String, confirmed: bool) -> Result<String, String> {
     if !confirmed { return Err("必须在界面明确确认后才能安装驱动".into()); }
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
+    let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
     collector::install_nvidia_driver(&server, password.as_deref()).await
 }
 
@@ -423,7 +423,7 @@ async fn install_nvidia_driver(database: State<'_, Database>, server_id: String,
 async fn terminate_process(database: State<'_, Database>, server_id: String, pid: u32, confirmed: bool) -> Result<String, String> {
     if !confirmed { return Err("必须在界面完成二次确认后才能结束进程".into()); }
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id)? } else { None };
+    let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
     collector::terminate_process_tree(&server, password.as_deref(), pid).await
 }
 

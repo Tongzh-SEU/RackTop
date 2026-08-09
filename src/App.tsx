@@ -58,7 +58,7 @@ import { DeleteServerDialog } from './components/DeleteServerDialog'
 import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
-import { RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
+import { isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
 import { ResourceTrend } from './components/ResourceTrend'
 import { ServerForm } from './components/ServerForm'
 import { SshTerminal } from './components/SshTerminal'
@@ -70,7 +70,7 @@ import { canDisplayServerDetails, serverStatusAfterFailure, shouldShowConnecting
 import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, idleFilterSummaryParts, loadIdleFilters, rankIdleGpuItems, saveIdleFilters, type IdleFilters, type IdleGpuItem } from './utils/idleFilters'
 import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservationFiltersEqual, idleReservationGpuKey, idleReservationSummary } from './utils/idleReservations'
 import { canOfferNvidiaDriverInstall, clearResolvedNvidiaWarningId, displayedNvidiaServerStatus, loadIgnoredNvidiaWarningIds, nvidiaIssueGuidance, nvidiaIssueTitle, saveIgnoredNvidiaWarningIds } from './utils/nvidiaStatus'
-import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
+import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldCollectDetailData, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
 import { deriveGpuMemoryStallWarnings, ignoredGpuMemoryStallGpus } from './utils/gpuMemoryWarnings'
 import { acquiredDataItems, interactionDurationSeconds, interactionVisualStatus } from './utils/activityLog'
 import { duplicateImportIndexes } from './utils/serverIdentity'
@@ -312,10 +312,11 @@ function App() {
     try {
       const previous = snapshotsRef.current[serverId]
       const fastStatusView = !document.hidden && (mainView === 'fleet' || (mainView === 'server' && selectedTab === 'overview' && selectedServerId === serverId))
-      const includeProcesses = !quiet || !previous || fastStatusView || nowMs - (lastProcessAttemptAt.current[serverId] ?? 0) >= (settings?.processIntervalSeconds ?? 5) * 1000
-      const includeDisks = !quiet || !previous || nowMs - (lastDiskAttemptAt.current[serverId] ?? 0) >= DISK_STATUS_INTERVAL_MS
+      const collectDetailData = shouldCollectDetailData(quiet, Boolean(previous))
+      const includeProcesses = collectDetailData && (!quiet || fastStatusView || nowMs - (lastProcessAttemptAt.current[serverId] ?? 0) >= (settings?.processIntervalSeconds ?? 5) * 1000)
+      const includeDisks = collectDetailData && (!quiet || nowMs - (lastDiskAttemptAt.current[serverId] ?? 0) >= DISK_STATUS_INTERVAL_MS)
       const recordHistory = !serverConfig || shouldRecordHistory(lastHistoryRecordedAt.current[serverId], nowMs, serverConfig.samplingIntervalSeconds)
-      const collected = await api.collectServer(serverId, includeProcesses, includeDisks, recordHistory)
+      const collected = await api.collectServer(serverId, includeProcesses, includeDisks, recordHistory, !quiet)
       if (deletedServerIds.current.has(serverId)) return
       if (collected.processesSampled) lastProcessAttemptAt.current[serverId] = nowMs
       if (includeDisks) lastDiskAttemptAt.current[serverId] = nowMs
@@ -498,14 +499,18 @@ function App() {
     let successTimer: number | null = null
     const syncAllRemoteHistory = async (initial: boolean) => remoteSyncCoordinator.current.run(async () => {
       if (cancelled) return
-      const enabledServers = remoteHistoryServersRef.current.filter((server) => server.remoteHistoryEnabled && !remoteSyncInFlight.current.has(server.id))
+      const allEnabledServers = remoteHistoryServersRef.current.filter((server) => server.remoteHistoryEnabled)
+      const nowSeconds = Math.floor(Date.now() / 1000)
+      const freshServerCount = initial ? allEnabledServers.filter((server) => isRemoteSyncFresh(server, nowSeconds)).length : 0
+      const enabledServers = allEnabledServers.filter((server) => (!initial || !isRemoteSyncFresh(server, nowSeconds)) && !remoteSyncInFlight.current.has(server.id))
       if (enabledServers.length === 0) return
-      let completed = 0
+      let completed = freshServerCount
+      const total = allEnabledServers.length
       let importedCount = 0
       const failedServerIds: string[] = []
       const recoveryRetry = enabledServers.some((server) => remoteSyncRecoveryQueued.current.has(server.id))
-      let visible = recoveryRetry || (initial && shouldShowRemoteSyncImmediately(enabledServers, Math.floor(Date.now() / 1000)))
-      const syncingState = (): RemoteSyncStatusState => ({ phase: 'syncing', completed, total: enabledServers.length, importedCount, failedServerIds: [] })
+      let visible = recoveryRetry || (initial && shouldShowRemoteSyncImmediately(allEnabledServers, nowSeconds))
+      const syncingState = (): RemoteSyncStatusState => ({ phase: 'syncing', completed, total, importedCount, failedServerIds: [] })
       if (visible && !cancelled) setRemoteSyncStatus(syncingState())
       else if (initial) {
         feedbackTimer = window.setTimeout(() => {
@@ -538,9 +543,9 @@ function App() {
       }
       if (cancelled) return
       if (failedServerIds.length > 0) {
-        setRemoteSyncStatus({ phase: 'error', completed, total: enabledServers.length, importedCount, failedServerIds })
+        setRemoteSyncStatus({ phase: 'error', completed, total, importedCount, failedServerIds })
       } else if (initial && visible) {
-        setRemoteSyncStatus({ phase: 'success', completed, total: enabledServers.length, importedCount, failedServerIds: [] })
+        setRemoteSyncStatus({ phase: 'success', completed, total, importedCount, failedServerIds: [] })
         successTimer = window.setTimeout(() => setRemoteSyncStatus(null), REMOTE_SYNC_SUCCESS_DURATION_MS)
       } else {
         setRemoteSyncStatus(null)
