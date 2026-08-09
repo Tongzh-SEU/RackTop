@@ -56,7 +56,7 @@ export function idleFilterSummaryParts(filters: IdleFilters): string[] {
     filters.otherUserProcess === 'all' ? '进程占用：不限' : '无人占用',
     ...(filters.gpuModel === 'all' ? [] : [filters.gpuModel.replace(/^NVIDIA\s+/i, '')]),
     ...(filters.cpuModel === 'all' ? [] : [filters.cpuModel]),
-    filters.duration ? `MEM 持续 ${filters.duration} 分钟` : '当前快照',
+    filters.duration ? `持续 ${filters.duration} 分钟` : '当前快照',
     ...(filters.tag === 'all' ? [] : [filters.tag]),
   ]
 }
@@ -99,7 +99,8 @@ export function rankIdleGpuItems(servers: Server[], snapshots: Record<string, Sn
     const meetsDuration = coversWindow && points.every((point) => {
       const historicalGpuFreeMb = gpuTotalMb * (1 - clampPercent(point.gpuMemoryUtilizations?.[gpu.uuid] ?? gpuMemoryPercent(gpu)) / 100)
       const historicalCpuFreeMb = cpuTotalMb * (1 - clampPercent(point.memoryUtilization) / 100)
-      return displayedFreeMemoryGb(historicalGpuFreeMb) >= filters.gpuMemoryGb && displayedFreeMemoryGb(historicalCpuFreeMb) >= filters.cpuMemoryGb
+      const meetsHistoricalProcess = filters.otherUserProcess === 'all' || point.gpuOtherUserOccupancies?.[gpu.uuid] === false
+      return displayedFreeMemoryGb(historicalGpuFreeMb) >= filters.gpuMemoryGb && displayedFreeMemoryGb(historicalCpuFreeMb) >= filters.cpuMemoryGb && meetsHistoricalProcess
     })
     return { server, gpu, available: meetsSnapshot && meetsDuration }
   }).sort((left, right) => Number(right.available) - Number(left.available)

@@ -201,6 +201,8 @@ function App() {
   const [servers, setServers] = useState<Server[]>([])
   const [snapshots, setSnapshots] = useState<Record<string, Snapshot>>({})
   const [history, setHistory] = useState<Record<string, HistoryPoint[]>>({})
+  const [idleHistory, setIdleHistory] = useState<Record<string, HistoryPoint[]>>({})
+  const [idleHistoryLoadedMinutes, setIdleHistoryLoadedMinutes] = useState(0)
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null)
   const [selectedTab, setSelectedTab] = useState<DetailTab>('overview')
@@ -679,14 +681,55 @@ function App() {
 
   useEffect(() => { saveIdleFilters(idleFilters) }, [idleFilters])
 
+  const requiredIdleHistoryMinutes = Math.max(
+    idleFilters.duration,
+    reservationEditor?.filters.duration ?? 0,
+    ...idleReservations.filter((reservation) => reservation.status === 'active').map((reservation) => reservation.filters.duration),
+  )
+  const idleHistoryServerKey = servers.map((server) => server.id).sort().join('\n')
+
+  useEffect(() => {
+    if (requiredIdleHistoryMinutes <= 0 || servers.length === 0) {
+      setIdleHistory({})
+      setIdleHistoryLoadedMinutes(0)
+      return
+    }
+    let cancelled = false
+    const loadIdleHistory = async () => {
+      const entries = await Promise.all(servers.map(async (server) => {
+        const latestTimestamp = snapshotsRef.current[server.id]?.timestamp ?? Math.floor(Date.now() / 1000)
+        const from = latestTimestamp - requiredIdleHistoryMinutes * 60 - 120
+        return [server.id, await api.getHistory(server.id, from)] as const
+      }))
+      if (!cancelled) {
+        setIdleHistory(Object.fromEntries(entries))
+        setIdleHistoryLoadedMinutes(requiredIdleHistoryMinutes)
+      }
+    }
+    void loadIdleHistory().catch((error) => setToast(`空闲历史读取失败：${String(error)}`))
+    const interval = window.setInterval(() => void loadIdleHistory().catch(() => {}), 15_000)
+    return () => { cancelled = true; window.clearInterval(interval) }
+  }, [idleHistoryServerKey, requiredIdleHistoryMinutes])
+
+  const idleFilterHistory = useMemo(() => {
+    const serverIds = new Set([...Object.keys(history), ...Object.keys(idleHistory)])
+    return Object.fromEntries([...serverIds].map((serverId) => {
+      const points = new Map<number, HistoryPoint>()
+      for (const point of idleHistory[serverId] ?? []) points.set(point.timestamp, point)
+      for (const point of history[serverId] ?? []) points.set(point.timestamp, point)
+      return [serverId, [...points.values()].sort((left, right) => left.timestamp - right.timestamp)]
+    }))
+  }, [history, idleHistory])
+  const idleHistoryReady = requiredIdleHistoryMinutes <= 0 || (idleHistoryLoadedMinutes >= requiredIdleHistoryMinutes && servers.every((server) => server.id in idleHistory))
+
   useEffect(() => {
     const currentReservations = idleReservationsRef.current
-    if (currentReservations.length === 0 || servers.length === 0 || Object.keys(snapshots).length === 0) return
+    if (!idleHistoryReady || currentReservations.length === 0 || servers.length === 0 || Object.keys(snapshots).length === 0) return
     const nowSeconds = Math.max(Math.floor(Date.now() / 1000), ...Object.values(snapshots).map((snapshot) => snapshot.timestamp))
     let anyChanged = false
     const changedReservations: IdleReservation[] = []
     const nextReservations = currentReservations.map((reservation) => {
-      const matchingItems = rankIdleGpuItems(servers, snapshots, history, reservation.filters).filter((item) => item.available)
+      const matchingItems = rankIdleGpuItems(servers, snapshots, idleFilterHistory, reservation.filters).filter((item) => item.available)
       const matchingKeys = matchingItems.map(({ server, gpu }) => idleReservationGpuKey(server.id, gpu.uuid))
       const evaluation = evaluateIdleReservation(reservation, matchingKeys, reservationPendingSince.current[reservation.id] ?? {}, nowSeconds)
       reservationPendingSince.current[reservation.id] = evaluation.pendingSince
@@ -715,7 +758,7 @@ function App() {
     for (const reservation of changedReservations) {
       void api.saveIdleReservation(reservation).catch((error) => setToast(`预约状态保存失败：${String(error)}`))
     }
-  }, [history, servers, snapshots])
+  }, [idleFilterHistory, idleHistoryReady, servers, snapshots])
 
   useEffect(() => {
     const now = Math.max(...Object.values(snapshots).map((snapshot) => snapshot.timestamp), 0)
@@ -762,11 +805,11 @@ function App() {
     return servers.filter((server) => serverMatchesSearch(server, snapshots[server.id], search))
   }, [servers, snapshots, search])
 
-  const idleGpuItems = useMemo(() => rankIdleGpuItems(servers, snapshots, history, idleFilters), [servers, snapshots, history, idleFilters])
+  const idleGpuItems = useMemo(() => rankIdleGpuItems(servers, snapshots, idleFilterHistory, idleFilters), [servers, snapshots, idleFilterHistory, idleFilters])
   const idleAvailableCount = idleGpuItems.filter((item) => item.available).length
   const currentIdleReservation = idleReservations.find((reservation) => (reservation.status === 'active' || reservation.status === 'paused') && idleReservationFiltersEqual(reservation.filters, idleFilters))
   const activeIdleReservationCount = idleReservations.filter((reservation) => reservation.status === 'active').length
-  const reservationEditorItems = useMemo(() => reservationEditor ? rankIdleGpuItems(servers, snapshots, history, reservationEditor.filters) : [], [history, reservationEditor, servers, snapshots])
+  const reservationEditorItems = useMemo(() => reservationEditor ? rankIdleGpuItems(servers, snapshots, idleFilterHistory, reservationEditor.filters) : [], [idleFilterHistory, reservationEditor, servers, snapshots])
 
   const totals = useMemo(() => {
     const values = Object.values(snapshots)

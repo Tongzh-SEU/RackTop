@@ -33,18 +33,43 @@ swap_percent="$(awk '
 
 gpu_values=""
 if command -v nvidia-smi >/dev/null 2>&1; then
-  gpu_values="$(nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | awk -F, '
-    BEGIN { ORS="" }
+  gpu_sample="$state_dir/.gpu-history-sample.$$"
+  occupancy_sample="$state_dir/.gpu-occupancy-sample.$$"
+  : > "$gpu_sample"
+  printf '__none__|0\n' > "$occupancy_sample"
+  nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | awk -F, '
     {
       for (i=1; i<=NF; i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i) }
-      if (NR > 1) printf ";"
       memory = $4 > 0 ? $3 / $4 * 100 : 0
-      printf "%s,%.2f,%.2f", $1, $2 + 0, memory
+      printf "%s|%.2f|%.2f|%.2f\n", $1, $2 + 0, memory, $4 + 0
     }
-  ' || true)"
+  ' > "$gpu_sample" || true
+  current_user="$(id -un 2>/dev/null || printf '')"
+  nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while IFS=, read -r gpu_uuid pid memory_mb; do
+    gpu_uuid="$(printf '%s' "$gpu_uuid" | tr -d '[:space:]')"
+    pid="$(printf '%s' "$pid" | tr -d '[:space:]')"
+    memory_mb="$(printf '%s' "$memory_mb" | tr -cd '0-9.')"
+    [ -n "$gpu_uuid" ] && [ -n "$pid" ] && [ -r "/proc/$pid/status" ] || continue
+    username="$(ps -o user= -p "$pid" 2>/dev/null | awk '{print $1}')"
+    process_name="$(ps -o comm= -p "$pid" 2>/dev/null | awk '{print tolower($1)}')"
+    [ -n "$username" ] && [ "$username" != "$current_user" ] || continue
+    case "$username:$process_name" in
+      root:*|unknown:*|gdm:*|lightdm:*|sddm:*|*:xorg|*:xwayland|*:gnome-shell|*:nvidia-persistenced|*:nvidia-powerd|*:nvitop|*:nvtop|*:*vscode*|*:*code-server*|*:*cursor*|*:*codex*|*:*claude*|*:*tailscale*|*:*zerotier*|*:*openvpn*|*:*openconnect*|*:*wireguard*|*:*clash*|*:*mihomo*|*:*sing-box*|*:*v2ray*|*:*xray*|*:*cloudflared*) continue ;;
+    esac
+    printf '%s|%s\n' "$gpu_uuid" "${memory_mb:-0}" >> "$occupancy_sample"
+  done
+  gpu_values="$(awk -F '|' '
+    NR == FNR { occupied_memory[$1] += $2; next }
+    {
+      if (count++ > 0) printf ";"
+      occupied = ($4 > 0 && occupied_memory[$1] / $4 * 100 > 3) ? 1 : 0
+      printf "%s,%.2f,%.2f,%d", $1, $2, $3, occupied
+    }
+  ' "$occupancy_sample" "$gpu_sample")"
+  rm -f "$gpu_sample" "$occupancy_sample"
 fi
 
-printf 'v1|%s|%s|%s|%s|%s\n' "$bucket" "$cpu_percent" "$memory_percent" "$swap_percent" "$gpu_values" >> "$history_file"
+printf 'v2|%s|%s|%s|%s|%s\n' "$bucket" "$cpu_percent" "$memory_percent" "$swap_percent" "$gpu_values" >> "$history_file"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
   usage_tmp="$state_dir/.usage-sample.$$"
@@ -71,7 +96,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 cutoff=$((now - 2592000))
 temporary="$history_file.tmp.$$"
-awk -F '|' -v cutoff="$cutoff" '$1 == "v1" && $2 >= cutoff' "$history_file" > "$temporary"
+awk -F '|' -v cutoff="$cutoff" '($1 == "v1" || $1 == "v2") && $2 >= cutoff' "$history_file" > "$temporary"
 mv "$temporary" "$history_file"
 if [ -r "$usage_file" ]; then
   usage_temporary="$usage_file.tmp.$$"

@@ -283,6 +283,8 @@ pub struct HistoryPoint {
     #[serde(default)]
     pub gpu_memory_utilizations: HashMap<String, f64>,
     #[serde(default)]
+    pub gpu_other_user_occupancies: HashMap<String, bool>,
+    #[serde(default)]
     pub cpu_min: f64,
     #[serde(default)]
     pub cpu_max: f64,

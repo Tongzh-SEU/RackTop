@@ -110,6 +110,7 @@ export interface HistoryPoint {
   swapUtilization: number
   gpuUtilizations: Record<string, number>
   gpuMemoryUtilizations: Record<string, number>
+  gpuOtherUserOccupancies?: Record<string, boolean>
   cpuMin?: number
   cpuMax?: number
   memoryMin?: number

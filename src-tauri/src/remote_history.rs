@@ -68,7 +68,7 @@ pub async fn fetch(server: &Server, password: Option<&str>, since_timestamp: i64
     if !server.remote_history_enabled { return Ok(Vec::new()); }
     let since = since_timestamp.max(0);
     let script = format!(
-        "history={REMOTE_DIRECTORY}/.history-v1.tsv; if [ -r \"$history\" ]; then awk -F '|' -v since={since} '$1 == \"v1\" && $2 >= since' \"$history\"; fi"
+        "history={REMOTE_DIRECTORY}/.history-v1.tsv; if [ -r \"$history\" ]; then awk -F '|' -v since={since} '($1 == \"v1\" || $1 == \"v2\") && $2 >= since' \"$history\"; fi"
     );
     let output = run_remote_command(server, password, &script, Duration::from_secs(20)).await?;
     parse_history(&output)
@@ -163,20 +163,25 @@ fn parse_history(output: &str) -> Result<Vec<HistoryPoint>, String> {
 
 fn parse_history_line(line: &str) -> Result<HistoryPoint, String> {
     let fields: Vec<&str> = line.split('|').collect();
-    if fields.len() != 6 || fields[0] != "v1" { return Err("远端历史包含无法识别的记录".into()); }
+    if fields.len() != 6 || !matches!(fields[0], "v1" | "v2") { return Err("远端历史包含无法识别的记录".into()); }
     let timestamp = fields[1].parse::<i64>().map_err(|_| "远端历史时间戳无效".to_string())?;
     let cpu_utilization = parse_percent(fields[2])?;
     let memory_utilization = parse_percent(fields[3])?;
     let swap_utilization = parse_percent(fields[4])?;
     let mut gpu_utilizations = std::collections::HashMap::new();
     let mut gpu_memory_utilizations = std::collections::HashMap::new();
+    let mut gpu_other_user_occupancies = std::collections::HashMap::new();
     for gpu in fields[5].split(';').filter(|value| !value.is_empty()) {
         let values: Vec<&str> = gpu.split(',').collect();
-        if values.len() != 3 || values[0].is_empty() { return Err("远端 GPU 历史记录无效".into()); }
+        let expected_values = if fields[0] == "v2" { 4 } else { 3 };
+        if values.len() != expected_values || values[0].is_empty() { return Err("远端 GPU 历史记录无效".into()); }
         gpu_utilizations.insert(values[0].to_string(), parse_percent(values[1])?);
         gpu_memory_utilizations.insert(values[0].to_string(), parse_percent(values[2])?);
+        if fields[0] == "v2" {
+            gpu_other_user_occupancies.insert(values[0].to_string(), match values[3] { "0" => false, "1" => true, _ => return Err("远端 GPU 占用状态无效".into()) });
+        }
     }
-    Ok(HistoryPoint { timestamp, is_compacted: false, cpu_utilization, memory_utilization, swap_utilization, cpu_min: cpu_utilization, cpu_max: cpu_utilization, memory_min: memory_utilization, memory_max: memory_utilization, swap_min: swap_utilization, swap_max: swap_utilization, gpu_mins: gpu_utilizations.clone(), gpu_maxes: gpu_utilizations.clone(), gpu_memory_mins: gpu_memory_utilizations.clone(), gpu_memory_maxes: gpu_memory_utilizations.clone(), gpu_utilizations, gpu_memory_utilizations })
+    Ok(HistoryPoint { timestamp, is_compacted: false, cpu_utilization, memory_utilization, swap_utilization, cpu_min: cpu_utilization, cpu_max: cpu_utilization, memory_min: memory_utilization, memory_max: memory_utilization, swap_min: swap_utilization, swap_max: swap_utilization, gpu_mins: gpu_utilizations.clone(), gpu_maxes: gpu_utilizations.clone(), gpu_memory_mins: gpu_memory_utilizations.clone(), gpu_memory_maxes: gpu_memory_utilizations.clone(), gpu_utilizations, gpu_memory_utilizations, gpu_other_user_occupancies })
 }
 
 fn parse_percent(value: &str) -> Result<f64, String> {
@@ -211,6 +216,14 @@ mod tests {
         assert_eq!(points[0].timestamp, 1_722_700_800);
         assert_eq!(points[0].gpu_utilizations.get("GPU-a"), Some(&80.0));
         assert_eq!(points[0].gpu_memory_utilizations.get("GPU-b"), Some(&1.25));
+        assert!(points[0].gpu_other_user_occupancies.is_empty());
+    }
+
+    #[test]
+    fn parses_anonymous_gpu_occupancy_from_v2_history() {
+        let points = parse_history("v2|1722700800|12.50|40.25|3.00|GPU-a,80.00,50.00,1;GPU-b,0.00,1.25,0\n").unwrap();
+        assert_eq!(points[0].gpu_other_user_occupancies.get("GPU-a"), Some(&true));
+        assert_eq!(points[0].gpu_other_user_occupancies.get("GPU-b"), Some(&false));
     }
 
     #[test]

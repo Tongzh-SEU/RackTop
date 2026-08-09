@@ -189,7 +189,40 @@ fn trend_history_point(timestamp: i64, bucket: TrendHistoryBucket) -> HistoryPoi
         gpu_memory_maxes: bucket.gpu_memory_maxes,
         gpu_utilizations,
         gpu_memory_utilizations,
+        gpu_other_user_occupancies: HashMap::new(),
     }
+}
+
+fn gpu_other_user_occupancies(snapshot: &Snapshot) -> HashMap<String, bool> {
+    if !snapshot.processes_sampled { return HashMap::new(); }
+    snapshot.gpus.iter().map(|gpu| {
+        let other_user_memory_mb = snapshot.processes.iter().filter(|process| {
+            process.gpu_uuid == gpu.uuid && !process.is_current_user && is_attributable_gpu_process(&process.username, &process.command)
+        }).map(|process| process.memory_used_mb.max(0.0)).sum::<f64>();
+        let occupied = gpu.memory_total_mb > 0.0 && other_user_memory_mb / gpu.memory_total_mb * 100.0 > 3.0;
+        (gpu.uuid.clone(), occupied)
+    }).collect()
+}
+
+fn backfill_gpu_occupancy_history(connection: &mut Connection) -> Result<(), String> {
+    let rows = {
+        let mut statement = connection.prepare(
+            "SELECT id,payload_json FROM snapshots WHERE gpu_other_user_occupancy_json='{}' AND timestamp>=COALESCE((SELECT MAX(timestamp) FROM snapshots),0)-?1"
+        ).map_err(|error| error.to_string())?;
+        statement.query_map([RAW_HISTORY_SECONDS], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?.filter_map(Result::ok).collect::<Vec<_>>()
+    };
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    for (id, payload_json) in rows {
+        let Ok(snapshot) = serde_json::from_str::<Snapshot>(&payload_json) else { continue };
+        let occupancy = gpu_other_user_occupancies(&snapshot);
+        if occupancy.is_empty() { continue; }
+        transaction.execute(
+            "UPDATE snapshots SET gpu_other_user_occupancy_json=?2 WHERE id=?1",
+            params![id, serde_json::to_string(&occupancy).map_err(|error| error.to_string())?],
+        ).map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 fn compact_time_bucket(connection: &Connection, server_id: &str, start: i64, end: i64) -> Result<(), String> {
@@ -379,6 +412,7 @@ impl Database {
                     swap_utilization REAL NOT NULL DEFAULT 0,
                     gpu_json TEXT NOT NULL,
                     gpu_memory_json TEXT NOT NULL DEFAULT '{}',
+                    gpu_other_user_occupancy_json TEXT NOT NULL DEFAULT '{}',
                     payload_json TEXT NOT NULL,
                     FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
                  );
@@ -474,6 +508,10 @@ impl Database {
         }
         if !snapshot_columns.contains("swap_utilization") {
             connection.execute("ALTER TABLE snapshots ADD COLUMN swap_utilization REAL NOT NULL DEFAULT 0", []).map_err(|error| error.to_string())?;
+        }
+        if !snapshot_columns.contains("gpu_other_user_occupancy_json") {
+            connection.execute("ALTER TABLE snapshots ADD COLUMN gpu_other_user_occupancy_json TEXT NOT NULL DEFAULT '{}'", []).map_err(|error| error.to_string())?;
+            backfill_gpu_occupancy_history(&mut connection)?;
         }
         let server_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(servers)").map_err(|error| error.to_string())?;
@@ -772,6 +810,7 @@ impl Database {
         let swap_utilization = if snapshot.system.swap_total_bytes > 0 { snapshot.system.swap_used_bytes as f64 / snapshot.system.swap_total_bytes as f64 * 100.0 } else { 0.0 };
         let gpu_map: HashMap<String, f64> = snapshot.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.utilization)).collect();
         let gpu_memory_map: HashMap<String, f64> = snapshot.gpus.iter().map(|gpu| (gpu.uuid.clone(), if gpu.memory_total_mb > 0.0 { (gpu.memory_used_mb / gpu.memory_total_mb * 100.0).clamp(0.0, 100.0) } else { 0.0 })).collect();
+        let gpu_occupancy_map = gpu_other_user_occupancies(snapshot);
         let next_sample = StoredHistorySample { cpu_utilization: snapshot.system.cpu_utilization, memory_utilization, gpu_utilizations: gpu_map, gpu_memory_utilizations: gpu_memory_map };
         let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
         let transaction = connection.transaction().map_err(|error| error.to_string())?;
@@ -786,9 +825,9 @@ impl Database {
             }),
         ).optional().map_err(|error| error.to_string())?;
         transaction.execute(
-            "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
-             ON CONFLICT(server_id,timestamp) DO UPDATE SET cpu_utilization=excluded.cpu_utilization,memory_utilization=excluded.memory_utilization,swap_utilization=excluded.swap_utilization,gpu_json=excluded.gpu_json,gpu_memory_json=excluded.gpu_memory_json,payload_json=excluded.payload_json",
-            params![snapshot.server_id, snapshot.timestamp, next_sample.cpu_utilization, next_sample.memory_utilization, swap_utilization, serde_json::to_string(&next_sample.gpu_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(&next_sample.gpu_memory_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(snapshot).map_err(|error| error.to_string())?],
+            "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,gpu_other_user_occupancy_json,payload_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(server_id,timestamp) DO UPDATE SET cpu_utilization=excluded.cpu_utilization,memory_utilization=excluded.memory_utilization,swap_utilization=excluded.swap_utilization,gpu_json=excluded.gpu_json,gpu_memory_json=excluded.gpu_memory_json,gpu_other_user_occupancy_json=excluded.gpu_other_user_occupancy_json,payload_json=excluded.payload_json",
+            params![snapshot.server_id, snapshot.timestamp, next_sample.cpu_utilization, next_sample.memory_utilization, swap_utilization, serde_json::to_string(&next_sample.gpu_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(&next_sample.gpu_memory_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(&gpu_occupancy_map).unwrap_or_else(|_| "{}".into()), serde_json::to_string(snapshot).map_err(|error| error.to_string())?],
         ).map_err(|error| error.to_string())?;
         update_hourly_history_bucket(&transaction, &snapshot.server_id, snapshot.timestamp, previous.as_ref(), &next_sample)?;
         compact_completed_tiers(&transaction, &snapshot.server_id, snapshot.timestamp)?;
@@ -815,8 +854,8 @@ impl Database {
         let mut imported_points = Vec::new();
         {
             let mut statement = transaction.prepare(
-                "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,'{}') ON CONFLICT(server_id,timestamp) DO NOTHING"
+                "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,gpu_other_user_occupancy_json,payload_json)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'{}') ON CONFLICT(server_id,timestamp) DO NOTHING"
             ).map_err(|error| error.to_string())?;
             for point in points.iter().filter(|point| point.timestamp >= cutoff) {
                 let inserted = statement.execute(params![
@@ -827,6 +866,7 @@ impl Database {
                     point.swap_utilization,
                     serde_json::to_string(&point.gpu_utilizations).map_err(|error| error.to_string())?,
                     serde_json::to_string(&point.gpu_memory_utilizations).map_err(|error| error.to_string())?,
+                    serde_json::to_string(&point.gpu_other_user_occupancies).map_err(|error| error.to_string())?,
                 ]).map_err(|error| error.to_string())?;
                 imported += inserted;
                 if inserted > 0 { imported_points.push(point); }
@@ -939,19 +979,21 @@ impl Database {
 
     pub fn get_history(&self, server_id: &str, from_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,gpu_other_user_occupancy_json,payload_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
         let rows = statement.query_map(params![server_id, from_timestamp], |row| {
             let gpu_json: String = row.get(4)?;
             let gpu_memory_json: String = row.get(5)?;
-            let payload_json: String = row.get(6)?;
+            let gpu_other_user_occupancy_json: String = row.get(6)?;
+            let payload_json: String = row.get(7)?;
             let cpu_utilization = row.get(1)?;
             let memory_utilization = row.get(2)?;
             let swap_utilization = row.get(3)?;
             let gpu_utilizations: HashMap<String, f64> = serde_json::from_str(&gpu_json).unwrap_or_default();
             let gpu_memory_utilizations: HashMap<String, f64> = serde_json::from_str(&gpu_memory_json).unwrap_or_default();
+            let gpu_other_user_occupancies: HashMap<String, bool> = serde_json::from_str(&gpu_other_user_occupancy_json).unwrap_or_default();
             let range: CompactedHistoryRange = serde_json::from_str(&payload_json).unwrap_or_default();
             let compacted = range.history_range_version == 1;
-            Ok(HistoryPoint { timestamp: row.get(0)?, is_compacted: compacted, cpu_utilization, memory_utilization, swap_utilization, cpu_min: if compacted { range.cpu_min } else { cpu_utilization }, cpu_max: if compacted { range.cpu_max } else { cpu_utilization }, memory_min: if compacted { range.memory_min } else { memory_utilization }, memory_max: if compacted { range.memory_max } else { memory_utilization }, swap_min: if compacted { range.swap_min } else { swap_utilization }, swap_max: if compacted { range.swap_max } else { swap_utilization }, gpu_mins: if compacted { range.gpu_mins } else { gpu_utilizations.clone() }, gpu_maxes: if compacted { range.gpu_maxes } else { gpu_utilizations.clone() }, gpu_memory_mins: if compacted { range.gpu_memory_mins } else { gpu_memory_utilizations.clone() }, gpu_memory_maxes: if compacted { range.gpu_memory_maxes } else { gpu_memory_utilizations.clone() }, gpu_utilizations, gpu_memory_utilizations })
+            Ok(HistoryPoint { timestamp: row.get(0)?, is_compacted: compacted, cpu_utilization, memory_utilization, swap_utilization, cpu_min: if compacted { range.cpu_min } else { cpu_utilization }, cpu_max: if compacted { range.cpu_max } else { cpu_utilization }, memory_min: if compacted { range.memory_min } else { memory_utilization }, memory_max: if compacted { range.memory_max } else { memory_utilization }, swap_min: if compacted { range.swap_min } else { swap_utilization }, swap_max: if compacted { range.swap_max } else { swap_utilization }, gpu_mins: if compacted { range.gpu_mins } else { gpu_utilizations.clone() }, gpu_maxes: if compacted { range.gpu_maxes } else { gpu_utilizations.clone() }, gpu_memory_mins: if compacted { range.gpu_memory_mins } else { gpu_memory_utilizations.clone() }, gpu_memory_maxes: if compacted { range.gpu_memory_maxes } else { gpu_memory_utilizations.clone() }, gpu_utilizations, gpu_memory_utilizations, gpu_other_user_occupancies })
         }).map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
@@ -1289,6 +1331,44 @@ mod tests {
     }
 
     #[test]
+    fn stores_only_anonymous_other_user_gpu_occupancy_in_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("occupancy.sqlite")).unwrap();
+        let server = db.save_server(draft("Occupancy", 30)).unwrap();
+        let mut sample = snapshot(&server.id, 10_000);
+        sample.gpus = vec![GpuMetric { index: 0, name: "GPU 0".into(), uuid: "GPU-a".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 2_000.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0 }];
+        sample.processes = vec![ProcessMetric { is_current_user: false, ..gpu_process("GPU-a", "alice", "python train.py", 2_000.0) }];
+        db.save_snapshot(&sample).unwrap();
+
+        let history = db.get_history(&server.id, 0).unwrap();
+        assert_eq!(history[0].gpu_other_user_occupancies.get("GPU-a"), Some(&true));
+        let stored: String = db.connection.lock().unwrap().query_row("SELECT gpu_other_user_occupancy_json FROM snapshots", [], |row| row.get(0)).unwrap();
+        assert_eq!(stored, r#"{"GPU-a":true}"#);
+        assert!(!stored.contains("alice"));
+        assert!(!stored.contains("python"));
+    }
+
+    #[test]
+    fn backfills_anonymous_occupancy_from_recent_legacy_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-occupancy.sqlite");
+        let server_id = {
+            let db = Database::open(&path).unwrap();
+            let server = db.save_server(draft("Legacy occupancy", 30)).unwrap();
+            let mut sample = snapshot(&server.id, 10_000);
+            sample.gpus = vec![GpuMetric { index: 0, name: "GPU 0".into(), uuid: "GPU-a".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 2_000.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0 }];
+            sample.processes = vec![ProcessMetric { is_current_user: false, ..gpu_process("GPU-a", "alice", "python train.py", 2_000.0) }];
+            db.save_snapshot(&sample).unwrap();
+            db.connection.lock().unwrap().execute("ALTER TABLE snapshots DROP COLUMN gpu_other_user_occupancy_json", []).unwrap();
+            server.id
+        };
+
+        let reopened = Database::open(&path).unwrap();
+        let history = reopened.get_history(&server_id, 0).unwrap();
+        assert_eq!(history[0].gpu_other_user_occupancies.get("GPU-a"), Some(&true));
+    }
+
+    #[test]
     fn server_round_trip_does_not_store_password() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
@@ -1498,6 +1578,7 @@ mod tests {
             swap_utilization: 3.0,
             gpu_utilizations: HashMap::from([("GPU-a".into(), 80.0)]),
             gpu_memory_utilizations: HashMap::from([("GPU-a".into(), 50.0)]),
+            gpu_other_user_occupancies: HashMap::from([("GPU-a".into(), false)]),
             cpu_min: 12.5, cpu_max: 12.5, memory_min: 40.0, memory_max: 40.0, swap_min: 3.0, swap_max: 3.0,
             gpu_mins: HashMap::from([("GPU-a".into(), 80.0)]), gpu_maxes: HashMap::from([("GPU-a".into(), 80.0)]),
             gpu_memory_mins: HashMap::from([("GPU-a".into(), 50.0)]), gpu_memory_maxes: HashMap::from([("GPU-a".into(), 50.0)]),
