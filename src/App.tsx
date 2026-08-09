@@ -564,11 +564,27 @@ function App() {
 
   useEffect(() => {
     if (!api.isDesktop) return
-    const unlisten = listen<string>('tray-action', ({ payload }) => {
+    const unlistenTray = listen<string>('tray-action', ({ payload }) => {
       if (payload === 'reservations') setShowReservationCenter(true)
     })
-    return () => { void unlisten.then((dispose) => dispose()) }
-  }, [refreshAll])
+    const unlistenMenu = listen<string>('app-menu-action', ({ payload }) => {
+      if (payload === 'menu-about') setShowAbout(true)
+      else if (payload === 'menu-settings') setShowSettings(true)
+      else if (payload === 'menu-add-server') { setEditingServer(null); setShowServerForm(true) }
+      else if (payload === 'menu-import-config') void importConfig()
+      else if (payload === 'menu-refresh-all') void runManualRefreshAll()
+      else if (payload === 'menu-view-fleet') setMainView('fleet')
+      else if (payload === 'menu-view-idle') setMainView('idle')
+      else if (payload === 'menu-view-mine') setMainView('mine')
+      else if (payload === 'menu-view-logs') setShowActivityLog(true)
+      else if (payload === 'menu-help-guide') void openExternalUrl('https://github.com/Tongzh-SEU/RackTop/blob/main/README.md')
+      else if (payload === 'menu-help-project') void openExternalUrl('https://github.com/Tongzh-SEU/RackTop')
+    })
+    return () => {
+      void unlistenTray.then((dispose) => dispose())
+      void unlistenMenu.then((dispose) => dispose())
+    }
+  }, [runManualRefreshAll])
 
   useEffect(() => {
     const unlisten = api.onNotificationAction((extra) => {
