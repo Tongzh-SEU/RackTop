@@ -6,6 +6,12 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn remote_home_expansion(variable: &str) -> String {
+    debug_assert!(variable.chars().all(|character| character.is_ascii_alphanumeric() || character == '_'));
+    r#"case "$__PATH__" in '~') __PATH__="$HOME" ;; '~/'*) __PATH__="$HOME/${__PATH__#??}" ;; "$HOME/~/"*) __PATH__="$HOME/${__PATH__#"$HOME/~/"}" ;; esac"#
+        .replace("__PATH__", variable)
+}
+
 fn path_basename(path: &str, fallback: &str) -> String {
     path.trim().trim_end_matches('/').rsplit('/').next().filter(|value| !value.is_empty() && *value != "~").unwrap_or(fallback).to_string()
 }
@@ -22,8 +28,9 @@ async fn remote_output(server: &crate::models::Server, password: Option<&str>, s
 }
 
 pub async fn check_path(server: &crate::models::Server, password: Option<&str>, requested_path: &str, basename: &str) -> ProjectPathCheck {
+    let expand_requested = remote_home_expansion("requested");
     let script = format!(r#"requested={requested}; name={name};
-case "$requested" in '~') requested="$HOME" ;; '~/'*) requested="$HOME/${{requested#~/}}" ;; esac
+{expand_requested}
 if [ ! -e "$requested" ]; then
   first_match="$(find "$HOME" -maxdepth 3 -mindepth 1 -name "$name" -print 2>/dev/null | head -n 1)"
   [ -z "$first_match" ] || requested="$first_match"
@@ -70,7 +77,8 @@ pub async fn suggest_paths(server: &crate::models::Server, password: Option<&str
     let script = format!(r#"query={query}
 case "$query" in
   '~'|'~/') parent="$HOME"; prefix="" ;;
-  '~/'*) rest="${{query#~/}}"; case "$rest" in */*) dir="${{rest%/*}}"; prefix="${{rest##*/}}"; parent="$HOME/$dir" ;; *) parent="$HOME"; prefix="$rest" ;; esac ;;
+  '~/'*) rest="${{query#??}}"; case "$rest" in */*) dir="${{rest%/*}}"; prefix="${{rest##*/}}"; parent="$HOME/$dir" ;; *) parent="$HOME"; prefix="$rest" ;; esac ;;
+  "$HOME/~/"*) query="$HOME/${{query#"$HOME/~/"}}"; parent="${{query%/*}}"; prefix="${{query##*/}}" ;;
   /*) parent="${{query%/*}}"; prefix="${{query##*/}}"; [ -n "$parent" ] || parent=/ ;;
   *) case "$query" in */*) dir="${{query%/*}}"; prefix="${{query##*/}}"; parent="$HOME/$dir" ;; *) parent="$HOME"; prefix="$query" ;; esac ;;
 esac
@@ -133,11 +141,12 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
     let (mut target_command, target_host) = collector::configured_ssh_command(&target_server, target_password.as_deref())?;
     let source_path = shell_quote(&source_check.suggested_path);
     let target_path = shell_quote(&target.path);
+    let expand_target = remote_home_expansion("target");
     let source_script = if source_check.is_directory { format!("cd {source_path} && tar -cf - .") } else { format!("cat -- {source_path}") };
     let target_script = if source_check.is_directory {
-        format!("target={target_path}; case \"$target\" in '~') target=\"$HOME\" ;; '~/'*) target=\"$HOME/${{target#~/}}\" ;; esac; mkdir -p \"$target\" && cd \"$target\" && tar -xf -")
+        format!("target={target_path}; {expand_target}; mkdir -p \"$target\" && cd \"$target\" && tar -xf -")
     } else {
-        format!("target={target_path}; case \"$target\" in '~/'*) target=\"$HOME/${{target#~/}}\" ;; esac; parent=\"${{target%/*}}\"; [ \"$parent\" = \"$target\" ] && parent=\"$HOME\"; mkdir -p \"$parent\"; tmp=\"$target.racktop-part-$$\"; cat > \"$tmp\" && mv -f \"$tmp\" \"$target\"")
+        format!("target={target_path}; {expand_target}; parent=\"${{target%/*}}\"; [ \"$parent\" = \"$target\" ] && parent=\"$HOME\"; mkdir -p \"$parent\"; tmp=\"$target.racktop-part-$$\"; cat > \"$tmp\" && mv -f \"$tmp\" \"$target\"")
     };
     source_command.arg(source_host).arg(source_script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     target_command.arg(target_host).arg(target_script).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
@@ -161,4 +170,37 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
     let transferred = timeout(Duration::from_secs(6 * 60 * 60), transfer).await.map_err(|_| "同步超过 6 小时，已停止等待".to_string())??;
     database.mark_project_synced(&project.id, target_server_id, transferred)?;
     Ok(ProjectSyncResult { project_id: project.id.clone(), target_server_id: target_server_id.into(), transferred_bytes: transferred, message: format!("已同步到 {}", target_server.name) })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{remote_home_expansion, shell_quote};
+    use std::process::Command;
+
+    fn expand_remote_path(path: &str, home: &str) -> String {
+        let script = format!(
+            "HOME={home}; path={path}; {expand}; printf '%s' \"$path\"",
+            home = shell_quote(home),
+            path = shell_quote(path),
+            expand = remote_home_expansion("path"),
+        );
+        let output = Command::new("sh").arg("-c").arg(script).output().expect("shell should run");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).expect("path should be utf-8")
+    }
+
+    #[test]
+    fn expands_tilde_against_remote_home() {
+        assert_eq!(expand_remote_path("~/projects/demo", "/mnt/tongzh"), "/mnt/tongzh/projects/demo");
+    }
+
+    #[test]
+    fn repairs_legacy_home_tilde_path() {
+        assert_eq!(expand_remote_path("/mnt/tongzh/~/projects/demo", "/mnt/tongzh"), "/mnt/tongzh/projects/demo");
+    }
+
+    #[test]
+    fn preserves_absolute_path() {
+        assert_eq!(expand_remote_path("/data/projects/demo", "/mnt/tongzh"), "/data/projects/demo");
+    }
 }
