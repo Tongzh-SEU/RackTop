@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import type { Project, Server } from '../types/models'
 import { ProjectForm } from './ProjectForm'
-import { formatProjectSize, ProjectView, projectCardRowSpan } from './ProjectView'
+import { formatProjectSize, projectCardState, ProjectView, projectCardRowSpan, syncableProjectTargets } from './ProjectView'
 
 const targetServer: Server = {
   id: 'target',
@@ -75,15 +75,28 @@ describe('Project source removal', () => {
     expect(markup).toContain('Target')
   })
 
-  it('explains that missing dataset replicas sync only through the bottom action', () => {
+  it('places target servers before linked datasets and explains the combined sync action', () => {
     const adding = renderToStaticMarkup(<ProjectForm projects={[dataset]} servers={[sourceServer, targetServer]} onClose={vi.fn()} onSave={vi.fn()} />)
     const editing = renderToStaticMarkup(<ProjectForm initial={{ ...detachedProject, sourceServerId: sourceServer.id }} projects={[dataset]} servers={[sourceServer, targetServer]} onClose={vi.fn()} onSave={vi.fn()} />)
 
-    expect(adding).toContain('仅在点击“保存并同步”时补齐')
-    expect(adding).toContain('全选补齐')
-    expect(editing).toContain('仅在点击“保存并同步”时补齐')
-    expect(editing).toContain('全选补齐')
+    expect(adding).toContain('缺失副本可随“保存并同步”一并补齐')
+    expect(adding.indexOf('目标服务器')).toBeLessThan(adding.indexOf('关联数据集'))
+    expect(editing).toContain('缺失副本可随“保存并同步”一并补齐')
+    expect(editing.indexOf('目标服务器')).toBeLessThan(editing.indexOf('关联数据集'))
     expect(editing).toContain('project-dataset-row--editing')
+  })
+
+  it('does not report offline or failed targets as synced', () => {
+    const project: Project = {
+      ...detachedProject,
+      targets: [
+        { ...detachedProject.targets[0], status: 'offline' },
+        { ...detachedProject.targets[0], serverId: 'failed', status: 'error' },
+      ],
+    }
+
+    expect(projectCardState(project, false)).toEqual({ kind: 'error', label: '2 个异常' })
+    expect(syncableProjectTargets(project).map((target) => target.serverId)).toEqual(['failed'])
   })
 
   it('places path status below editable addresses instead of reserving a separate column', () => {

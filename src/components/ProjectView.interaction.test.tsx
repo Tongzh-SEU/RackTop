@@ -68,16 +68,16 @@ describe('ProjectView inspection feedback', () => {
     root = createRoot(container)
 
     await act(async () => root?.render(<ProjectView projects={[project]} servers={[source]} busyTargets={new Set()} syncProgress={[]} preparingProjectIds={new Set()} onAdd={vi.fn()} onEdit={vi.fn()} onDelete={vi.fn()} onInspect={onInspect} onSync={vi.fn()} onCancel={vi.fn()} onSyncAll={vi.fn()} />))
-    const inspectButton = [...container.querySelectorAll('button')].find((button) => button.textContent === '重新检测')
+    const inspectButton = [...container.querySelectorAll('button')].find((button) => button.textContent === '检查状态')
 
     await act(async () => inspectButton?.click())
     expect(onInspect).toHaveBeenCalledWith(project)
-    expect(inspectButton?.textContent).toBe('检测中')
+    expect(inspectButton?.textContent).toBe('检查中')
     expect(inspectButton?.querySelector('svg')?.classList.contains('spin')).toBe(true)
     expect(inspectButton?.disabled).toBe(true)
 
     await act(async () => finishInspection?.())
-    expect(inspectButton?.textContent).toBe('重新检测')
+    expect(inspectButton?.textContent).toBe('检查状态')
     expect(inspectButton?.querySelector('svg')?.classList.contains('spin')).toBe(false)
     expect(inspectButton?.disabled).toBe(false)
   })

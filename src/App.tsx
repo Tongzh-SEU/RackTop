@@ -60,7 +60,7 @@ import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { ProjectForm } from './components/ProjectForm'
-import { ProjectConflictDialog, ProjectDeleteDialog, ProjectView } from './components/ProjectView'
+import { ProjectConflictDialog, ProjectDeleteDialog, ProjectView, syncableProjectTargets } from './components/ProjectView'
 import { isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
 import { ResourceTrend } from './components/ResourceTrend'
 import { ServerForm } from './components/ServerForm'
@@ -986,6 +986,7 @@ function App() {
         const [inspected, preparedDatasets] = await Promise.all([api.inspectProject(saved.id), prepareLinkedDatasets()])
         setProjects((current) => current.map((item) => item.id === inspected.id ? inspected : item))
         if (!inspected.sourceExists) throw new Error('主目录不存在，无法开始同步')
+        const projectTargetTotal = syncableProjectTargets(inspected).length
         const syncing = syncAllProjectTargets(inspected, false)
         setPreparingProjectIds((current) => { const next = new Set(current); next.delete(saved.id); return next })
         const completed = await syncing
@@ -997,7 +998,7 @@ function App() {
           datasetCompleted += results.filter(Boolean).length
         }
         const datasetMessage = datasetTotal > 0 ? `；数据集 ${datasetCompleted} / ${datasetTotal} 个目标同步成功` : ''
-        setToast(completed === inspected.targets.length ? `“${saved.name}”已同步到 ${completed} 台服务器${datasetMessage}` : `“${saved.name}”已保存；${completed} / ${inspected.targets.length} 台同步成功${datasetMessage}`)
+        setToast(completed === projectTargetTotal ? `“${saved.name}”已更新 ${completed} 个目标${datasetMessage}` : `“${saved.name}”已保存；${completed} / ${projectTargetTotal} 个目标同步成功${datasetMessage}`)
       } catch (reason) {
         setToast(`“${saved.name}”已保存，准备同步失败：${String(reason)}`)
       } finally {
@@ -1046,13 +1047,14 @@ function App() {
   }
 
   async function syncAllProjectTargets(project: Project, showCompletion = true) {
-    if (project.targets.length === 0) {
-      if (showCompletion) setToast(`“${project.name}”没有可同步的目标服务器`)
+    const targets = syncableProjectTargets(project)
+    if (targets.length === 0) {
+      if (showCompletion) setToast(`“${project.name}”没有待更新的目标服务器`)
       return 0
     }
-    const results = await mapWithConcurrency(project.targets, 2, (target) => syncProjectTarget(project, target.serverId, false))
+    const results = await mapWithConcurrency(targets, 2, (target) => syncProjectTarget(project, target.serverId, false))
     const completed = results.filter(Boolean).length
-    if (showCompletion) setToast(completed === project.targets.length ? `“${project.name}”已同步到 ${completed} 台服务器` : `“${project.name}”同步完成；${completed} / ${project.targets.length} 台成功`)
+    if (showCompletion) setToast(completed === targets.length ? `“${project.name}”已更新 ${completed} 个目标` : `“${project.name}”同步完成；${completed} / ${targets.length} 个目标成功`)
     return completed
   }
 

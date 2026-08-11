@@ -195,6 +195,13 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
     } catch (reason) { setError(String(reason)) } finally { setChecking(false) }
   }
 
+  async function detectConfiguration() {
+    await Promise.all([
+      detectPaths(),
+      draft.kind === 'project' && draft.datasetIds.length > 0 ? detectLinkedDatasets() : Promise.resolve(),
+    ])
+  }
+
   async function submit(syncAfterSave: boolean, event?: FormEvent) {
     event?.preventDefault()
     if (draft.targets.length === 0) { setError('至少选择一台目标服务器。'); return }
@@ -206,7 +213,7 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
       const targets = missingDatasetTargets(dataset)
       return {
         datasetId: dataset.id,
-        syncOnSave: datasetSyncIds.has(dataset.id) && targets.length > 0,
+        syncOnSave: syncAfterSave && datasetSyncIds.has(dataset.id) && targets.length > 0,
         targets,
       }
     })
@@ -215,7 +222,9 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
 
   const sourceCheck = checks[draft.sourceServerId]
   const sourceServer = servers.find((server) => server.id === draft.sourceServerId)
-  const plannedDatasetSyncCount = availableDatasets.filter((dataset) => draft.datasetIds.includes(dataset.id) && datasetSyncIds.has(dataset.id) && missingDatasetTargets(dataset).length > 0).length
+  const datasetsWithMissingTargets = availableDatasets.filter((dataset) => draft.datasetIds.includes(dataset.id) && missingDatasetTargets(dataset).length > 0)
+  const plannedDatasetSyncCount = datasetsWithMissingTargets.filter((dataset) => datasetSyncIds.has(dataset.id)).length
+  const allMissingDatasetsPlanned = datasetsWithMissingTargets.length > 0 && plannedDatasetSyncCount === datasetsWithMissingTargets.length
   return (
     <div className="scrim" role="presentation">
       <section ref={sheetRef} className="sheet project-form-sheet" role="dialog" aria-modal="true" aria-labelledby="project-form-title">
@@ -227,36 +236,13 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
               <fieldset className="project-kind-field"><legend>类型</legend><div className="segmented project-kind-segmented"><button type="button" disabled={Boolean(initial)} className={draft.kind === 'project' ? 'is-selected' : ''} onClick={() => setKind('project')}><FolderGit2 size={13} />项目</button><button type="button" disabled={Boolean(initial)} className={draft.kind === 'dataset' ? 'is-selected' : ''} onClick={() => setKind('dataset')}><Database size={13} />数据集</button></div></fieldset>
             </div>
             <section className="project-source-section" aria-label="同步来源">
-              <header><span>{draft.kind === 'project' ? <FolderGit2 size={16} /> : <Database size={16} />}</span><div><strong>同步来源</strong><small>此服务器上的内容作为权威版本</small></div></header>
+              <header><span>{draft.kind === 'project' ? <FolderGit2 size={16} /> : <Database size={16} />}</span><div><strong>同步来源</strong><small>选择主服务器和来源目录</small></div></header>
               <div className="project-source-fields">
                 <label>主服务器<select required value={draft.sourceServerId} className={sourceServerMissing ? 'is-invalid' : ''} onChange={(event) => { const sourceServerId = event.target.value; setChecks({}); setDraft((current) => ({ ...current, sourceServerId, targets: current.targets.filter((target) => target.serverId !== sourceServerId) })) }}>{sourceServerMissing && <option value={draft.sourceServerId} disabled>原主服务器已移除，请重新选择</option>}{servers.map((server) => <option key={server.id} value={server.id}>{server.name}</option>)}</select><span className="project-source-server-meta">{sourceServer ? `${sourceServer.username}@${sourceServer.host}` : '请选择新的主服务器'}</span></label>
                 <label className="project-source-path">主目录<RemotePathInput required serverId={draft.sourceServerId} value={draft.sourcePath} ariaLabel="主目录" placeholder="~/project-name" onChange={setSourcePath} /><PathStatus check={sourceCheck} idle="等待检测主目录" onChoose={setSourcePath} /></label>
               </div>
             </section>
-            {draft.kind === 'project' && <section className="project-dataset-links" aria-label="关联数据集">
-              <header><div><strong>关联数据集</strong><small>勾选缺失副本后，仅在点击“保存并同步”时补齐</small></div><div className="project-dataset-links__actions"><span>{draft.datasetIds.length} 个</span><button type="button" className="button button--secondary button--small" disabled={draft.datasetIds.length === 0 || checkingDatasets} onClick={() => setDatasetSyncIds(new Set(availableDatasets.filter((dataset) => draft.datasetIds.includes(dataset.id) && missingDatasetTargets(dataset).length > 0).map((dataset) => dataset.id)))}>全选补齐</button><button type="button" className="button button--secondary button--small" disabled={plannedDatasetSyncCount === 0} onClick={() => setDatasetSyncIds(new Set())}>清除</button><button type="button" className="icon-button" disabled={checkingDatasets || draft.datasetIds.length === 0 || draft.targets.length === 0} onClick={() => void detectLinkedDatasets().catch((reason) => setError(String(reason)))} aria-label="重新检查关联数据集"><RefreshCw className={checkingDatasets ? 'spin' : ''} size={13} /></button></div></header>
-              {availableDatasets.length > 0 ? <div className="project-dataset-list">{availableDatasets.map((dataset) => {
-                const linked = draft.datasetIds.includes(dataset.id)
-                const checks = datasetChecks[dataset.id] ?? {}
-                const targetChecks = draft.targets.map((target) => target.serverId === dataset.sourceServerId
-                  ? { serverId: target.serverId, exists: true, matches: [], error: undefined } as Pick<ProjectPathCheck, 'serverId' | 'exists' | 'matches' | 'error'>
-                  : checks[target.serverId]).filter(Boolean)
-                const found = targetChecks.filter((check) => check?.exists).length
-                const ambiguous = targetChecks.filter((check) => !check?.exists && (check?.matches.length ?? 0) > 1).length
-                const failed = targetChecks.filter((check) => Boolean(check?.error)).length
-                const checked = targetChecks.length === draft.targets.length && !checkingDatasets
-                const missing = checked ? Math.max(0, draft.targets.length - found - ambiguous - failed) : 0
-                const willSync = datasetSyncIds.has(dataset.id) && missing > 0
-                const status = draft.targets.length === 0 ? '请先选择目标服务器' : checkingDatasets && linked ? '正在查找同名数据集…' : !checked ? '等待检查' : failed ? `${failed} 台连接失败` : ambiguous ? `${ambiguous} 台找到多个同名目录` : missing ? `${found} / ${draft.targets.length} 台已找到 · ${missing} 台缺失${willSync ? ' · 已加入本次同步' : ''}` : `${found} / ${draft.targets.length} 台已找到`
-                const problem = checked && (missing > 0 || ambiguous > 0 || failed > 0)
-                return <div key={dataset.id} className={`project-dataset-row${initial ? ' project-dataset-row--editing' : ''}${linked ? ' is-selected' : ''}`}>
-                  <label className="project-dataset-row__identity"><input type="checkbox" checked={linked} onChange={(event) => { const selected = event.target.checked; setDraft((current) => ({ ...current, datasetIds: selected ? [...current.datasetIds, dataset.id] : current.datasetIds.filter((id) => id !== dataset.id) })); if (!selected) setDatasetSyncIds((current) => { const next = new Set(current); next.delete(dataset.id); return next }) }} /><Database size={13} /><span><strong>{dataset.name}</strong><small>{dataset.sourcePath}</small></span></label>
-                  <span className={`project-dataset-row__status${problem ? ' is-warning' : checked ? ' is-found' : ''}`}>{status}</span>
-                  {linked && checked && missing > 0 && <label className="project-dataset-row__sync"><input type="checkbox" checked={willSync} onChange={(event) => setDatasetSyncIds((current) => { const next = new Set(current); if (event.target.checked) next.add(dataset.id); else next.delete(dataset.id); return next })} /><span>随本次同步补齐 {missing} 台</span></label>}
-                </div>
-              })}</div> : <p>当前还没有可关联的数据集，可以先保存项目，之后再编辑关联。</p>}
-            </section>}
-            <div className="project-target-heading"><div><strong>目标服务器</strong><small>可同时选择多台，每台服务器可使用不同目录</small></div><div className="project-target-heading__actions"><span>已选 {draft.targets.length} / {eligibleTargets.length} 台</span><button type="button" className="button button--secondary button--small" disabled={draft.targets.length === eligibleTargets.length} onClick={selectAllTargets}>全选</button><button type="button" className="button button--secondary button--small" disabled={draft.targets.length === 0} onClick={() => { setDraft((current) => ({ ...current, targets: [] })); setChecks({}) }}>清空</button><button type="button" className="button button--secondary button--small" disabled={checking || draft.targets.length === 0} onClick={() => void detectPaths()}><FolderSearch size={14} />{checking ? '检测中…' : '检测路径'}</button></div></div>
+            <div className="project-target-heading"><div><strong>目标服务器</strong><small>可同时选择多台，每台服务器可使用不同目录</small></div><div className="project-target-heading__actions"><span>已选 {draft.targets.length} / {eligibleTargets.length} 台</span><button type="button" className="button button--secondary button--small" disabled={draft.targets.length === eligibleTargets.length} onClick={selectAllTargets}>全选</button><button type="button" className="button button--secondary button--small" disabled={draft.targets.length === 0} onClick={() => { setDraft((current) => ({ ...current, targets: [] })); setChecks({}) }}>清空</button><button type="button" className="button button--secondary button--small" disabled={checking || checkingDatasets || draft.targets.length === 0} onClick={() => void detectConfiguration()}><FolderSearch size={14} />{checking || checkingDatasets ? '检查中…' : '检查配置'}</button></div></div>
             <div className="project-target-list">
               {eligibleTargets.map((server) => {
                 const target = draft.targets.find((item) => item.serverId === server.id)
@@ -266,6 +252,31 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
                 </div>
               })}
             </div>
+            {draft.kind === 'project' && <section className="project-dataset-links" aria-label="关联数据集">
+              <header><div><strong>关联数据集</strong><small>缺失副本可随“保存并同步”一并补齐</small></div><div className="project-dataset-links__actions">{checkingDatasets && <span>检查中…</span>}{datasetsWithMissingTargets.length > 1 && <button type="button" className="button button--secondary button--small" disabled={checkingDatasets} onClick={() => setDatasetSyncIds(allMissingDatasetsPlanned ? new Set() : new Set(datasetsWithMissingTargets.map((dataset) => dataset.id)))}>{allMissingDatasetsPlanned ? '清除补齐' : '全部补齐'}</button>}</div></header>
+              {availableDatasets.length > 0 ? <div className="project-dataset-list">{availableDatasets.map((dataset) => {
+                const linked = draft.datasetIds.includes(dataset.id)
+                const checks = datasetChecks[dataset.id] ?? {}
+                const targetChecks = draft.targets.map((target) => target.serverId === dataset.sourceServerId
+                  ? { serverId: target.serverId, exists: true, matches: [], error: undefined } as Pick<ProjectPathCheck, 'serverId' | 'exists' | 'matches' | 'error'>
+                  : checks[target.serverId]).filter(Boolean)
+                const found = targetChecks.filter((check) => check?.exists).length
+                const candidates = targetChecks.filter((check) => !check?.exists && !check?.error && check?.matches.length === 1).length
+                const ambiguous = targetChecks.filter((check) => !check?.exists && !check?.error && (check?.matches.length ?? 0) > 1).length
+                const failed = targetChecks.filter((check) => Boolean(check?.error)).length
+                const checked = targetChecks.length === draft.targets.length && !checkingDatasets
+                const missing = checked ? Math.max(0, draft.targets.length - found - candidates - ambiguous - failed) : 0
+                const willSync = datasetSyncIds.has(dataset.id) && missing > 0
+                const parts = [[found, '已存在'], [missing, '缺失'], [candidates, '候选待确认'], [ambiguous, '同名冲突'], [failed, '连接失败']].filter(([count]) => Number(count) > 0).map(([count, label]) => `${count} 台${label}`)
+                const status = !linked ? '未关联' : draft.targets.length === 0 ? '请先选择目标服务器' : checkingDatasets ? '正在检查…' : !checked ? '等待检查' : parts.join(' · ') || '等待检查'
+                const problem = checked && (missing > 0 || candidates > 0 || ambiguous > 0 || failed > 0)
+                return <div key={dataset.id} className={`project-dataset-row${initial ? ' project-dataset-row--editing' : ''}${linked ? ' is-selected' : ''}`}>
+                  <label className="project-dataset-row__identity"><input type="checkbox" checked={linked} onChange={(event) => { const selected = event.target.checked; setDraft((current) => ({ ...current, datasetIds: selected ? [...current.datasetIds, dataset.id] : current.datasetIds.filter((id) => id !== dataset.id) })); if (!selected) setDatasetSyncIds((current) => { const next = new Set(current); next.delete(dataset.id); return next }) }} /><Database size={13} /><span><strong>{dataset.name}</strong><small>{dataset.sourcePath}</small></span></label>
+                  <span className={`project-dataset-row__status${problem ? ' is-warning' : checked && linked ? ' is-found' : ''}`}>{status}</span>
+                  {linked && checked && missing > 0 && <label className="project-dataset-row__sync"><input type="checkbox" checked={willSync} onChange={(event) => setDatasetSyncIds((current) => { const next = new Set(current); if (event.target.checked) next.add(dataset.id); else next.delete(dataset.id); return next })} /><span>本次补齐</span></label>}
+                </div>
+              })}</div> : <p>暂无可关联的数据集。</p>}
+            </section>}
             <p className="project-safety-note">主服务器是唯一来源。同步会将目标目录替换为完整副本；已有内容或后续修改必须先确认。</p>
             {error && <p className="form-error" role="alert">{error}</p>}
           </div>

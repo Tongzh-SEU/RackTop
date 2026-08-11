@@ -26,6 +26,24 @@ export function projectCardRowSpan(height: number, rowHeight: number, rowGap: nu
   return Math.max(1, Math.ceil((height + rowGap) / (rowHeight + rowGap)))
 }
 
+export function syncableProjectTargets(project: Project) {
+  return project.targets.filter((target) => ['unknown', 'found', 'missing', 'paused', 'error'].includes(target.status))
+}
+
+export function projectCardState(project: Project, busy: boolean) {
+  const count = (statuses: string[]) => project.targets.filter((target) => statuses.includes(target.status)).length
+  const syncing = count(['syncing'])
+  const conflicts = count(['conflict'])
+  const errors = count(['error', 'offline'])
+  const pending = syncableProjectTargets(project).length
+  if (busy || syncing > 0) return { kind: 'syncing', label: `${Math.max(1, syncing)} 个同步中` }
+  if (conflicts > 0) return { kind: 'conflict', label: `${conflicts} 个冲突` }
+  if (errors > 0) return { kind: 'error', label: `${errors} 个异常` }
+  if (pending > 0) return { kind: 'pending', label: `${pending} 个待更新` }
+  if (project.targets.length > 0) return { kind: 'synced', label: '已同步' }
+  return null
+}
+
 type ProjectGridProps = {
   items: Project[]
   allProjects: Project[]
@@ -78,8 +96,8 @@ function ProjectGrid({ items, allProjects, servers, busyTargets, syncProgress, p
     const preparing = preparingProjectIds.has(project.id)
     const inspecting = inspectingProjectIds.has(project.id)
     const projectBusy = preparing || [...busyTargets].some((key) => key.startsWith(`${project.id}:`))
-    const conflicts = project.targets.filter((target) => target.status === 'conflict').length
-    const needsSync = project.targets.filter((target) => ['unknown', 'found', 'missing', 'paused'].includes(target.status)).length
+    const syncableTargets = syncableProjectTargets(project)
+    const cardState = source ? projectCardState(project, projectBusy) : { kind: 'error', label: '主服务器已移除' }
     const related = project.kind === 'project'
       ? project.datasetIds.map((id) => allProjects.find((item) => item.id === id)).filter((item): item is Project => Boolean(item))
       : allProjects.filter((item) => item.kind === 'project' && item.datasetIds.includes(project.id))
@@ -99,8 +117,8 @@ function ProjectGrid({ items, allProjects, servers, busyTargets, syncProgress, p
       <header className="project-card__header">
         <span className={`project-card__icon project-card__icon--${project.kind}`}>{project.kind === 'project' ? <FolderGit2 size={18} /> : <Database size={18} />}</span>
         <div>
-          <div className="project-card__title"><h3>{project.name}</h3>{conflicts > 0 ? <span className="project-state-label is-conflict"><TriangleAlert size={11} />{conflicts} 个冲突</span> : needsSync > 0 ? <span className="project-state-label is-pending">{needsSync} 个待同步</span> : project.targets.length > 0 ? <span className="project-state-label is-synced"><CheckCircle2 size={11} />已同步</span> : null}</div>
-          <p>{source?.name ?? '主服务器已移除'} · {project.sourcePath}</p>
+          <div className="project-card__title"><h3>{project.name}</h3>{cardState && <span className={`project-state-label is-${cardState.kind}`}>{cardState.kind === 'conflict' || cardState.kind === 'error' ? <TriangleAlert size={11} /> : cardState.kind === 'synced' ? <CheckCircle2 size={11} /> : null}{cardState.label}</span>}</div>
+          <p>{project.sourcePath}</p>
           {related.length > 0 && <div className="project-card__relations">{related.map((item) => {
             const presence = relatedPresence[item.id]
             const relationState = presence?.missing ? `缺 ${presence.missing}` : presence?.unknown ? '待检测' : ''
@@ -116,7 +134,7 @@ function ProjectGrid({ items, allProjects, servers, busyTargets, syncProgress, p
           <span><small>数据量</small><strong>{source ? formatProjectSize(project.sourceSizeBytes) : '暂不可用'}</strong></span>
           <span><small>最近内容修改</small><strong>{source ? formatProjectTime(project.sourceModifiedAt) : '暂不可用'}</strong></span>
         </div>
-        <div className="project-card__source-actions"><button className="button button--secondary button--small" disabled={projectBusy || inspecting || !source} onClick={() => inspect(project)}>{source && <RefreshCw className={inspecting ? 'spin' : ''} size={13} />}{source ? inspecting ? '检测中' : '重新检测' : '请先编辑'}</button><button className="button button--secondary button--small" disabled={projectBusy || inspecting || !source || !project.sourceExists || project.targets.length === 0 || conflicts > 0} title={conflicts > 0 ? '请先处理目标端冲突' : '同步全部目标'} onClick={() => onSyncAll(project)}><RefreshCw className={projectBusy ? 'spin' : ''} size={13} />{preparing ? '准备同步' : projectBusy ? '同步中' : '同步全部'}</button></div>
+        <div className="project-card__source-actions"><button className="button button--secondary button--small" disabled={projectBusy || inspecting || !source} onClick={() => inspect(project)}>{source && <RefreshCw className={inspecting ? 'spin' : ''} size={13} />}{source ? inspecting ? '检查中' : '检查状态' : '请先编辑'}</button><button className="button button--secondary button--small" disabled={projectBusy || inspecting || !source || !project.sourceExists || syncableTargets.length === 0} title={syncableTargets.length > 0 ? '同步所有可执行的待更新目标' : '没有可同步的待更新目标'} onClick={() => onSyncAll(project)}><RefreshCw className={projectBusy ? 'spin' : ''} size={13} />{preparing ? '准备同步' : projectBusy ? '同步中' : '同步待更新'}</button></div>
       </div>
       <div className="project-card__targets">{project.targets.map((target) => {
         const server = servers.find((item) => item.id === target.serverId)
@@ -152,7 +170,7 @@ export function ProjectView(props: ProjectViewProps) {
   const projectItems = props.projects.filter((item) => item.kind === 'project')
   const datasets = props.projects.filter((item) => item.kind === 'dataset')
   if (props.projects.length === 0) return <div className="empty-state"><span className="empty-state__icon"><FolderGit2 size={26} /></span><h2>还没有项目或数据集</h2><p>添加一个主目录，选择需要同步的服务器，就能在这里统一维护跨服务器副本。</p><div><button className="button button--primary" onClick={props.onAdd}><Plus size={16} />添加同步对象</button></div></div>
-  return <div className="detail-page project-view"><div className="project-view__toolbar"><p>主服务器作为唯一来源，按需同步到选中的服务器。</p><button className="button button--primary" onClick={props.onAdd}><Plus size={16} />添加</button></div>{projectItems.length > 0 && <section className="project-section"><header><div><FolderGit2 size={16} /><span><strong>项目</strong><small>{projectItems.length} 个 · 关联数据集需单独同步</small></span></div></header><ProjectGrid items={projectItems} allProjects={props.projects} {...props} /></section>}{datasets.length > 0 && <section className="project-section"><header><div><Database size={16} /><span><strong>数据集</strong><small>{datasets.length} 个</small></span></div></header><ProjectGrid items={datasets} allProjects={props.projects} {...props} /></section>}</div>
+  return <div className="detail-page project-view"><div className="project-view__toolbar"><button className="button button--primary" onClick={props.onAdd}><Plus size={16} />添加</button></div>{projectItems.length > 0 && <section className="project-section"><header><div><FolderGit2 size={16} /><span><strong>项目</strong><small>{projectItems.length} 个</small></span></div></header><ProjectGrid items={projectItems} allProjects={props.projects} {...props} /></section>}{datasets.length > 0 && <section className="project-section"><header><div><Database size={16} /><span><strong>数据集</strong><small>{datasets.length} 个</small></span></div></header><ProjectGrid items={datasets} allProjects={props.projects} {...props} /></section>}</div>
 }
 
 export function ProjectConflictDialog({ project, server, onClose, onConfirm }: { project: Project; server?: Server; onClose: () => void; onConfirm: () => void }) {

@@ -88,7 +88,7 @@ describe('ProjectForm focus management', () => {
     act(() => root?.render(<ProjectForm initial={project} projects={[project, dataset]} servers={[source, target, alternateTarget]} onClose={vi.fn()} onSave={onSave} />))
     await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 550)) })
 
-    const syncPlan = [...document.querySelectorAll<HTMLLabelElement>('.project-dataset-row__sync')].find((label) => label.textContent?.includes('补齐 1 台'))
+    const syncPlan = [...document.querySelectorAll<HTMLLabelElement>('.project-dataset-row__sync')].find((label) => label.textContent?.includes('本次补齐'))
     expect(syncPlan).not.toBeNull()
     act(() => syncPlan?.querySelector<HTMLInputElement>('input')?.click())
     expect(document.querySelector('.sheet__footer')?.textContent).toContain('保存并同步（含 1 个数据集）')
@@ -122,6 +122,23 @@ describe('ProjectForm focus management', () => {
 
     expect(onSave).toHaveBeenCalledTimes(1)
     expect(onSave.mock.calls[0][1]).toBe(false)
-    expect(onSave.mock.calls[0][2][0].syncOnSave).toBe(true)
+    expect(onSave.mock.calls[0][2][0].syncOnSave).toBe(false)
+  })
+
+  it('keeps a single same-name candidate separate from a missing replica', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    const project: Project = { ...dataset, id: 'project-candidate', kind: 'project', datasetIds: [dataset.id] }
+    vi.spyOn(api, 'probeProjectPaths').mockResolvedValue([
+      { serverId: target.id, requestedPath: '~/datasets/target', suggestedPath: '~/datasets/target', exists: false, isDirectory: false, sizeBytes: 0, fileCount: 0, matches: ['/home/alice/datasets/Dataset'] },
+    ])
+
+    act(() => root?.render(<ProjectForm initial={project} projects={[project, dataset]} servers={[source, target]} onClose={vi.fn()} onSave={vi.fn()} />))
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 550)) })
+
+    expect(document.querySelector('.project-dataset-row__status')?.textContent).toContain('1 台候选待确认')
+    expect(document.querySelector('.project-dataset-row__sync')).toBeNull()
+    expect(document.querySelector('.sheet__footer')?.textContent).not.toContain('含 1 个数据集')
   })
 })
