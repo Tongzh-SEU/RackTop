@@ -104,8 +104,22 @@ pub struct ProjectTarget {
     pub is_directory: bool,
     pub size_bytes: u64,
     pub file_count: u64,
+    #[serde(default)]
+    pub modified_at: Option<i64>,
     pub last_checked_at: Option<i64>,
     pub last_synced_at: Option<i64>,
+    #[serde(default)]
+    pub synced_source_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub synced_source_file_count: Option<u64>,
+    #[serde(default)]
+    pub synced_source_modified_at: Option<i64>,
+    #[serde(default)]
+    pub synced_target_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub synced_target_file_count: Option<u64>,
+    #[serde(default)]
+    pub synced_target_modified_at: Option<i64>,
     pub error: Option<String>,
 }
 
@@ -121,6 +135,7 @@ pub struct Project {
     pub source_is_directory: bool,
     pub source_size_bytes: u64,
     pub source_file_count: u64,
+    pub source_modified_at: Option<i64>,
     pub dataset_ids: Vec<String>,
     pub targets: Vec<ProjectTarget>,
     pub created_at: i64,
@@ -160,6 +175,7 @@ pub struct ProjectPathCheck {
     pub is_directory: bool,
     pub size_bytes: u64,
     pub file_count: u64,
+    pub modified_at: Option<i64>,
     pub matches: Vec<String>,
     pub error: Option<String>,
 }
@@ -171,6 +187,18 @@ pub struct ProjectSyncResult {
     pub target_server_id: String,
     pub transferred_bytes: u64,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSyncProgress {
+    pub project_id: String,
+    pub target_server_id: String,
+    pub transferred_bytes: u64,
+    pub resumed_bytes: u64,
+    pub total_bytes: u64,
+    pub started_at: i64,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -53,14 +53,14 @@ import {
 } from 'lucide-react'
 import { api } from './services/api'
 import { openExternalUrl } from './services/external'
-import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, Project, ProjectDraft, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
+import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, LinkedDatasetPlan, Project, ProjectDraft, ProjectSyncProgress, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
 import { isRackTopManagedIdentity } from './utils/sshSetup'
 import { DeleteServerDialog } from './components/DeleteServerDialog'
 import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { ProjectForm } from './components/ProjectForm'
-import { ProjectDeleteDialog, ProjectView } from './components/ProjectView'
+import { ProjectConflictDialog, ProjectDeleteDialog, ProjectView } from './components/ProjectView'
 import { isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
 import { ResourceTrend } from './components/ResourceTrend'
 import { ServerForm } from './components/ServerForm'
@@ -105,6 +105,25 @@ function formatDataBytes(bytes: number) {
   if (bytes < 1024) return `${Math.round(bytes)} B`
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`
   return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+}
+
+function formatClock(mhz: number) {
+  if (!Number.isFinite(mhz) || mhz <= 0) return '0 MHz'
+  return mhz >= 1000 ? `${(mhz / 1000).toFixed(2)} GHz` : `${Math.round(mhz)} MHz`
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, operation: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor
+      cursor += 1
+      results[index] = await operation(items[index])
+    }
+  })
+  await Promise.all(workers)
+  return results
 }
 
 function relativeTime(timestamp?: number | null) {
@@ -227,7 +246,10 @@ function App() {
   const [projects, setProjects] = useState<Project[]>([])
   const [projectEditor, setProjectEditor] = useState<Project | null | 'new'>(null)
   const [projectPendingDelete, setProjectPendingDelete] = useState<Project | null>(null)
+  const [projectConflictTarget, setProjectConflictTarget] = useState<{ project: Project; targetServerId: string } | null>(null)
   const [busyProjectTargets, setBusyProjectTargets] = useState<Set<string>>(new Set())
+  const [projectSyncProgress, setProjectSyncProgress] = useState<ProjectSyncProgress[]>([])
+  const [preparingProjectIds, setPreparingProjectIds] = useState<Set<string>>(new Set())
   const [mineProcessWarnings, setMineProcessWarnings] = useState<MineProcessWarning[]>([])
   const [fleetSort, setFleetSort] = useState<'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount'>(() => (localStorage.getItem('racktop.fleetSort') as 'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount') || 'name')
   const [fleetDescending, setFleetDescending] = useState(() => localStorage.getItem('racktop.fleetDescending') === 'true')
@@ -482,6 +504,26 @@ function App() {
       setSelectedServerId((current) => current ?? loadedServers[0]?.id ?? null)
     })
   }, [])
+
+  useEffect(() => {
+    if (!api.isDesktop || (mainView !== 'projects' && busyProjectTargets.size === 0)) return
+    let cancelled = false
+    const load = () => void api.listProjectSyncProgress().then((progress) => { if (!cancelled) setProjectSyncProgress(progress) }).catch(() => {})
+    load()
+    const interval = window.setInterval(load, 500)
+    return () => { cancelled = true; window.clearInterval(interval) }
+  }, [mainView, busyProjectTargets.size])
+
+  useEffect(() => {
+    if (mainView !== 'projects' || projects.length === 0 || busyProjectTargets.size > 0 || preparingProjectIds.size > 0) return
+    let cancelled = false
+    void mapWithConcurrency(projects, 2, (project) => api.inspectProjectSource(project.id).catch(() => null)).then((inspected) => {
+      if (cancelled) return
+      const inspectedById = new Map(inspected.filter((project): project is Project => Boolean(project)).map((project) => [project.id, project]))
+      if (inspectedById.size > 0) setProjects((current) => current.map((project) => inspectedById.get(project.id) ?? project))
+    })
+    return () => { cancelled = true }
+  }, [mainView, projects.length, busyProjectTargets.size, preparingProjectIds.size])
 
   useEffect(() => {
     if (!api.isDesktop) return
@@ -907,15 +949,64 @@ function App() {
     await refreshServer(saved.id)
   }
 
-  async function saveProject(draft: ProjectDraft, syncAfterSave: boolean) {
+  async function saveProject(draft: ProjectDraft, syncAfterSave: boolean, linkedDatasets: LinkedDatasetPlan[]) {
     const saved = await api.saveProject(draft)
-    const inspected = await api.inspectProject(saved.id)
-    setProjects((current) => [inspected, ...current.filter((item) => item.id !== inspected.id)])
-    if (syncAfterSave) {
-      for (const target of inspected.targets) await syncProjectTarget(inspected, target.serverId)
-    }
+    setProjects((current) => [saved, ...current.filter((item) => item.id !== saved.id)])
     setProjectEditor(null)
-    setToast(syncAfterSave ? `“${saved.name}”已保存并完成同步` : `“${saved.name}”已保存`)
+    const prepareLinkedDatasets = async () => {
+      const prepared: Array<{ project: Project; syncTargetIds: string[] }> = []
+      for (const plan of linkedDatasets.filter((item) => item.syncOnSave)) {
+        const dataset = projects.find((item) => item.id === plan.datasetId && item.kind === 'dataset')
+        if (!dataset) continue
+        setPreparingProjectIds((current) => new Set(current).add(dataset.id))
+        try {
+          const plannedIds = new Set(plan.targets.map((target) => target.serverId))
+          const configured = await api.saveProject({
+            id: dataset.id,
+            name: dataset.name,
+            kind: 'dataset',
+            sourceServerId: dataset.sourceServerId,
+            sourcePath: dataset.sourcePath,
+            datasetIds: [],
+            targets: [...dataset.targets.filter((target) => !plannedIds.has(target.serverId)).map(({ serverId, path }) => ({ serverId, path })), ...plan.targets],
+          })
+          const inspected = await api.inspectProject(configured.id)
+          setProjects((current) => current.map((item) => item.id === inspected.id ? inspected : item))
+          prepared.push({ project: inspected, syncTargetIds: plan.targets.map((target) => target.serverId) })
+        } finally {
+          setPreparingProjectIds((current) => { const next = new Set(current); next.delete(dataset.id); return next })
+        }
+      }
+      return prepared
+    }
+    if (syncAfterSave) {
+      setPreparingProjectIds((current) => new Set(current).add(saved.id))
+      setToast(`“${saved.name}”已保存，正在准备同步`)
+      try {
+        const [inspected, preparedDatasets] = await Promise.all([api.inspectProject(saved.id), prepareLinkedDatasets()])
+        setProjects((current) => current.map((item) => item.id === inspected.id ? inspected : item))
+        if (!inspected.sourceExists) throw new Error('主目录不存在，无法开始同步')
+        const syncing = syncAllProjectTargets(inspected, false)
+        setPreparingProjectIds((current) => { const next = new Set(current); next.delete(saved.id); return next })
+        const completed = await syncing
+        let datasetCompleted = 0
+        let datasetTotal = 0
+        for (const prepared of preparedDatasets) {
+          datasetTotal += prepared.syncTargetIds.length
+          const results = await Promise.all(prepared.syncTargetIds.map((serverId) => syncProjectTarget(prepared.project, serverId, false)))
+          datasetCompleted += results.filter(Boolean).length
+        }
+        const datasetMessage = datasetTotal > 0 ? `；数据集 ${datasetCompleted} / ${datasetTotal} 个目标同步成功` : ''
+        setToast(completed === inspected.targets.length ? `“${saved.name}”已同步到 ${completed} 台服务器${datasetMessage}` : `“${saved.name}”已保存；${completed} / ${inspected.targets.length} 台同步成功${datasetMessage}`)
+      } catch (reason) {
+        setToast(`“${saved.name}”已保存，准备同步失败：${String(reason)}`)
+      } finally {
+        setPreparingProjectIds((current) => { const next = new Set(current); next.delete(saved.id); return next })
+      }
+      return
+    }
+    setToast(`“${saved.name}”已保存`)
+    void api.inspectProject(saved.id).then((inspected) => setProjects((current) => current.map((item) => item.id === inspected.id ? inspected : item))).catch((reason) => setToast(`“${saved.name}”已保存，路径检测失败：${String(reason)}`))
   }
 
   async function inspectProject(project: Project) {
@@ -926,28 +1017,53 @@ function App() {
     } catch (reason) { setToast(`路径检测失败：${String(reason)}`) }
   }
 
-  async function syncProjectTarget(project: Project, targetServerId: string) {
+  async function syncProjectTarget(project: Project, targetServerId: string, showToast = true, force = false) {
     const key = `${project.id}:${targetServerId}`
+    if (busyProjectTargets.has(key)) return false
     setBusyProjectTargets((current) => new Set(current).add(key))
     try {
-      const result = await api.syncProject(project.id, targetServerId)
-      const refreshed = await api.inspectProject(project.id)
-      setProjects((current) => current.map((item) => item.id === refreshed.id ? refreshed : item))
-      setToast(`${result.message} · ${formatDataBytes(result.transferredBytes)}`)
+      const result = await api.syncProject(project.id, targetServerId, force)
+      setProjects(await api.listProjects())
+      if (showToast) setToast(`${result.message} · ${formatDataBytes(result.transferredBytes)}`)
+      return true
     } catch (reason) {
-      setToast(`同步失败：${String(reason)}`)
-      throw reason
+      try {
+        const refreshedProjects = await api.listProjects()
+        setProjects(refreshedProjects)
+      } catch { /* Keep the current list when the failure state cannot be reloaded. */ }
+      if (showToast) setToast(`同步失败：${String(reason)}`)
+      return false
     } finally {
       setBusyProjectTargets((current) => { const next = new Set(current); next.delete(key); return next })
     }
+  }
+
+  async function cancelProjectTarget(projectId: string, targetServerId: string) {
+    try {
+      await api.cancelProjectSync(projectId, targetServerId)
+      setToast('正在安全暂停同步')
+    } catch (reason) { setToast(`无法暂停同步：${String(reason)}`) }
+  }
+
+  async function syncAllProjectTargets(project: Project, showCompletion = true) {
+    if (project.targets.length === 0) {
+      if (showCompletion) setToast(`“${project.name}”没有可同步的目标服务器`)
+      return 0
+    }
+    const results = await mapWithConcurrency(project.targets, 2, (target) => syncProjectTarget(project, target.serverId, false))
+    const completed = results.filter(Boolean).length
+    if (showCompletion) setToast(completed === project.targets.length ? `“${project.name}”已同步到 ${completed} 台服务器` : `“${project.name}”同步完成；${completed} / ${project.targets.length} 台成功`)
+    return completed
   }
 
   async function removeServer(server: Server, revokeSshAccess: boolean) {
     deletedServerIds.current.add(server.id)
     try {
       const deletion = await api.deleteServer(server.id, revokeSshAccess)
+      const remainingProjects = await api.listProjects()
       const nextSelectedId = servers.find((item) => item.id !== server.id)?.id ?? null
       setServers((current) => current.filter((item) => item.id !== server.id))
+      setProjects(remainingProjects)
       setSelectedServerId((current) => current === server.id ? nextSelectedId : current)
       setSnapshots((current) => {
         const next = { ...current }
@@ -1221,7 +1337,7 @@ function App() {
           {servers.length === 0 ? (
             <EmptyState onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
           ) : mainView === 'projects' ? (
-            <ProjectView projects={projects} servers={servers} busyTargets={busyProjectTargets} onAdd={() => setProjectEditor('new')} onEdit={setProjectEditor} onDelete={setProjectPendingDelete} onInspect={(project) => void inspectProject(project)} onSync={(project, targetServerId) => void syncProjectTarget(project, targetServerId)} />
+            <ProjectView projects={projects} servers={servers} busyTargets={busyProjectTargets} syncProgress={projectSyncProgress} preparingProjectIds={preparingProjectIds} onAdd={() => setProjectEditor('new')} onEdit={setProjectEditor} onDelete={setProjectPendingDelete} onInspect={inspectProject} onSync={(project, targetServerId) => { const target = project.targets.find((item) => item.serverId === targetServerId); if (target?.status === 'conflict') setProjectConflictTarget({ project, targetServerId }); else void syncProjectTarget(project, targetServerId) }} onCancel={(projectId, targetServerId) => void cancelProjectTarget(projectId, targetServerId)} onSyncAll={(project) => void syncAllProjectTargets(project)} />
           ) : mainView === 'idle' ? (
             <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} currentReservation={currentIdleReservation} onFiltersChange={setIdleFilters} onReserve={() => setReservationEditor({ filters: { ...idleFilters }, reservation: currentIdleReservation })} sortRevision={manualRefreshRevision} onSelect={(serverId) => { setSelectedServerId(serverId); setSelectedGpuUuid(null); setSelectedTab('overview'); setMainView('server') }} onQuickTerminal={(server, gpu) => setQuickTerminal({ server, gpu })} onReserveGpu={(server, gpu) => setReservationEditor({ filters: { ...idleFilters, duration: 0, targetServerId: server.id, targetGpuUuid: gpu.uuid } })} />
           ) : mainView === 'mine' ? (
@@ -1261,6 +1377,7 @@ function App() {
       {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultRemoteHistoryEnabled showGuide={settings?.showAddServerGuide ?? true} onGuideDismiss={() => { if (settings) void api.saveSettings({ ...settings, showAddServerGuide: false }).then(setSettings) }} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
       {projectEditor && <ProjectForm initial={projectEditor === 'new' ? null : projectEditor} projects={projects} servers={servers} onClose={() => setProjectEditor(null)} onSave={saveProject} />}
       {projectPendingDelete && <ProjectDeleteDialog project={projectPendingDelete} onClose={() => setProjectPendingDelete(null)} onDelete={async () => { await api.deleteProject(projectPendingDelete.id); setProjects((current) => current.filter((item) => item.id !== projectPendingDelete.id)); setProjectPendingDelete(null); setToast(`已移除“${projectPendingDelete.name}”的同步配置，服务器文件未删除`) }} />}
+      {projectConflictTarget && <ProjectConflictDialog project={projectConflictTarget.project} server={servers.find((item) => item.id === projectConflictTarget.targetServerId)} onClose={() => setProjectConflictTarget(null)} onConfirm={() => { const pending = projectConflictTarget; setProjectConflictTarget(null); void syncProjectTarget(pending.project, pending.targetServerId, true, true) }} />}
       {showSettings && settings && <SettingsSheet settings={settings} onClose={() => setShowSettings(false)} onSave={async (value) => { setSettings(await api.saveSettings(value)); setShowSettings(false); setToast('设置已保存') }} />}
       {showActivityLog && <ActivityLogSheet servers={servers} snapshots={snapshots} onClose={() => setShowActivityLog(false)} />}
       {showAbout && <AboutSheet onClose={() => setShowAbout(false)} onNotice={setToast} />}
@@ -1358,6 +1475,20 @@ function PanelHeader({ icon, title, subtitle, action }: { icon?: React.ReactNode
   return <header className="panel__header"><div>{icon && <span>{icon}</span>}<div><h3>{title}</h3>{subtitle && <p>{subtitle}</p>}</div></div>{action}</header>
 }
 
+type TelemetryItem = {
+  label: string
+  value: string
+  tone?: 'normal' | 'warning' | 'critical'
+}
+
+function TelemetryGrid({ items, compact = false }: { items: Array<TelemetryItem | null | false | undefined>; compact?: boolean }) {
+  const visibleItems = items.filter(Boolean) as TelemetryItem[]
+  if (!visibleItems.length) return null
+  return <div className={`resource-telemetry${compact ? ' resource-telemetry--compact' : ''}`}>
+    {visibleItems.map((item) => <span className={item.tone && item.tone !== 'normal' ? `is-${item.tone}` : undefined} key={item.label}><small>{item.label}</small><strong title={item.value}>{item.value}</strong></span>)}
+  </div>
+}
+
 function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCpu, onRequestTerminate, terminatingPid, animateCharts, gpuMemoryWarnings }: { snapshot: Snapshot; points: HistoryPoint[]; idleThreshold: number; onSelectGpu: (gpuUuid: string) => void; onOpenCpu: () => void; onRequestTerminate: (target: ProcessTerminationTarget) => void; terminatingPid?: number; animateCharts: boolean; gpuMemoryWarnings: GpuMemoryStallWarning[] }) {
   const readableGpus = snapshot.gpus.filter(isGpuAvailable)
   const totalMemoryMb = readableGpus.reduce((sum, gpu) => sum + Math.max(0, gpu.memoryTotalMb), 0)
@@ -1419,7 +1550,16 @@ function GpuCard({ gpu, processes, warning, onOpen }: { gpu: Snapshot['gpus'][nu
       <PanelHeader title={`GPU ${gpu.index}`} subtitle={gpu.name.replace('NVIDIA ', '')} action={<span className="gpu-card__header-actions">{warning && <button ref={warningButtonRef} type="button" className="gpu-card__warning" aria-label={`查看 GPU ${gpu.index} 异常详情`} title="查看具体问题" onClick={() => setShowWarning(true)}><AlertCircle size={17} /></button>}<ChevronRight size={16} aria-hidden="true" /></span>} />
       <MetricBar label="MEM" value={displayedMemoryPercent} detail={`${(gpu.memoryUsedMb / 1024).toFixed(1)} / ${(gpu.memoryTotalMb / 1024).toFixed(0)} GB`} accent="purple" currentUserValue={ownMemoryPercent} currentUserDetail={`${(ownMemoryMb / 1024).toFixed(1)} GB`} />
       <MetricBar label="UTL" value={clampPercent(gpu.utilization)} accent={gpuLoadAccent(gpu.utilization)} />
-      <div className="gpu-card__footer"><span><HardDrive size={14} />MBW {clampPercent(gpu.memoryUtilization).toFixed(0)}%</span><span><Gauge size={14} />SM {totalSmUtilization.toFixed(0)}%</span><span><Zap size={14} />{gpu.powerWatts.toFixed(0)} W</span><span><Activity size={14} />{gpu.temperatureCelsius}°C</span><span><Box size={14} />{processes.length} 进程</span></div>
+      <TelemetryGrid compact items={[
+        { label: '可用显存', value: `${(Math.max(0, gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024).toFixed(1)} GB` },
+        { label: 'MBW', value: `${clampPercent(gpu.memoryUtilization).toFixed(0)}%` },
+        { label: 'SM', value: `${totalSmUtilization.toFixed(0)}%` },
+        { label: '功率 / 上限', value: gpu.powerLimitWatts ? `${gpu.powerWatts.toFixed(0)} / ${gpu.powerLimitWatts.toFixed(0)} W` : `${gpu.powerWatts.toFixed(0)} W` },
+        { label: '温度', value: `${gpu.temperatureCelsius}°C` },
+        Boolean(gpu.performanceState) && { label: 'P-State', value: gpu.performanceState! },
+        gpu.smClockMhz !== undefined && gpu.smClockMhz > 0 && { label: 'SM 频率', value: formatClock(gpu.smClockMhz) },
+        { label: '进程', value: `${processes.length} 个` },
+      ]} />
       {showWarning && warning && <GpuMemoryWarningDialog warning={warning} onClose={closeWarning} />}
     </article>
   )
@@ -1457,12 +1597,23 @@ function GpuMemoryWarningDialog({ warning, onClose }: { warning: GpuMemoryStallW
 }
 
 function CpuOverviewCard({ snapshot, memoryPercent, onOpen }: { snapshot: Snapshot; memoryPercent: number; onOpen: () => void }) {
+  const logicalCores = snapshot.system.cpuLogicalCores
+  const normalizedLoad = logicalCores ? snapshot.system.load1 / logicalCores * 100 : null
   return (
     <button className="panel gpu-card cpu-overview-card" onClick={onOpen}>
       <PanelHeader title="CPU" subtitle={snapshot.system.cpuModel || 'CPU'} action={<ChevronRight size={16} />} />
       <MetricBar label="系统 MEM" value={memoryPercent} detail={`${formatBytes(snapshot.system.memoryUsedBytes)} / ${formatBytes(snapshot.system.memoryTotalBytes)}`} accent="purple" />
-      <MetricBar label="CPU UTL" value={snapshot.system.cpuUtilization} currentUserValue={snapshot.system.currentUserCpuUtilization} />
-      <div className="gpu-card__footer"><span><Activity size={14} />1m {snapshot.system.load1.toFixed(2)}</span><span><Clock3 size={14} />5m {snapshot.system.load5.toFixed(2)}</span><span><Clock3 size={14} />15m {snapshot.system.load15.toFixed(2)}</span><span><HardDrive size={14} />Swap {formatBytes(snapshot.system.swapUsedBytes)}</span></div>
+      <MetricBar label="CPU UTL" value={snapshot.system.cpuUtilization} currentUserValue={snapshot.system.currentUserCpuUtilization} currentUserDetail={`${snapshot.system.currentUserCpuUtilization.toFixed(1)}%`} />
+      <TelemetryGrid compact items={[
+        snapshot.system.memoryAvailableBytes !== undefined && { label: '可用内存', value: formatBytes(snapshot.system.memoryAvailableBytes) },
+        { label: '负载 / 线程', value: normalizedLoad === null ? snapshot.system.load1.toFixed(2) : `${normalizedLoad.toFixed(1)}%` },
+        snapshot.system.cpuPhysicalCores !== undefined && snapshot.system.cpuPhysicalCores > 0 && snapshot.system.cpuLogicalCores !== undefined && snapshot.system.cpuLogicalCores > 0 && { label: '核心 / 线程', value: `${snapshot.system.cpuPhysicalCores} / ${snapshot.system.cpuLogicalCores}` },
+        snapshot.system.cpuFrequencyMhz !== undefined && snapshot.system.cpuFrequencyMhz > 0 && { label: '频率 / 上限', value: snapshot.system.cpuMaxFrequencyMhz ? `${formatClock(snapshot.system.cpuFrequencyMhz)} / ${formatClock(snapshot.system.cpuMaxFrequencyMhz)}` : formatClock(snapshot.system.cpuFrequencyMhz) },
+        snapshot.system.cpuUserPercent !== undefined && { label: 'User', value: `${snapshot.system.cpuUserPercent.toFixed(1)}%` },
+        snapshot.system.cpuSystemPercent !== undefined && { label: 'System', value: `${snapshot.system.cpuSystemPercent.toFixed(1)}%` },
+        snapshot.system.cpuIoWaitPercent !== undefined && { label: 'IO Wait', value: `${snapshot.system.cpuIoWaitPercent.toFixed(1)}%`, tone: snapshot.system.cpuIoWaitPercent >= 10 ? 'warning' : 'normal' },
+        { label: 'Swap', value: formatBytes(snapshot.system.swapUsedBytes) },
+      ]} />
     </button>
   )
 }
@@ -1488,6 +1639,16 @@ function GpuDetail({ snapshot, points, selectedGpuUuid, animateChart }: { snapsh
         <div className="gpu-detail__title"><div><span>GPU {gpu.index}{isExpanded ? ' · 已展开' : ''}</span><h3>{gpu.name}</h3><small>{gpu.uuid}</small></div><strong>{displayedGpuMemoryPercent(memory)}%<small> MEM</small></strong></div>
         <div className="gpu-detail__meters"><MetricBar label="MEM" value={displayedGpuMemoryPercent(memory)} detail={`${(gpu.memoryUsedMb / 1024).toFixed(1)} / ${(gpu.memoryTotalMb / 1024).toFixed(1)} GB`} accent="purple" /><MetricBar label="UTL" value={gpu.utilization} accent={gpuLoadAccent(gpu.utilization)} /></div>
         <div className="stat-row stat-row--gpu"><span><small>MBW</small><strong>{clampPercent(gpu.memoryUtilization).toFixed(0)}%</strong></span><span><small>温度</small><strong>{gpu.temperatureCelsius}°C</strong></span><span><small>功耗</small><strong>{gpu.powerWatts.toFixed(1)} W</strong></span><button type="button" className={expanded?.uuid === gpu.uuid && expanded.mode === 'processes' ? 'is-active' : ''} aria-expanded={expanded?.uuid === gpu.uuid && expanded.mode === 'processes'} onClick={() => toggleExpanded(gpu.uuid, 'processes')}><small>进程</small><strong>{gpuProcesses.length}</strong></button><button type="button" className={expanded?.uuid === gpu.uuid && expanded.mode === 'sm' ? 'is-active' : ''} aria-expanded={expanded?.uuid === gpu.uuid && expanded.mode === 'sm'} onClick={() => toggleExpanded(gpu.uuid, 'sm')}><small>SM</small><strong>{totalSmUtilization.toFixed(0)}%</strong></button></div>
+        <TelemetryGrid items={[
+          { label: '可用显存', value: `${(Math.max(0, gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024).toFixed(1)} GB` },
+          gpu.powerLimitWatts !== undefined && gpu.powerLimitWatts > 0 && { label: '功率上限', value: `${gpu.powerLimitWatts.toFixed(0)} W` },
+          gpu.smClockMhz !== undefined && gpu.smClockMhz > 0 && { label: 'SM 频率', value: formatClock(gpu.smClockMhz) },
+          gpu.memoryClockMhz !== undefined && gpu.memoryClockMhz > 0 && { label: '显存频率', value: formatClock(gpu.memoryClockMhz) },
+          Boolean(gpu.performanceState) && { label: 'P-State', value: gpu.performanceState! },
+          gpu.fanSpeedPercent !== undefined && { label: '风扇', value: `${gpu.fanSpeedPercent.toFixed(0)}%` },
+          Boolean(gpu.throttleReason) && { label: '限频状态', value: gpu.throttleReason!, tone: gpu.throttleReason === '正常' || gpu.throttleReason === '空闲' ? 'normal' : 'warning' },
+          gpu.eccErrors !== undefined && { label: 'ECC 错误', value: `${gpu.eccErrors}`, tone: gpu.eccErrors > 0 ? 'critical' : 'normal' },
+        ]} />
         {isExpanded && <div className="gpu-detail__processes"><header><strong>{expanded.mode === 'sm' ? '进程 SM 活跃率' : `GPU ${gpu.index} 进程`}</strong><small>{expanded.mode === 'sm' ? '单次 pmon 采样，不代表算法效率' : `${gpuProcesses.length} 个计算进程`}</small></header>{gpuProcesses.length ? gpuProcesses.map((process) => <div key={process.pid}><code>PID {process.pid}</code><span title={process.command}>{process.command}</span><strong>{expanded.mode === 'sm' ? `SM ${clampPercent(process.smUtilization ?? 0).toFixed(0)}%` : `${(process.memoryUsedMb / 1024).toFixed(1)} GB`}</strong></div>) : <p className="gpu-detail__empty">{hasUnattributedMemory ? `检测到 ${(unattributedMemoryMb / 1024).toFixed(1)} GB 显存占用，但 NVIDIA 驱动未返回可映射的 PID` : '当前没有 GPU 计算进程'}</p>}</div>}
         {ownMemoryMb > 0 && <div className="gpu-detail__own"><UserRound size={13} /><strong>你的任务</strong><span>占用 {(ownMemoryMb / 1024).toFixed(1)} GB 显存</span></div>}
       </article>
@@ -1497,7 +1658,18 @@ function GpuDetail({ snapshot, points, selectedGpuUuid, animateChart }: { snapsh
 
 function CpuDetail({ snapshot, points, animateChart }: { snapshot: Snapshot; points: HistoryPoint[]; animateChart: boolean }) {
   const memoryPercent = snapshot.system.memoryTotalBytes ? snapshot.system.memoryUsedBytes / snapshot.system.memoryTotalBytes * 100 : 0
-  return <div className="content-stack"><ResourceTrend snapshot={snapshot} kind="cpu" title={snapshot.system.cpuModel || 'CPU'} animate={animateChart} /><section className="panel system-resource-panel"><PanelHeader icon={<MemoryStick />} title="系统资源" /><div className="resource-bars"><MetricBar label="CPU" value={snapshot.system.cpuUtilization} currentUserValue={snapshot.system.currentUserCpuUtilization} /><MetricBar label="内存" value={memoryPercent} detail={`${formatBytes(snapshot.system.memoryUsedBytes)} / ${formatBytes(snapshot.system.memoryTotalBytes)}`} accent="purple" /></div><div className="stat-row stat-row--border"><span><small>1 分钟负载</small><strong>{snapshot.system.load1.toFixed(2)}</strong></span><span><small>5 分钟负载</small><strong>{snapshot.system.load5.toFixed(2)}</strong></span><span><small>15 分钟负载</small><strong>{snapshot.system.load15.toFixed(2)}</strong></span><span><small>Swap</small><strong>{formatBytes(snapshot.system.swapUsedBytes)}</strong></span></div></section></div>
+  return <div className="content-stack"><ResourceTrend snapshot={snapshot} kind="cpu" title={snapshot.system.cpuModel || 'CPU'} animate={animateChart} /><section className="panel system-resource-panel"><PanelHeader icon={<MemoryStick />} title="系统资源" /><div className="resource-bars"><MetricBar label="CPU" value={snapshot.system.cpuUtilization} currentUserValue={snapshot.system.currentUserCpuUtilization} currentUserDetail={`${snapshot.system.currentUserCpuUtilization.toFixed(1)}%`} /><MetricBar label="内存" value={memoryPercent} detail={`${formatBytes(snapshot.system.memoryUsedBytes)} / ${formatBytes(snapshot.system.memoryTotalBytes)}`} accent="purple" /></div><div className="stat-row stat-row--border"><span><small>1 分钟负载</small><strong>{snapshot.system.load1.toFixed(2)}</strong></span><span><small>5 分钟负载</small><strong>{snapshot.system.load5.toFixed(2)}</strong></span><span><small>15 分钟负载</small><strong>{snapshot.system.load15.toFixed(2)}</strong></span><span><small>Swap</small><strong>{formatBytes(snapshot.system.swapUsedBytes)}</strong></span></div><TelemetryGrid items={[
+    snapshot.system.cpuPhysicalCores !== undefined && snapshot.system.cpuPhysicalCores > 0 && snapshot.system.cpuLogicalCores !== undefined && snapshot.system.cpuLogicalCores > 0 && { label: '核心 / 线程', value: `${snapshot.system.cpuPhysicalCores} / ${snapshot.system.cpuLogicalCores}` },
+    snapshot.system.cpuFrequencyMhz !== undefined && snapshot.system.cpuFrequencyMhz > 0 && { label: '当前频率', value: formatClock(snapshot.system.cpuFrequencyMhz) },
+    snapshot.system.cpuMaxFrequencyMhz !== undefined && snapshot.system.cpuMaxFrequencyMhz > 0 && { label: '最高频率', value: formatClock(snapshot.system.cpuMaxFrequencyMhz) },
+    snapshot.system.cpuUserPercent !== undefined && { label: 'User', value: `${snapshot.system.cpuUserPercent.toFixed(1)}%` },
+    snapshot.system.cpuSystemPercent !== undefined && { label: 'System', value: `${snapshot.system.cpuSystemPercent.toFixed(1)}%` },
+    snapshot.system.cpuIoWaitPercent !== undefined && { label: 'IO Wait', value: `${snapshot.system.cpuIoWaitPercent.toFixed(1)}%`, tone: snapshot.system.cpuIoWaitPercent >= 10 ? 'warning' : 'normal' },
+    snapshot.system.cpuStealPercent !== undefined && { label: 'Steal', value: `${snapshot.system.cpuStealPercent.toFixed(1)}%`, tone: snapshot.system.cpuStealPercent >= 5 ? 'warning' : 'normal' },
+    snapshot.system.memoryAvailableBytes !== undefined && { label: '可用内存', value: formatBytes(snapshot.system.memoryAvailableBytes) },
+    snapshot.system.memoryCacheBytes !== undefined && { label: '缓存', value: formatBytes(snapshot.system.memoryCacheBytes) },
+    snapshot.system.cpuTemperatureCelsius !== undefined && { label: 'CPU 温度', value: `${snapshot.system.cpuTemperatureCelsius.toFixed(0)}°C`, tone: snapshot.system.cpuTemperatureCelsius >= 85 ? 'critical' : snapshot.system.cpuTemperatureCelsius >= 75 ? 'warning' : 'normal' },
+  ]} /></section></div>
 }
 
 function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot }) {

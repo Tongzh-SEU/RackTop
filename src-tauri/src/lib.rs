@@ -8,7 +8,7 @@ mod ssh_keys;
 pub mod storage;
 mod terminal;
 
-use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, Project, ProjectDraft, ProjectPathCheck, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
+use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
@@ -414,9 +414,25 @@ async fn inspect_project(database: State<'_, Database>, project_id: String) -> R
 }
 
 #[tauri::command]
-async fn sync_project(database: State<'_, Database>, project_id: String, target_server_id: String) -> Result<ProjectSyncResult, String> {
+async fn inspect_project_source(database: State<'_, Database>, project_id: String) -> Result<Project, String> {
     let project = database.get_project(&project_id)?;
-    project_sync::sync(&database, &project, &target_server_id).await
+    project_sync::inspect_source(&database, &project).await
+}
+
+#[tauri::command]
+async fn sync_project(database: State<'_, Database>, project_id: String, target_server_id: String, force: bool) -> Result<ProjectSyncResult, String> {
+    let project = database.get_project(&project_id)?;
+    project_sync::sync(&database, &project, &target_server_id, force).await
+}
+
+#[tauri::command]
+fn list_project_sync_progress() -> Vec<ProjectSyncProgress> {
+    project_sync::list_progress()
+}
+
+#[tauri::command]
+fn cancel_project_sync(project_id: String, target_server_id: String) -> Result<(), String> {
+    if project_sync::cancel(&project_id, &target_server_id) { Ok(()) } else { Err("找不到正在运行的同步任务".into()) }
 }
 
 #[tauri::command]
@@ -595,6 +611,16 @@ fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn s
     let quit = MenuItemBuilder::with_id("menu-quit", "退出 RackTop").accelerator("CmdOrCtrl+Q").build(app)?;
     let racktop = SubmenuBuilder::new(app, "RackTop").items(&[&about, &settings]).separator().item(&quit).build()?;
 
+    let edit = SubmenuBuilder::new(app, "编辑")
+        .undo_with_text("撤销")
+        .redo_with_text("重做")
+        .separator()
+        .cut_with_text("剪切")
+        .copy_with_text("复制")
+        .paste_with_text("粘贴")
+        .select_all_with_text("全选")
+        .build()?;
+
     let add_server = MenuItemBuilder::with_id("menu-add-server", "添加服务器…").accelerator("CmdOrCtrl+N").build(app)?;
     let import_config = MenuItemBuilder::with_id("menu-import-config", "导入 SSH Config…").build(app)?;
     let refresh_all = MenuItemBuilder::with_id("menu-refresh-all", "刷新全部服务器").accelerator("CmdOrCtrl+R").build(app)?;
@@ -618,7 +644,7 @@ fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn s
     let project = MenuItemBuilder::with_id("menu-help-project", "打开项目主页").build(app)?;
     let help = SubmenuBuilder::with_id(app, HELP_SUBMENU_ID, "帮助").items(&[&guide, &project]).build()?;
 
-    Ok(MenuBuilder::new(app).items(&[&racktop, &servers, &view, &window, &help]).build()?)
+    Ok(MenuBuilder::new(app).items(&[&racktop, &edit, &servers, &view, &window, &help]).build()?)
 }
 
 #[tauri::command]
@@ -682,7 +708,7 @@ pub fn run() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, list_projects, save_project, delete_project, probe_project_paths, suggest_project_paths, inspect_project, sync_project, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, list_projects, save_project, delete_project, probe_project_paths, suggest_project_paths, inspect_project, inspect_project_source, sync_project, list_project_sync_progress, cancel_project_sync, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }
