@@ -380,3 +380,47 @@ export interface ProjectSyncProgress {
   startedAt: number
   state: 'preparing' | 'transferring' | 'publishing'
 }
+
+export interface LaunchProfile {
+  id: string
+  name: string
+  projectId?: string | null
+  workingDirectory: string
+  command: string
+  gpuCount: number
+  gpuModel?: string | null
+  minimumGpuMemoryGb: number
+  datasetIds: string[]
+  createdAt: number
+  updatedAt: number
+}
+
+export type ManagedRunStatus = 'starting' | 'running' | 'completed' | 'failed' | 'stopped' | 'unknown'
+
+export interface ManagedRun {
+  id: string
+  profileId?: string | null
+  name: string
+  projectId?: string | null
+  serverId: string
+  gpuUuids: string[]
+  gpuIndices: number[]
+  workingDirectory: string
+  command: string
+  pid: number
+  logPath: string
+  startedAt: number
+  endedAt?: number | null
+  status: ManagedRunStatus
+  exitCode?: number | null
+}
+
+export interface ManagedRunLaunchResult {
+  pid: number
+  logPath: string
+}
+
+export interface ManagedRunRemoteStatus {
+  status: 'running' | 'exited' | 'unknown'
+  exitCode?: number | null
+}

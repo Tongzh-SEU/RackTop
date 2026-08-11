@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
+import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
 import { clampPercent, gpuMemoryPercent, hasOtherUserGpuWorkload } from '../utils/gpu'
 import { RACKTOP_MANAGED_IDENTITY_PATH } from '../utils/sshSetup'
 
@@ -464,6 +464,19 @@ export const api = {
   async terminateProcess(serverId: string, pid: number): Promise<string> {
     if (isTauri) return invoke('terminate_process', { serverId, pid, confirmed: true })
     return `已在演示服务器 ${serverId} 上模拟结束 PID ${pid}。`
+  },
+  async launchManagedRun(serverId: string, runId: string, workingDirectory: string, command: string, gpuIndices: number[]): Promise<ManagedRunLaunchResult> {
+    if (isTauri) return invoke('launch_managed_run', { serverId, runId, workingDirectory, command, gpuIndices })
+    await new Promise((resolve) => window.setTimeout(resolve, 500))
+    return { pid: 60_000 + Math.floor(Math.random() * 9_000), logPath: `~/.racktop/runs/${runId}/output.log` }
+  },
+  async readManagedRunLog(serverId: string, runId: string, lines = 400): Promise<string> {
+    if (isTauri) return invoke('read_managed_run_log', { serverId, runId, lines })
+    return `[RackTop 演示日志]\nserver=${serverId}\nrun=${runId}\nstep 1840 · loss 0.8421\nstep 1841 · loss 0.8376`
+  },
+  async getManagedRunStatus(serverId: string, runId: string, pid: number): Promise<ManagedRunRemoteStatus> {
+    if (isTauri) return invoke('get_managed_run_status', { serverId, runId, pid })
+    return { status: 'running', exitCode: null }
   },
   async notify(title: string, body: string, extra?: Record<string, unknown>): Promise<void> {
     if (!isTauri) return

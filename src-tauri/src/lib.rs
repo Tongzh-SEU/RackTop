@@ -8,7 +8,7 @@ mod ssh_keys;
 pub mod storage;
 mod terminal;
 
-use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
+use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
@@ -489,6 +489,27 @@ async fn terminate_process(database: State<'_, Database>, server_id: String, pid
     collector::terminate_process_tree(&server, password.as_deref(), pid).await
 }
 
+#[tauri::command]
+async fn launch_managed_run(database: State<'_, Database>, server_id: String, run_id: String, working_directory: String, command: String, gpu_indices: Vec<u32>) -> Result<ManagedRunLaunchResult, String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
+    collector::launch_managed_run(&server, password.as_deref(), &run_id, &working_directory, &command, &gpu_indices).await
+}
+
+#[tauri::command]
+async fn read_managed_run_log(database: State<'_, Database>, server_id: String, run_id: String, lines: u32) -> Result<String, String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
+    collector::read_managed_run_log(&server, password.as_deref(), &run_id, lines).await
+}
+
+#[tauri::command]
+async fn get_managed_run_status(database: State<'_, Database>, server_id: String, run_id: String, pid: u32) -> Result<ManagedRunRemoteStatus, String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
+    collector::managed_run_status(&server, password.as_deref(), &run_id, pid).await
+}
+
 fn tray_pixel(rgba: &mut [u8], width: usize, x: usize, y: usize, alpha: u8) {
     if x >= width || y >= 18 { return; }
     let index = (y * width + x) * 4;
@@ -708,7 +729,7 @@ pub fn run() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, list_projects, save_project, delete_project, probe_project_paths, suggest_project_paths, inspect_project, inspect_project_source, sync_project, list_project_sync_progress, cancel_project_sync, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, update_tray_summary])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, list_projects, save_project, delete_project, probe_project_paths, suggest_project_paths, inspect_project, inspect_project_source, sync_project, list_project_sync_progress, cancel_project_sync, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, launch_managed_run, read_managed_run_log, get_managed_run_status, update_tray_summary])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }

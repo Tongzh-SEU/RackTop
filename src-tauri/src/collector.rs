@@ -1,5 +1,6 @@
-use crate::models::{CpuProcessMetric, DiskMetric, GpuMetric, ProcessMetric, Server, Snapshot, SystemMetric};
+use crate::models::{CpuProcessMetric, DiskMetric, GpuMetric, ManagedRunLaunchResult, ManagedRunRemoteStatus, ProcessMetric, Server, Snapshot, SystemMetric};
 use crate::ssh_keys::expand_identity_path;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::{collections::{HashMap, HashSet}, process::Stdio, time::{SystemTime, UNIX_EPOCH}};
 use tokio::{process::Command, time::{timeout, Duration}};
 
@@ -517,6 +518,97 @@ pub async fn terminate_process_tree(server: &Server, password: Option<&str>, pid
     if stdout.contains("__RACKTOP_TERMINATE_REMAINING__") { return Err(format!("PID {pid} 的部分进程仍在运行，请在终端中检查进程状态")); }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     Err(if stderr.is_empty() { format!("无法结束 PID {pid}") } else { classify_ssh_error(&stderr) })
+}
+
+fn validate_run_id(run_id: &str) -> Result<(), String> {
+    if run_id.is_empty() || run_id.len() > 80 || !run_id.chars().all(|character| character.is_ascii_alphanumeric() || character == '-') {
+        return Err("运行任务标识无效".into());
+    }
+    Ok(())
+}
+
+pub async fn launch_managed_run(server: &Server, password: Option<&str>, run_id: &str, working_directory: &str, task_command: &str, gpu_indices: &[u32]) -> Result<ManagedRunLaunchResult, String> {
+    validate_run_id(run_id)?;
+    if working_directory.trim().is_empty() { return Err("工作目录不能为空".into()); }
+    if task_command.trim().is_empty() { return Err("启动命令不能为空".into()); }
+    if task_command.len() > 32_768 || working_directory.len() > 4_096 || task_command.contains('\0') || working_directory.contains('\0') {
+        return Err("工作目录或启动命令过长".into());
+    }
+    let workdir = STANDARD.encode(working_directory.trim());
+    let payload = STANDARD.encode(task_command.trim());
+    let gpu_csv = gpu_indices.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let script = format!(r#"set -eu
+decode_base64() {{ printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | base64 --decode; }}
+workdir="$(decode_base64 '{workdir}')"
+task_command="$(decode_base64 '{payload}')"
+case "$workdir" in '~') workdir="$HOME" ;; '~/'*) workdir="$HOME/${{workdir#\~/}}" ;; esac
+if [ ! -d "$workdir" ]; then printf '__RACKTOP_RUN_DIR_MISSING__\n'; exit 42; fi
+run_dir="$HOME/.racktop/runs/{run_id}"
+mkdir -p "$run_dir"
+launch_script="$run_dir/launch.sh"
+{{
+  printf '#!/bin/sh\n'
+  printf 'export CUDA_VISIBLE_DEVICES=%s\n' '{gpu_csv}'
+  printf '%s\n' "$task_command"
+  printf 'exit_code=$?\nprintf "%%s" "$exit_code" > "$HOME/.racktop/runs/{run_id}/exit-code"\nexit "$exit_code"\n'
+}} > "$launch_script"
+chmod 700 "$launch_script"
+rm -f "$run_dir/exit-code"
+cd "$workdir"
+if command -v setsid >/dev/null 2>&1; then
+  nohup setsid sh "$launch_script" > "$run_dir/output.log" 2>&1 < /dev/null &
+else
+  nohup sh "$launch_script" > "$run_dir/output.log" 2>&1 < /dev/null &
+fi
+pid=$!
+printf '%s' "$pid" > "$run_dir/pid"
+sleep 0.15
+if ! kill -0 "$pid" 2>/dev/null; then printf '__RACKTOP_RUN_FAILED__\n'; tail -n 12 "$run_dir/output.log" 2>/dev/null; exit 43; fi
+printf '__RACKTOP_RUN_OK__%s\n' "$pid"
+"#);
+    let (mut command, target) = configured_ssh_command(server, password)?;
+    command.arg(target).arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = timeout(Duration::from_secs(15), command.output()).await.map_err(|_| "启动任务超时（15 秒）".to_string())?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains("__RACKTOP_RUN_DIR_MISSING__") { return Err(format!("远端工作目录不存在：{}", working_directory.trim())); }
+    if stdout.contains("__RACKTOP_RUN_FAILED__") { return Err(stdout.replace("__RACKTOP_RUN_FAILED__", "任务启动后立即退出：").trim().to_string()); }
+    if output.status.success() {
+        if let Some(pid) = stdout.lines().find_map(|line| line.strip_prefix("__RACKTOP_RUN_OK__").and_then(|value| value.trim().parse::<u32>().ok())) {
+            return Ok(ManagedRunLaunchResult { pid, log_path: format!("~/.racktop/runs/{run_id}/output.log") });
+        }
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if stderr.is_empty() { "远端未返回任务 PID".into() } else { classify_ssh_error(&stderr) })
+}
+
+pub async fn read_managed_run_log(server: &Server, password: Option<&str>, run_id: &str, lines: u32) -> Result<String, String> {
+    validate_run_id(run_id)?;
+    let lines = lines.clamp(20, 1_000);
+    let script = format!("tail -n {lines} \"$HOME/.racktop/runs/{run_id}/output.log\" 2>/dev/null || true");
+    let (mut command, target) = configured_ssh_command(server, password)?;
+    command.arg(target).arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = timeout(Duration::from_secs(10), command.output()).await.map_err(|_| "读取任务日志超时".to_string())?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
+    if output.status.success() { return Ok(String::from_utf8_lossy(&output.stdout).to_string()); }
+    Err(classify_ssh_error(String::from_utf8_lossy(&output.stderr).trim()))
+}
+
+pub async fn managed_run_status(server: &Server, password: Option<&str>, run_id: &str, pid: u32) -> Result<ManagedRunRemoteStatus, String> {
+    validate_run_id(run_id)?;
+    if pid <= 1 { return Err("任务 PID 无效".into()); }
+    let script = format!(r#"exit_file="$HOME/.racktop/runs/{run_id}/exit-code"
+if [ -f "$exit_file" ]; then printf 'exited:'; cat "$exit_file"; printf '\n';
+elif kill -0 {pid} 2>/dev/null; then printf 'running\n';
+else printf 'unknown\n'; fi"#);
+    let (mut command, target) = configured_ssh_command(server, password)?;
+    command.arg(target).arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = timeout(Duration::from_secs(8), command.output()).await.map_err(|_| "检查任务状态超时".to_string())?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
+    if !output.status.success() { return Err(classify_ssh_error(String::from_utf8_lossy(&output.stderr).trim())); }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value == "running" { return Ok(ManagedRunRemoteStatus { status: "running".into(), exit_code: None }); }
+    if let Some(code) = value.strip_prefix("exited:").and_then(|item| item.trim().parse::<i32>().ok()) {
+        return Ok(ManagedRunRemoteStatus { status: "exited".into(), exit_code: Some(code) });
+    }
+    Ok(ManagedRunRemoteStatus { status: "unknown".into(), exit_code: None })
 }
 
 #[cfg(test)]

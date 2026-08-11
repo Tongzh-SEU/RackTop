@@ -203,6 +203,20 @@ pub struct ProjectSyncProgress {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ManagedRunLaunchResult {
+    pub pid: u32,
+    pub log_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedRunRemoteStatus {
+    pub status: String,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GpuMetric {
     pub index: u32,
     pub uuid: String,
