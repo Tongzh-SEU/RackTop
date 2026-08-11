@@ -1,12 +1,14 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_STALE_SECONDS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './RemoteSyncStatus'
+import { isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_STALE_SECONDS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './RemoteSyncStatus'
 
 const baseStatus: RemoteSyncStatusState = { phase: 'syncing', completed: 2, total: 4, importedCount: 0, failedServerIds: [] }
 
 describe('RemoteSyncStatus', () => {
   it('shows startup feedback immediately only when remote history is stale', () => {
     const now = 10_000
+    expect(isRemoteSyncFresh({ remoteHistoryLastSyncAt: now - REMOTE_SYNC_STALE_SECONDS }, now)).toBe(true)
+    expect(isRemoteSyncFresh({ remoteHistoryLastSyncAt: now - REMOTE_SYNC_STALE_SECONDS - 1 }, now)).toBe(false)
     expect(shouldShowRemoteSyncImmediately([{ remoteHistoryLastSyncAt: null }], now)).toBe(true)
     expect(shouldShowRemoteSyncImmediately([{ remoteHistoryLastSyncAt: now - REMOTE_SYNC_STALE_SECONDS - 1 }], now)).toBe(true)
     expect(shouldShowRemoteSyncImmediately([{ remoteHistoryLastSyncAt: now - REMOTE_SYNC_STALE_SECONDS }], now)).toBe(false)

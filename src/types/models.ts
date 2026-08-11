@@ -33,6 +33,13 @@ export interface GpuMetric {
   memoryTotalMb: number
   temperatureCelsius: number
   powerWatts: number
+  powerLimitWatts?: number
+  smClockMhz?: number
+  memoryClockMhz?: number
+  performanceState?: string
+  fanSpeedPercent?: number
+  throttleReason?: string
+  eccErrors?: number
 }
 
 export interface ProcessMetric {
@@ -74,6 +81,17 @@ export interface SystemMetric {
   memoryTotalBytes: number
   swapUsedBytes: number
   swapTotalBytes: number
+  cpuPhysicalCores?: number
+  cpuLogicalCores?: number
+  cpuFrequencyMhz?: number
+  cpuMaxFrequencyMhz?: number
+  cpuUserPercent?: number
+  cpuSystemPercent?: number
+  cpuIoWaitPercent?: number
+  cpuStealPercent?: number
+  cpuTemperatureCelsius?: number
+  memoryAvailableBytes?: number
+  memoryCacheBytes?: number
 }
 
 export interface Snapshot {
@@ -104,11 +122,13 @@ export interface DiskMetric {
 
 export interface HistoryPoint {
   timestamp: number
+  isCompacted?: boolean
   cpuUtilization: number
   memoryUtilization: number
   swapUtilization: number
   gpuUtilizations: Record<string, number>
   gpuMemoryUtilizations: Record<string, number>
+  gpuOtherUserOccupancies?: Record<string, boolean>
   cpuMin?: number
   cpuMax?: number
   memoryMin?: number
@@ -170,6 +190,7 @@ export interface AppSettings {
   temperatureThresholdCelsius: number
   currentUserAccent: string
   theme: 'system' | 'light' | 'dark'
+  menuBarMode: 'compact' | 'expanded'
   reduceMotion: boolean
   showAddServerGuide: boolean
 }
@@ -269,4 +290,93 @@ export interface InteractionLogSummary {
   localStorageBytes: number
   failureCount: number
   servers: InteractionServerSummary[]
+}
+
+export type ProjectKind = 'project' | 'dataset'
+export type ProjectTargetStatus = 'unknown' | 'found' | 'missing' | 'offline' | 'syncing' | 'paused' | 'synced' | 'conflict' | 'error'
+
+export interface ProjectTarget {
+  serverId: string
+  path: string
+  status: ProjectTargetStatus
+  exists: boolean
+  isDirectory: boolean
+  sizeBytes: number
+  fileCount: number
+  modifiedAt?: number | null
+  lastCheckedAt?: number | null
+  lastSyncedAt?: number | null
+  syncedSourceSizeBytes?: number | null
+  syncedSourceFileCount?: number | null
+  syncedSourceModifiedAt?: number | null
+  syncedTargetSizeBytes?: number | null
+  syncedTargetFileCount?: number | null
+  syncedTargetModifiedAt?: number | null
+  error?: string | null
+}
+
+export interface Project {
+  id: string
+  name: string
+  kind: ProjectKind
+  sourceServerId: string
+  sourcePath: string
+  sourceExists: boolean
+  sourceIsDirectory: boolean
+  sourceSizeBytes: number
+  sourceFileCount: number
+  sourceModifiedAt?: number | null
+  datasetIds: string[]
+  targets: ProjectTarget[]
+  createdAt: number
+  updatedAt: number
+  lastSyncAt?: number | null
+  status: ProjectTargetStatus
+  lastError?: string | null
+}
+
+export interface ProjectDraft {
+  id?: string
+  name: string
+  kind: ProjectKind
+  sourceServerId: string
+  sourcePath: string
+  datasetIds: string[]
+  targets: Array<{ serverId: string; path: string }>
+}
+
+export interface LinkedDatasetPlan {
+  datasetId: string
+  syncOnSave: boolean
+  targets: Array<{ serverId: string; path: string }>
+}
+
+export interface ProjectPathCheck {
+  serverId: string
+  requestedPath: string
+  suggestedPath: string
+  exists: boolean
+  isDirectory: boolean
+  sizeBytes: number
+  fileCount: number
+  modifiedAt?: number | null
+  matches: string[]
+  error?: string | null
+}
+
+export interface ProjectSyncResult {
+  projectId: string
+  targetServerId: string
+  transferredBytes: number
+  message: string
+}
+
+export interface ProjectSyncProgress {
+  projectId: string
+  targetServerId: string
+  transferredBytes: number
+  resumedBytes: number
+  totalBytes: number
+  startedAt: number
+  state: 'preparing' | 'transferring' | 'publishing'
 }

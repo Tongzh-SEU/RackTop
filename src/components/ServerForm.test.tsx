@@ -39,5 +39,14 @@ describe('ServerForm onboarding', () => {
     expect(markup).toContain('优先使用 SSH Agent')
     expect(markup).toContain('改用 SSH Agent（推荐）')
     expect(markup).not.toContain('使用 SSH 私钥（推荐）')
+    expect(markup).not.toContain('SSH 密钥快速配置')
+  })
+
+  it('only shows quick setup for SSH Agent authentication', () => {
+    const privateKeyMarkup = renderToStaticMarkup(<ServerForm {...handlers} showGuide={false} initial={{ authMethod: 'privateKey' }} />)
+    const sshConfigMarkup = renderToStaticMarkup(<ServerForm {...handlers} showGuide={false} initial={{ authMethod: 'sshConfig' }} />)
+
+    expect(privateKeyMarkup).not.toContain('SSH 密钥快速配置')
+    expect(sshConfigMarkup).not.toContain('SSH 密钥快速配置')
   })
 })

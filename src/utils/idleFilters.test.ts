@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Server, Snapshot } from '../types/models'
+import type { HistoryPoint, Server, Snapshot } from '../types/models'
 import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, idleFilterSummaryParts, normalizeIdleFilters, parseIdleFilters, rankIdleGpuItems } from './idleFilters'
 
 const server: Server = {
@@ -59,5 +59,62 @@ describe('idle filters', () => {
     }
     const items = rankIdleGpuItems([server], { [server.id]: unavailableSnapshot }, {}, DEFAULT_IDLE_FILTERS)
     expect(items.map((item) => item.gpu.uuid)).toEqual(['gpu-0'])
+  })
+
+  it('requires a complete duration window with anonymous process coverage', () => {
+    const durationSnapshot = { ...snapshot, timestamp: 10_000 }
+    const snapshots = { [server.id]: durationSnapshot }
+    const fullHistory = Array.from({ length: 61 }, (_, index) => ({
+      timestamp: durationSnapshot.timestamp - (60 - index) * 60,
+      cpuUtilization: 0,
+      memoryUtilization: 25,
+      swapUtilization: 0,
+      gpuUtilizations: { 'gpu-0': 0 },
+      gpuMemoryUtilizations: { 'gpu-0': 8 },
+      gpuOtherUserOccupancies: { 'gpu-0': false },
+    }))
+    const filters = { ...DEFAULT_IDLE_FILTERS, duration: 60 }
+
+    expect(rankIdleGpuItems([server], snapshots, { [server.id]: fullHistory }, filters)[0].available).toBe(true)
+    expect(rankIdleGpuItems([server], snapshots, { [server.id]: fullHistory.slice(30) }, filters)[0].available).toBe(false)
+  })
+
+  it('rejects occupied or unknown process samples across the duration window', () => {
+    const durationSnapshot = { ...snapshot, timestamp: 10_000 }
+    const snapshots = { [server.id]: durationSnapshot }
+    const fullHistory = Array.from({ length: 61 }, (_, index) => ({
+      timestamp: durationSnapshot.timestamp - (60 - index) * 60,
+      cpuUtilization: 0,
+      memoryUtilization: 25,
+      swapUtilization: 0,
+      gpuUtilizations: { 'gpu-0': 0 },
+      gpuMemoryUtilizations: { 'gpu-0': 8 },
+      gpuOtherUserOccupancies: { 'gpu-0': index === 30 },
+    }))
+    const filters = { ...DEFAULT_IDLE_FILTERS, duration: 60 }
+
+    expect(rankIdleGpuItems([server], snapshots, { [server.id]: fullHistory }, filters)[0].available).toBe(false)
+    const unknownHistory = fullHistory.map((point) => ({ ...point, gpuOtherUserOccupancies: undefined }))
+    expect(rankIdleGpuItems([server], snapshots, { [server.id]: unknownHistory }, filters)[0].available).toBe(false)
+    expect(rankIdleGpuItems([server], snapshots, { [server.id]: unknownHistory }, { ...filters, otherUserProcess: 'all' })[0].available).toBe(true)
+  })
+
+  it('accepts sparse process samples when they cover the requested window', () => {
+    const durationSnapshot = { ...snapshot, timestamp: 10_000 }
+    const snapshots = { [server.id]: durationSnapshot }
+    const history: HistoryPoint[] = Array.from({ length: 151 }, (_, index) => ({
+      timestamp: durationSnapshot.timestamp - (150 - index) * 2,
+      cpuUtilization: 0,
+      memoryUtilization: 25,
+      swapUtilization: 0,
+      gpuUtilizations: { 'gpu-0': 0 },
+      gpuMemoryUtilizations: { 'gpu-0': 8 },
+      gpuOtherUserOccupancies: index % 4 === 0 ? { 'gpu-0': false } : undefined,
+    }))
+    const filters = { ...DEFAULT_IDLE_FILTERS, duration: 5 }
+
+    expect(rankIdleGpuItems([server], snapshots, { [server.id]: history }, filters)[0].available).toBe(true)
+    const staleProcessHistory = history.map((point, index) => ({ ...point, gpuOtherUserOccupancies: index < 110 ? point.gpuOtherUserOccupancies : undefined }))
+    expect(rankIdleGpuItems([server], snapshots, { [server.id]: staleProcessHistory }, filters)[0].available).toBe(false)
   })
 })

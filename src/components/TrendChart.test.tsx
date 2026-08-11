@@ -73,9 +73,25 @@ describe('TrendChart series identity', () => {
   })
 
   it('keeps regular ten minute tier points connected while preserving a peak range', () => {
-    const tiered = Array.from({ length: 4 }, (_, index) => ({ ...points[0], timestamp: 1 + index * 10 * 60, cpuMin: 5, cpuMax: 80 }))
+    const tiered = Array.from({ length: 4 }, (_, index) => ({ ...points[0], timestamp: 1 + index * 10 * 60, isCompacted: true, cpuMin: 5, cpuMax: 80 }))
     renderToStaticMarkup(<TrendChart points={tiered} snapshot={snapshot} mode="cpu" />)
     expect(trendSeriesData(tiered, (point) => point.cpuUtilization)).toHaveLength(4)
     expect(captured.option?.series.find((series) => series.id === 'cpu-utilization:range-span')?.data?.[0]).toEqual([1_000, 75])
+  })
+
+  it('keeps compacted history connected when recent raw samples dominate the median interval', () => {
+    const tiered = Array.from({ length: 6 }, (_, index) => ({ ...points[0], timestamp: 1 + index * 10 * 60, isCompacted: true }))
+    const raw = Array.from({ length: 20 }, (_, index) => ({ ...points[0], timestamp: 1 + 5 * 10 * 60 + (index + 1) * 10 }))
+    const mixed = [...tiered, ...raw]
+    expect(trendSeriesData(mixed, (point) => point.cpuUtilization)).toHaveLength(mixed.length)
+    expect(missingTimeRanges(mixed)).toEqual([])
+  })
+
+  it('calculates the gap distribution once when rendering thousands of raw samples', () => {
+    const dense = Array.from({ length: 2_400 }, (_, index) => ({ ...points[0], timestamp: 1 + index * 5 }))
+    const sort = vi.spyOn(Array.prototype, 'sort')
+    renderToStaticMarkup(<TrendChart points={dense} snapshot={snapshot} mode="cpu" />)
+    expect(sort).toHaveBeenCalledTimes(1)
+    sort.mockRestore()
   })
 })

@@ -1,9 +1,10 @@
-use crate::models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Server, ServerDraft, Snapshot, UsageDistribution, UsagePoint, UsageUserAggregate};
+use crate::models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Project, ProjectDraft, ProjectTarget, Server, ServerDraft, Snapshot, UsageDistribution, UsagePoint, UsageUserAggregate};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
@@ -22,6 +23,7 @@ pub struct RemoteCleanupTask {
 pub struct Database {
     connection: Mutex<Connection>,
     session_passwords: Mutex<HashMap<String, String>>,
+    credential_errors: Mutex<HashMap<String, String>>,
     path: PathBuf,
 }
 
@@ -157,6 +159,70 @@ fn insert_compacted_trend(connection: &Connection, server_id: &str, timestamp: i
         params![server_id, timestamp, bucket.cpu_sum / samples, bucket.memory_sum / samples, bucket.swap_sum / samples, serde_json::to_string(&gpu_utilizations).map_err(|error| error.to_string())?, serde_json::to_string(&gpu_memory_utilizations).map_err(|error| error.to_string())?, serde_json::to_string(&range).map_err(|error| error.to_string())?],
     ).map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn trend_history_point(timestamp: i64, bucket: TrendHistoryBucket) -> HistoryPoint {
+    let samples = bucket.sample_count.max(1) as f64;
+    let gpu_utilizations = bucket.gpu_utilization_sums.iter().filter_map(|(uuid, sum)| {
+        let count = bucket.gpu_utilization_counts.get(uuid).copied().unwrap_or_default();
+        (count > 0).then_some((uuid.clone(), sum / count as f64))
+    }).collect();
+    let gpu_memory_utilizations = bucket.gpu_memory_sums.iter().filter_map(|(uuid, sum)| {
+        let count = bucket.gpu_memory_counts.get(uuid).copied().unwrap_or_default();
+        (count > 0).then_some((uuid.clone(), sum / count as f64))
+    }).collect();
+    HistoryPoint {
+        timestamp,
+        is_compacted: true,
+        cpu_utilization: bucket.cpu_sum / samples,
+        memory_utilization: bucket.memory_sum / samples,
+        swap_utilization: bucket.swap_sum / samples,
+        cpu_min: bucket.cpu_min.unwrap_or_default(),
+        cpu_max: bucket.cpu_max.unwrap_or_default(),
+        memory_min: bucket.memory_min.unwrap_or_default(),
+        memory_max: bucket.memory_max.unwrap_or_default(),
+        swap_min: bucket.swap_min.unwrap_or_default(),
+        swap_max: bucket.swap_max.unwrap_or_default(),
+        gpu_mins: bucket.gpu_mins,
+        gpu_maxes: bucket.gpu_maxes,
+        gpu_memory_mins: bucket.gpu_memory_mins,
+        gpu_memory_maxes: bucket.gpu_memory_maxes,
+        gpu_utilizations,
+        gpu_memory_utilizations,
+        gpu_other_user_occupancies: HashMap::new(),
+    }
+}
+
+fn gpu_other_user_occupancies(snapshot: &Snapshot) -> HashMap<String, bool> {
+    if !snapshot.processes_sampled { return HashMap::new(); }
+    snapshot.gpus.iter().map(|gpu| {
+        let other_user_memory_mb = snapshot.processes.iter().filter(|process| {
+            process.gpu_uuid == gpu.uuid && !process.is_current_user && is_attributable_gpu_process(&process.username, &process.command)
+        }).map(|process| process.memory_used_mb.max(0.0)).sum::<f64>();
+        let occupied = gpu.memory_total_mb > 0.0 && other_user_memory_mb / gpu.memory_total_mb * 100.0 > 3.0;
+        (gpu.uuid.clone(), occupied)
+    }).collect()
+}
+
+fn backfill_gpu_occupancy_history(connection: &mut Connection) -> Result<(), String> {
+    let rows = {
+        let mut statement = connection.prepare(
+            "SELECT id,payload_json FROM snapshots WHERE gpu_other_user_occupancy_json='{}' AND timestamp>=COALESCE((SELECT MAX(timestamp) FROM snapshots),0)-?1"
+        ).map_err(|error| error.to_string())?;
+        statement.query_map([RAW_HISTORY_SECONDS], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?.filter_map(Result::ok).collect::<Vec<_>>()
+    };
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    for (id, payload_json) in rows {
+        let Ok(snapshot) = serde_json::from_str::<Snapshot>(&payload_json) else { continue };
+        let occupancy = gpu_other_user_occupancies(&snapshot);
+        if occupancy.is_empty() { continue; }
+        transaction.execute(
+            "UPDATE snapshots SET gpu_other_user_occupancy_json=?2 WHERE id=?1",
+            params![id, serde_json::to_string(&occupancy).map_err(|error| error.to_string())?],
+        ).map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 fn compact_time_bucket(connection: &Connection, server_id: &str, start: i64, end: i64) -> Result<(), String> {
@@ -305,6 +371,74 @@ fn rebuild_hourly_history_buckets(connection: &mut Connection) -> Result<(), Str
     transaction.commit().map_err(|error| error.to_string())
 }
 
+fn migrate_projects_to_detached_sources(connection: &mut Connection) -> Result<(), String> {
+    let has_source_foreign_key = {
+        let mut statement = connection.prepare("PRAGMA foreign_key_list(projects)").map_err(|error| error.to_string())?;
+        let rows = statement.query_map([], |_| Ok(())).map_err(|error| error.to_string())?;
+        rows.filter_map(Result::ok).next().is_some()
+    };
+    if !has_source_foreign_key {
+        return Ok(());
+    }
+
+    connection.execute_batch("PRAGMA foreign_keys=OFF;").map_err(|error| error.to_string())?;
+    let migration = connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         ALTER TABLE projects RENAME TO projects_with_source_fk;
+         CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            source_server_id TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            source_exists INTEGER NOT NULL DEFAULT 0,
+            source_is_directory INTEGER NOT NULL DEFAULT 0,
+            source_size_bytes INTEGER NOT NULL DEFAULT 0,
+            source_file_count INTEGER NOT NULL DEFAULT 0,
+            source_modified_at INTEGER,
+            dataset_ids_json TEXT NOT NULL DEFAULT '[]',
+            targets_json TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            last_sync_at INTEGER,
+            status TEXT NOT NULL DEFAULT 'unknown',
+            last_error TEXT
+         );
+         INSERT INTO projects SELECT id,name,kind,source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,source_modified_at,dataset_ids_json,targets_json,created_at,updated_at,last_sync_at,status,last_error FROM projects_with_source_fk;
+         DROP TABLE projects_with_source_fk;
+         CREATE INDEX idx_projects_updated ON projects(updated_at DESC);
+         INSERT OR REPLACE INTO storage_migrations(key,applied_at) VALUES('projects-detached-source-v1',unixepoch());
+         COMMIT;",
+    );
+    if let Err(error) = migration {
+        let _ = connection.execute_batch("ROLLBACK; PRAGMA foreign_keys=ON;");
+        return Err(error.to_string());
+    }
+    connection.execute_batch("PRAGMA foreign_keys=ON;").map_err(|error| error.to_string())
+}
+
+fn recover_interrupted_project_syncs(connection: &Connection) -> Result<(), String> {
+    let rows = {
+        let mut statement = connection.prepare("SELECT id,targets_json FROM projects WHERE status='syncing' OR targets_json LIKE '%\"status\":\"syncing\"%'").map_err(|error| error.to_string())?;
+        statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+    };
+    for (project_id, targets_json) in rows {
+        let mut targets: Vec<ProjectTarget> = serde_json::from_str(&targets_json).map_err(|error| format!("无法恢复项目 {project_id} 的同步状态：{error}"))?;
+        let mut changed = false;
+        for target in &mut targets {
+            if target.status == "syncing" {
+                target.status = "paused".into();
+                target.error = Some("上次同步被中断，可继续同步".into());
+                changed = true;
+            }
+        }
+        if changed {
+            connection.execute("UPDATE projects SET targets_json=?2,status='unknown',last_error=?3 WHERE id=?1", params![project_id, serde_json::to_string(&targets).map_err(|error| error.to_string())?, "上次同步被中断"]).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 impl Database {
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
@@ -334,7 +468,8 @@ impl Database {
                     auth_method TEXT NOT NULL DEFAULT 'sshAgent',
                     status TEXT NOT NULL DEFAULT 'unknown',
                     last_error TEXT,
-                    last_seen_at INTEGER
+                    last_seen_at INTEGER,
+                    credential_storage_state TEXT NOT NULL DEFAULT 'none'
                  );
                  CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -345,6 +480,7 @@ impl Database {
                     swap_utilization REAL NOT NULL DEFAULT 0,
                     gpu_json TEXT NOT NULL,
                     gpu_memory_json TEXT NOT NULL DEFAULT '{}',
+                    gpu_other_user_occupancy_json TEXT NOT NULL DEFAULT '{}',
                     payload_json TEXT NOT NULL,
                     FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
                  );
@@ -388,6 +524,26 @@ impl Database {
                     PRIMARY KEY(server_id,timestamp,gpu_uuid,username),
                     FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
                  );
+                 CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    source_server_id TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    source_exists INTEGER NOT NULL DEFAULT 0,
+                    source_is_directory INTEGER NOT NULL DEFAULT 0,
+                    source_size_bytes INTEGER NOT NULL DEFAULT 0,
+                    source_file_count INTEGER NOT NULL DEFAULT 0,
+                    source_modified_at INTEGER,
+                    dataset_ids_json TEXT NOT NULL DEFAULT '[]',
+                    targets_json TEXT NOT NULL DEFAULT '[]',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    last_sync_at INTEGER,
+                    status TEXT NOT NULL DEFAULT 'unknown',
+                    last_error TEXT
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_projects_updated ON projects(updated_at DESC);
                  CREATE INDEX IF NOT EXISTS idx_usage_lookup ON usage_buckets(server_id,timestamp);",
             )
             .map_err(|error| error.to_string())?;
@@ -421,6 +577,10 @@ impl Database {
         if !snapshot_columns.contains("swap_utilization") {
             connection.execute("ALTER TABLE snapshots ADD COLUMN swap_utilization REAL NOT NULL DEFAULT 0", []).map_err(|error| error.to_string())?;
         }
+        if !snapshot_columns.contains("gpu_other_user_occupancy_json") {
+            connection.execute("ALTER TABLE snapshots ADD COLUMN gpu_other_user_occupancy_json TEXT NOT NULL DEFAULT '{}'", []).map_err(|error| error.to_string())?;
+            backfill_gpu_occupancy_history(&mut connection)?;
+        }
         let server_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(servers)").map_err(|error| error.to_string())?;
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
@@ -438,6 +598,10 @@ impl Database {
         if !server_columns.contains("sort_order") {
             connection.execute("ALTER TABLE servers ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0", []).map_err(|error| error.to_string())?;
         }
+        if !server_columns.contains("credential_storage_state") {
+            connection.execute("ALTER TABLE servers ADD COLUMN credential_storage_state TEXT NOT NULL DEFAULT 'none'", []).map_err(|error| error.to_string())?;
+            connection.execute("UPDATE servers SET credential_storage_state='enabled' WHERE auth_method='password'", []).map_err(|error| error.to_string())?;
+        }
         let reservation_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(idle_reservations)").map_err(|error| error.to_string())?;
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
@@ -449,6 +613,18 @@ impl Database {
         if !reservation_columns.contains("pending_confirmation_gpu_keys_json") {
             connection.execute("ALTER TABLE idle_reservations ADD COLUMN pending_confirmation_gpu_keys_json TEXT NOT NULL DEFAULT '[]'", []).map_err(|error| error.to_string())?;
         }
+        let project_columns = {
+            let mut statement = connection.prepare("PRAGMA table_info(projects)").map_err(|error| error.to_string())?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
+            columns.filter_map(Result::ok).collect::<HashSet<_>>()
+        };
+        if !project_columns.contains("dataset_ids_json") {
+            connection.execute("ALTER TABLE projects ADD COLUMN dataset_ids_json TEXT NOT NULL DEFAULT '[]'", []).map_err(|error| error.to_string())?;
+        }
+        if !project_columns.contains("source_modified_at") {
+            connection.execute("ALTER TABLE projects ADD COLUMN source_modified_at INTEGER", []).map_err(|error| error.to_string())?;
+        }
+        migrate_projects_to_detached_sources(&mut connection)?;
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS local_usage_minutes (
                 server_id TEXT NOT NULL,
@@ -475,7 +651,8 @@ impl Database {
                 connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;").map_err(|error| error.to_string())?;
             }
         }
-        Ok(Self { connection: Mutex::new(connection), session_passwords: Mutex::new(HashMap::new()), path: path.to_path_buf() })
+        recover_interrupted_project_syncs(&connection)?;
+        Ok(Self { connection: Mutex::new(connection), session_passwords: Mutex::new(HashMap::new()), credential_errors: Mutex::new(HashMap::new()), path: path.to_path_buf() })
     }
 
     pub fn storage_size_bytes(&self) -> u64 {
@@ -524,6 +701,9 @@ impl Database {
         if draft.host.trim().is_empty() || draft.username.trim().is_empty() {
             return Err("主机地址和用户名不能为空".into());
         }
+        if draft.auth_method == "password" && draft.id.is_none() && draft.password.as_deref().is_none_or(|value| value.trim().is_empty()) {
+            return Err("使用密码认证时必须输入 SSH 密码".into());
+        }
         if draft.port == 0 {
             return Err("SSH 端口必须在 1–65535 之间".into());
         }
@@ -550,11 +730,19 @@ impl Database {
         if draft.auth_method == "password" {
             if let Some(password) = draft.password.filter(|value| !value.is_empty()) {
                 self.session_passwords.lock().map_err(|error| error.to_string())?.insert(id.clone(), password.clone());
+                self.credential_errors.lock().map_err(|error| error.to_string())?.remove(&id);
                 if draft.save_password {
                     let entry = keyring::Entry::new("com.racktop.desktop", &id).map_err(|error| error.to_string())?;
                     entry.set_password(&password).map_err(|error| format!("无法写入系统安全凭据存储：{error}"))?;
+                    self.set_credential_storage_state(&id, "enabled")?;
+                } else {
+                    self.set_credential_storage_state(&id, "none")?;
                 }
             }
+        } else {
+            self.session_passwords.lock().map_err(|error| error.to_string())?.remove(&id);
+            self.credential_errors.lock().map_err(|error| error.to_string())?.remove(&id);
+            self.set_credential_storage_state(&id, "none")?;
         }
         self.get_server(&id)
     }
@@ -573,13 +761,37 @@ impl Database {
     }
 
     pub fn delete_server_record(&self, id: &str, delete_credential: bool) -> Result<(), String> {
-        let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        connection.execute("DELETE FROM servers WHERE id=?1", [id]).map_err(|error| error.to_string())?;
-        if delete_credential {
+        let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let auth_method = connection.query_row("SELECT auth_method FROM servers WHERE id=?1", [id], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let projects = {
+            let mut statement = transaction.prepare("SELECT id,source_server_id,targets_json FROM projects").map_err(|error| error.to_string())?;
+            statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+        };
+        for (project_id, source_server_id, targets_json) in projects {
+            let mut targets: Vec<ProjectTarget> = serde_json::from_str(&targets_json).map_err(|error| format!("无法读取项目 {project_id} 的目标服务器配置：{error}"))?;
+            let previous_target_count = targets.len();
+            targets.retain(|target| target.server_id != id);
+            let removed_target = targets.len() != previous_target_count;
+            let removed_source = source_server_id == id;
+            if removed_target || removed_source {
+                transaction.execute(
+                    "UPDATE projects SET targets_json=?2,source_exists=CASE WHEN ?3 THEN 0 ELSE source_exists END,status=CASE WHEN ?3 THEN 'error' ELSE 'unknown' END,last_error=CASE WHEN ?3 THEN '主服务器已移除' ELSE NULL END,updated_at=unixepoch() WHERE id=?1",
+                    params![project_id, serde_json::to_string(&targets).map_err(|error| error.to_string())?, removed_source],
+                ).map_err(|error| error.to_string())?;
+            }
+        }
+        transaction.execute("DELETE FROM servers WHERE id=?1", [id]).map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        drop(connection);
+        if delete_credential && auth_method.as_deref() == Some("password") {
             if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", id) {
                 let _ = entry.delete_credential();
             }
+        }
+        if delete_credential {
             self.session_passwords.lock().map_err(|error| error.to_string())?.remove(id);
+            self.credential_errors.lock().map_err(|error| error.to_string())?.remove(id);
         }
         Ok(())
     }
@@ -611,27 +823,70 @@ impl Database {
         Ok(())
     }
 
-    pub fn finish_remote_cleanup(&self, server_id: &str) -> Result<(), String> {
+    pub fn finish_remote_cleanup(&self, server_id: &str, delete_credential: bool) -> Result<(), String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         connection.execute("DELETE FROM remote_cleanup_queue WHERE server_id=?1", [server_id]).map_err(|error| error.to_string())?;
         drop(connection);
-        if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", server_id) {
-            let _ = entry.delete_credential();
+        if delete_credential {
+            if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", server_id) {
+                let _ = entry.delete_credential();
+            }
         }
         self.session_passwords.lock().map_err(|error| error.to_string())?.remove(server_id);
+        self.credential_errors.lock().map_err(|error| error.to_string())?.remove(server_id);
         Ok(())
     }
 
-    pub fn get_password(&self, id: &str) -> Result<Option<String>, String> {
+    pub fn get_password(&self, id: &str, allow_prompt: bool) -> Result<Option<String>, String> {
         if let Some(password) = self.session_passwords.lock().map_err(|error| error.to_string())?.get(id).cloned() {
             return Ok(Some(password));
         }
+        let credential_state = self.credential_storage_state(id)?;
+        if credential_state == "denied" && !allow_prompt {
+            return Err("系统钥匙串访问已被拒绝；请在服务器详情页手动重新连接".into());
+        }
+        if credential_state == "none" {
+            return Ok(None);
+        }
+        if !allow_prompt {
+            if let Some(error) = self.credential_errors.lock().map_err(|error| error.to_string())?.get(id).cloned() {
+                return Err(error);
+            }
+        } else {
+            self.credential_errors.lock().map_err(|error| error.to_string())?.remove(id);
+        }
+        if let Some(error) = self.credential_errors.lock().map_err(|error| error.to_string())?.get(id).cloned() {
+            return Err(error);
+        }
         let entry = keyring::Entry::new("com.racktop.desktop", id).map_err(|error| error.to_string())?;
         match entry.get_password() {
-            Ok(password) => Ok(Some(password)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(format!("无法读取系统安全凭据：{error}")),
+            Ok(password) => {
+                self.session_passwords.lock().map_err(|error| error.to_string())?.insert(id.to_string(), password.clone());
+                self.set_credential_storage_state(id, "enabled")?;
+                Ok(Some(password))
+            }
+            Err(keyring::Error::NoEntry) => {
+                self.set_credential_storage_state(id, "none")?;
+                Ok(None)
+            }
+            Err(error) => {
+                let message = format!("无法读取系统安全凭据：{error}");
+                self.set_credential_storage_state(id, "denied")?;
+                self.credential_errors.lock().map_err(|lock_error| lock_error.to_string())?.insert(id.to_string(), message.clone());
+                Err(message)
+            }
         }
+    }
+
+    fn credential_storage_state(&self, id: &str) -> Result<String, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection.query_row("SELECT credential_storage_state FROM servers WHERE id=?1", [id], |row| row.get(0)).map_err(|error| error.to_string())
+    }
+
+    fn set_credential_storage_state(&self, id: &str, state: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection.execute("UPDATE servers SET credential_storage_state=?2 WHERE id=?1", params![id, state]).map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     pub fn update_status(&self, id: &str, status: &str, error: Option<&str>, timestamp: Option<i64>) -> Result<(), String> {
@@ -648,6 +903,7 @@ impl Database {
         let swap_utilization = if snapshot.system.swap_total_bytes > 0 { snapshot.system.swap_used_bytes as f64 / snapshot.system.swap_total_bytes as f64 * 100.0 } else { 0.0 };
         let gpu_map: HashMap<String, f64> = snapshot.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.utilization)).collect();
         let gpu_memory_map: HashMap<String, f64> = snapshot.gpus.iter().map(|gpu| (gpu.uuid.clone(), if gpu.memory_total_mb > 0.0 { (gpu.memory_used_mb / gpu.memory_total_mb * 100.0).clamp(0.0, 100.0) } else { 0.0 })).collect();
+        let gpu_occupancy_map = gpu_other_user_occupancies(snapshot);
         let next_sample = StoredHistorySample { cpu_utilization: snapshot.system.cpu_utilization, memory_utilization, gpu_utilizations: gpu_map, gpu_memory_utilizations: gpu_memory_map };
         let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
         let transaction = connection.transaction().map_err(|error| error.to_string())?;
@@ -662,9 +918,9 @@ impl Database {
             }),
         ).optional().map_err(|error| error.to_string())?;
         transaction.execute(
-            "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
-             ON CONFLICT(server_id,timestamp) DO UPDATE SET cpu_utilization=excluded.cpu_utilization,memory_utilization=excluded.memory_utilization,swap_utilization=excluded.swap_utilization,gpu_json=excluded.gpu_json,gpu_memory_json=excluded.gpu_memory_json,payload_json=excluded.payload_json",
-            params![snapshot.server_id, snapshot.timestamp, next_sample.cpu_utilization, next_sample.memory_utilization, swap_utilization, serde_json::to_string(&next_sample.gpu_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(&next_sample.gpu_memory_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(snapshot).map_err(|error| error.to_string())?],
+            "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,gpu_other_user_occupancy_json,payload_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(server_id,timestamp) DO UPDATE SET cpu_utilization=excluded.cpu_utilization,memory_utilization=excluded.memory_utilization,swap_utilization=excluded.swap_utilization,gpu_json=excluded.gpu_json,gpu_memory_json=excluded.gpu_memory_json,gpu_other_user_occupancy_json=excluded.gpu_other_user_occupancy_json,payload_json=excluded.payload_json",
+            params![snapshot.server_id, snapshot.timestamp, next_sample.cpu_utilization, next_sample.memory_utilization, swap_utilization, serde_json::to_string(&next_sample.gpu_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(&next_sample.gpu_memory_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(&gpu_occupancy_map).unwrap_or_else(|_| "{}".into()), serde_json::to_string(snapshot).map_err(|error| error.to_string())?],
         ).map_err(|error| error.to_string())?;
         update_hourly_history_bucket(&transaction, &snapshot.server_id, snapshot.timestamp, previous.as_ref(), &next_sample)?;
         compact_completed_tiers(&transaction, &snapshot.server_id, snapshot.timestamp)?;
@@ -691,8 +947,8 @@ impl Database {
         let mut imported_points = Vec::new();
         {
             let mut statement = transaction.prepare(
-                "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,'{}') ON CONFLICT(server_id,timestamp) DO NOTHING"
+                "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,gpu_other_user_occupancy_json,payload_json)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'{}') ON CONFLICT(server_id,timestamp) DO NOTHING"
             ).map_err(|error| error.to_string())?;
             for point in points.iter().filter(|point| point.timestamp >= cutoff) {
                 let inserted = statement.execute(params![
@@ -703,6 +959,7 @@ impl Database {
                     point.swap_utilization,
                     serde_json::to_string(&point.gpu_utilizations).map_err(|error| error.to_string())?,
                     serde_json::to_string(&point.gpu_memory_utilizations).map_err(|error| error.to_string())?,
+                    serde_json::to_string(&point.gpu_other_user_occupancies).map_err(|error| error.to_string())?,
                 ]).map_err(|error| error.to_string())?;
                 imported += inserted;
                 if inserted > 0 { imported_points.push(point); }
@@ -815,21 +1072,40 @@ impl Database {
 
     pub fn get_history(&self, server_id: &str, from_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,gpu_other_user_occupancy_json,payload_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
         let rows = statement.query_map(params![server_id, from_timestamp], |row| {
             let gpu_json: String = row.get(4)?;
             let gpu_memory_json: String = row.get(5)?;
-            let payload_json: String = row.get(6)?;
+            let gpu_other_user_occupancy_json: String = row.get(6)?;
+            let payload_json: String = row.get(7)?;
             let cpu_utilization = row.get(1)?;
             let memory_utilization = row.get(2)?;
             let swap_utilization = row.get(3)?;
             let gpu_utilizations: HashMap<String, f64> = serde_json::from_str(&gpu_json).unwrap_or_default();
             let gpu_memory_utilizations: HashMap<String, f64> = serde_json::from_str(&gpu_memory_json).unwrap_or_default();
+            let gpu_other_user_occupancies: HashMap<String, bool> = serde_json::from_str(&gpu_other_user_occupancy_json).unwrap_or_default();
             let range: CompactedHistoryRange = serde_json::from_str(&payload_json).unwrap_or_default();
             let compacted = range.history_range_version == 1;
-            Ok(HistoryPoint { timestamp: row.get(0)?, cpu_utilization, memory_utilization, swap_utilization, cpu_min: if compacted { range.cpu_min } else { cpu_utilization }, cpu_max: if compacted { range.cpu_max } else { cpu_utilization }, memory_min: if compacted { range.memory_min } else { memory_utilization }, memory_max: if compacted { range.memory_max } else { memory_utilization }, swap_min: if compacted { range.swap_min } else { swap_utilization }, swap_max: if compacted { range.swap_max } else { swap_utilization }, gpu_mins: if compacted { range.gpu_mins } else { gpu_utilizations.clone() }, gpu_maxes: if compacted { range.gpu_maxes } else { gpu_utilizations.clone() }, gpu_memory_mins: if compacted { range.gpu_memory_mins } else { gpu_memory_utilizations.clone() }, gpu_memory_maxes: if compacted { range.gpu_memory_maxes } else { gpu_memory_utilizations.clone() }, gpu_utilizations, gpu_memory_utilizations })
+            Ok(HistoryPoint { timestamp: row.get(0)?, is_compacted: compacted, cpu_utilization, memory_utilization, swap_utilization, cpu_min: if compacted { range.cpu_min } else { cpu_utilization }, cpu_max: if compacted { range.cpu_max } else { cpu_utilization }, memory_min: if compacted { range.memory_min } else { memory_utilization }, memory_max: if compacted { range.memory_max } else { memory_utilization }, swap_min: if compacted { range.swap_min } else { swap_utilization }, swap_max: if compacted { range.swap_max } else { swap_utilization }, gpu_mins: if compacted { range.gpu_mins } else { gpu_utilizations.clone() }, gpu_maxes: if compacted { range.gpu_maxes } else { gpu_utilizations.clone() }, gpu_memory_mins: if compacted { range.gpu_memory_mins } else { gpu_memory_utilizations.clone() }, gpu_memory_maxes: if compacted { range.gpu_memory_maxes } else { gpu_memory_utilizations.clone() }, gpu_utilizations, gpu_memory_utilizations, gpu_other_user_occupancies })
         }).map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
+    pub fn get_compacted_history(&self, server_id: &str, from_timestamp: i64, bucket_seconds: i64) -> Result<Vec<HistoryPoint>, String> {
+        let bucket_seconds = bucket_seconds.max(60);
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut buckets: BTreeMap<i64, TrendHistoryBucket> = BTreeMap::new();
+        let mut statement = connection.prepare(
+            "SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement.query_map(params![server_id, from_timestamp], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?, row.get::<_, f64>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?))
+        }).map_err(|error| error.to_string())?;
+        for row in rows {
+            let (timestamp, cpu, memory, swap, gpu_json, gpu_memory_json, payload_json) = row.map_err(|error| error.to_string())?;
+            add_trend_sample(buckets.entry(bucket_start(timestamp, bucket_seconds)).or_default(), cpu, memory, swap, &gpu_json, &gpu_memory_json, &payload_json);
+        }
+        Ok(buckets.into_iter().map(|(timestamp, bucket)| trend_history_point(timestamp, bucket)).collect())
     }
 
     pub fn get_history_heatmap(&self, server_id: &str, from_timestamp: i64, timezone_offset_seconds: i64, gpu_uuids: &[String]) -> Result<Vec<HistoryHeatmapPoint>, String> {
@@ -952,10 +1228,187 @@ impl Database {
         connection.execute("DELETE FROM idle_reservations WHERE id=?1", [id]).map_err(|error| error.to_string())?;
         Ok(())
     }
+
+    pub fn list_projects(&self) -> Result<Vec<Project>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT id,name,kind,source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,source_modified_at,dataset_ids_json,targets_json,created_at,updated_at,last_sync_at,status,last_error FROM projects ORDER BY CASE kind WHEN 'project' THEN 0 ELSE 1 END, updated_at DESC").map_err(|error| error.to_string())?;
+        let rows = statement.query_map([], |row| {
+            let dataset_ids_json: String = row.get(10)?;
+            let targets_json: String = row.get(11)?;
+            Ok(Project {
+                id: row.get(0)?, name: row.get(1)?, kind: row.get(2)?, source_server_id: row.get(3)?, source_path: row.get(4)?,
+                source_exists: row.get::<_, i64>(5)? != 0, source_is_directory: row.get::<_, i64>(6)? != 0, source_size_bytes: row.get::<_, i64>(7)?.max(0) as u64, source_file_count: row.get::<_, i64>(8)?.max(0) as u64, source_modified_at: row.get(9)?,
+                dataset_ids: serde_json::from_str(&dataset_ids_json).unwrap_or_default(), targets: serde_json::from_str(&targets_json).unwrap_or_default(), created_at: row.get(12)?, updated_at: row.get(13)?, last_sync_at: row.get(14)?, status: row.get(15)?, last_error: row.get(16)?,
+            })
+        }).map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
+    pub fn get_project(&self, project_id: &str) -> Result<Project, String> {
+        self.list_projects()?.into_iter().find(|project| project.id == project_id).ok_or_else(|| "项目不存在".into())
+    }
+
+    pub fn save_project(&self, draft: ProjectDraft) -> Result<Project, String> {
+        let name = draft.name.trim();
+        let source_path = draft.source_path.trim();
+        if name.is_empty() || source_path.is_empty() { return Err("项目名称和主目录不能为空".into()); }
+        if !matches!(draft.kind.as_str(), "project" | "dataset") { return Err("项目类型无效".into()); }
+        if draft.kind == "dataset" && !draft.dataset_ids.is_empty() { return Err("数据集不能附属其他数据集".into()); }
+        let existing_projects = self.list_projects()?;
+        if let Some(existing) = draft.id.as_ref().and_then(|id| existing_projects.iter().find(|project| &project.id == id)) {
+            if existing.kind != draft.kind { return Err("创建后不能修改项目或数据集的类型".into()); }
+        }
+        if dangerous_sync_path(source_path) { return Err("主目录不能是根目录、Home 根目录或包含 ..".into()); }
+        let source_server = self.get_server(&draft.source_server_id)?;
+        for target in &draft.targets {
+            let target_path = target.path.trim();
+            if dangerous_sync_path(target_path) { return Err("目标目录不能是根目录、Home 根目录或包含 ..".into()); }
+            let target_server = self.get_server(&target.server_id)?;
+            if source_server.host.eq_ignore_ascii_case(&target_server.host)
+                && source_server.port == target_server.port
+                && source_server.username == target_server.username
+                && project_paths_overlap(source_path, target_path)
+            {
+                return Err("主目录与目标目录不能在同一服务器上重合或相互包含".into());
+            }
+        }
+        let known_dataset_ids: HashSet<String> = existing_projects.into_iter().filter(|project| project.kind == "dataset").map(|project| project.id).collect();
+        if draft.dataset_ids.iter().any(|dataset_id| !known_dataset_ids.contains(dataset_id)) { return Err("关联数据集不存在或类型无效".into()); }
+        if draft.dataset_ids.iter().collect::<HashSet<_>>().len() != draft.dataset_ids.len() { return Err("关联数据集不能重复".into()); }
+        if draft.targets.iter().any(|target| target.server_id == draft.source_server_id) { return Err("主服务器不能同时作为目标服务器".into()); }
+        if draft.targets.iter().map(|target| &target.server_id).collect::<HashSet<_>>().len() != draft.targets.len() { return Err("目标服务器不能重复".into()); }
+        if draft.targets.iter().any(|target| target.path.trim().is_empty()) { return Err("每个目标服务器都必须指定目录".into()); }
+        let id = draft.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let previous_source: Option<(String, String, i64, i64, i64, i64, Option<i64>)> = connection.query_row("SELECT source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,source_modified_at FROM projects WHERE id=?1", [&id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))).optional().map_err(|error| error.to_string())?;
+        let same_source = previous_source.as_ref().is_some_and(|(server_id, path, ..)| server_id == &draft.source_server_id && path == source_path);
+        let source_exists = if same_source { previous_source.as_ref().map(|value| value.2).unwrap_or(0) } else { 0 };
+        let source_is_directory = if same_source { previous_source.as_ref().map(|value| value.3).unwrap_or(0) } else { 0 };
+        let source_size_bytes = if same_source { previous_source.as_ref().map(|value| value.4).unwrap_or(0) } else { 0 };
+        let source_file_count = if same_source { previous_source.as_ref().map(|value| value.5).unwrap_or(0) } else { 0 };
+        let source_modified_at = if same_source { previous_source.as_ref().and_then(|value| value.6) } else { None };
+        let previous_targets: Vec<ProjectTarget> = connection.query_row("SELECT targets_json FROM projects WHERE id=?1", [&id], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())?.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default();
+        let targets: Vec<ProjectTarget> = draft.targets.into_iter().map(|target| {
+            let previous = same_source.then(|| previous_targets.iter().find(|item| item.server_id == target.server_id && item.path == target.path.trim())).flatten();
+            ProjectTarget { server_id: target.server_id, path: target.path.trim().to_string(), status: previous.map(|item| item.status.clone()).unwrap_or_else(|| "unknown".into()), exists: previous.map(|item| item.exists).unwrap_or(false), is_directory: previous.map(|item| item.is_directory).unwrap_or(false), size_bytes: previous.map(|item| item.size_bytes).unwrap_or(0), file_count: previous.map(|item| item.file_count).unwrap_or(0), modified_at: previous.and_then(|item| item.modified_at), last_checked_at: previous.and_then(|item| item.last_checked_at), last_synced_at: previous.and_then(|item| item.last_synced_at), synced_source_size_bytes: previous.and_then(|item| item.synced_source_size_bytes), synced_source_file_count: previous.and_then(|item| item.synced_source_file_count), synced_source_modified_at: previous.and_then(|item| item.synced_source_modified_at), synced_target_size_bytes: previous.and_then(|item| item.synced_target_size_bytes), synced_target_file_count: previous.and_then(|item| item.synced_target_file_count), synced_target_modified_at: previous.and_then(|item| item.synced_target_modified_at), error: None }
+        }).collect();
+        let targets_json = serde_json::to_string(&targets).map_err(|error| error.to_string())?;
+        let dataset_ids_json = serde_json::to_string(&draft.dataset_ids).map_err(|error| error.to_string())?;
+        connection.execute("INSERT INTO projects(id,name,kind,source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,source_modified_at,dataset_ids_json,targets_json,created_at,updated_at,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'unknown') ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,source_server_id=excluded.source_server_id,source_path=excluded.source_path,source_exists=excluded.source_exists,source_is_directory=excluded.source_is_directory,source_size_bytes=excluded.source_size_bytes,source_file_count=excluded.source_file_count,source_modified_at=excluded.source_modified_at,dataset_ids_json=excluded.dataset_ids_json,targets_json=excluded.targets_json,updated_at=excluded.updated_at", params![id, name, draft.kind, draft.source_server_id, source_path, source_exists, source_is_directory, source_size_bytes, source_file_count, source_modified_at, dataset_ids_json, targets_json, now, now]).map_err(|error| error.to_string())?;
+        if !same_source {
+            connection.execute("UPDATE projects SET status='unknown',last_error=NULL WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
+        }
+        drop(connection);
+        self.list_projects()?.into_iter().find(|project| project.id == id).ok_or_else(|| "保存项目后无法读取项目".into())
+    }
+
+    pub fn update_project_checks(&self, project_id: &str, source_exists: bool, source_is_directory: bool, source_size_bytes: u64, source_file_count: u64, source_modified_at: Option<i64>, targets: &[ProjectTarget], status: &str, error: Option<&str>) -> Result<Project, String> {
+        let targets_json = serde_json::to_string(targets).map_err(|error| error.to_string())?;
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection.execute("UPDATE projects SET source_exists=?2,source_is_directory=?3,source_size_bytes=?4,source_file_count=?5,source_modified_at=?6,targets_json=?7,status=?8,last_error=?9,updated_at=unixepoch() WHERE id=?1", params![project_id, source_exists, source_is_directory, source_size_bytes as i64, source_file_count as i64, source_modified_at, targets_json, status, error]).map_err(|error| error.to_string())?;
+        drop(connection);
+        self.list_projects()?.into_iter().find(|project| project.id == project_id).ok_or_else(|| "项目不存在".into())
+    }
+
+    pub fn mark_project_syncing(&self, project_id: &str, target_server_id: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let project_json: String = connection.query_row("SELECT targets_json FROM projects WHERE id=?1", [project_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+        let mut targets: Vec<ProjectTarget> = serde_json::from_str(&project_json).map_err(|error| error.to_string())?;
+        let target = targets.iter_mut().find(|item| item.server_id == target_server_id).ok_or("目标服务器不属于此项目")?;
+        target.status = "syncing".into();
+        target.error = None;
+        connection.execute("UPDATE projects SET targets_json=?2,status='syncing',last_error=NULL,updated_at=unixepoch() WHERE id=?1", params![project_id, serde_json::to_string(&targets).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn mark_project_sync_failed(&self, project_id: &str, target_server_id: &str, error: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let project_json: String = connection.query_row("SELECT targets_json FROM projects WHERE id=?1", [project_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+        let mut targets: Vec<ProjectTarget> = serde_json::from_str(&project_json).map_err(|error| error.to_string())?;
+        if let Some(target) = targets.iter_mut().find(|item| item.server_id == target_server_id) {
+            target.status = "error".into();
+            target.error = Some(error.chars().take(500).collect());
+        }
+        connection.execute("UPDATE projects SET targets_json=?2,status='error',last_error=?3,updated_at=unixepoch() WHERE id=?1", params![project_id, serde_json::to_string(&targets).map_err(|serialization_error| serialization_error.to_string())?, error.chars().take(500).collect::<String>()]).map_err(|database_error| database_error.to_string())?;
+        Ok(())
+    }
+
+    pub fn mark_project_sync_paused(&self, project_id: &str, target_server_id: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let project_json: String = connection.query_row("SELECT targets_json FROM projects WHERE id=?1", [project_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+        let mut targets: Vec<ProjectTarget> = serde_json::from_str(&project_json).map_err(|error| error.to_string())?;
+        if let Some(target) = targets.iter_mut().find(|item| item.server_id == target_server_id) {
+            target.status = "paused".into();
+            target.error = Some("同步已暂停，可继续同步".into());
+        }
+        connection.execute("UPDATE projects SET targets_json=?2,status='unknown',last_error=?3,updated_at=unixepoch() WHERE id=?1", params![project_id, serde_json::to_string(&targets).map_err(|error| error.to_string())?, "同步已暂停"]).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn mark_project_sync_conflict(&self, project_id: &str, target_server_id: &str, error: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let project_json: String = connection.query_row("SELECT targets_json FROM projects WHERE id=?1", [project_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+        let mut targets: Vec<ProjectTarget> = serde_json::from_str(&project_json).map_err(|error| error.to_string())?;
+        if let Some(target) = targets.iter_mut().find(|item| item.server_id == target_server_id) {
+            target.status = "conflict".into();
+            target.error = Some(error.chars().take(500).collect());
+        }
+        connection.execute("UPDATE projects SET targets_json=?2,status='error',last_error=?3,updated_at=unixepoch() WHERE id=?1", params![project_id, serde_json::to_string(&targets).map_err(|serialization_error| serialization_error.to_string())?, error.chars().take(500).collect::<String>()]).map_err(|database_error| database_error.to_string())?;
+        Ok(())
+    }
+
+    pub fn mark_project_synced(&self, project_id: &str, target_server_id: &str, source_size_bytes: u64, source_file_count: u64, source_modified_at: Option<i64>, target_size_bytes: u64, target_file_count: u64, target_modified_at: Option<i64>, target_is_directory: bool) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
+        let project_json: String = connection.query_row("SELECT targets_json FROM projects WHERE id=?1", [project_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+        let mut targets: Vec<ProjectTarget> = serde_json::from_str(&project_json).map_err(|error| error.to_string())?;
+        if let Some(target) = targets.iter_mut().find(|item| item.server_id == target_server_id) { target.status = "synced".into(); target.exists = true; target.is_directory = target_is_directory; target.size_bytes = target_size_bytes; target.file_count = target_file_count; target.modified_at = target_modified_at; target.last_checked_at = Some(now); target.last_synced_at = Some(now); target.synced_source_size_bytes = Some(source_size_bytes); target.synced_source_file_count = Some(source_file_count); target.synced_source_modified_at = source_modified_at; target.synced_target_size_bytes = Some(target_size_bytes); target.synced_target_file_count = Some(target_file_count); target.synced_target_modified_at = target_modified_at; target.error = None; }
+        let all_synced = targets.iter().all(|target| target.status == "synced");
+        let targets_json = serde_json::to_string(&targets).map_err(|error| error.to_string())?;
+        connection.execute("UPDATE projects SET targets_json=?2,last_sync_at=?3,status=?4,last_error=NULL,updated_at=?3 WHERE id=?1", params![project_id, targets_json, now, if all_synced { "synced" } else { "unknown" }]).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let affected = {
+            let mut statement = connection.prepare("SELECT id,dataset_ids_json FROM projects WHERE kind='project'").map_err(|error| error.to_string())?;
+            statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|error| error.to_string())?.filter_map(Result::ok).filter_map(|(id, json)| {
+                let mut dataset_ids: Vec<String> = serde_json::from_str(&json).ok()?;
+                let previous_len = dataset_ids.len();
+                dataset_ids.retain(|dataset_id| dataset_id != project_id);
+                (dataset_ids.len() != previous_len).then_some((id, dataset_ids))
+            }).collect::<Vec<_>>()
+        };
+        for (id, dataset_ids) in affected {
+            connection.execute("UPDATE projects SET dataset_ids_json=?2,updated_at=unixepoch() WHERE id=?1", params![id, serde_json::to_string(&dataset_ids).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
+        }
+        connection.execute("DELETE FROM projects WHERE id=?1", [project_id]).map_err(|error| error.to_string())?;
+        Ok(())
+    }
 }
 
 fn blank_to_none(value: Option<String>) -> Option<String> {
     value.and_then(|text| { let trimmed = text.trim().to_string(); (!trimmed.is_empty()).then_some(trimmed) })
+}
+
+fn normalized_project_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed == "/" { "/".into() } else { trimmed.trim_end_matches('/').to_string() }
+}
+
+fn project_paths_overlap(left: &str, right: &str) -> bool {
+    let left = normalized_project_path(left);
+    let right = normalized_project_path(right);
+    left == right || right.starts_with(&format!("{left}/")) || left.starts_with(&format!("{right}/"))
+}
+
+fn dangerous_sync_path(path: &str) -> bool {
+    let normalized = path.trim().trim_end_matches('/');
+    normalized.is_empty()
+        || matches!(normalized, "/" | "~" | "$HOME" | "${HOME}" | "." | "..")
+        || normalized.split('/').any(|component| component == "..")
 }
 
 const USAGE_COVERAGE_USER: &str = "__racktop_coverage__";
@@ -1051,6 +1504,44 @@ mod tests {
     }
 
     #[test]
+    fn stores_only_anonymous_other_user_gpu_occupancy_in_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("occupancy.sqlite")).unwrap();
+        let server = db.save_server(draft("Occupancy", 30)).unwrap();
+        let mut sample = snapshot(&server.id, 10_000);
+        sample.gpus = vec![GpuMetric { index: 0, name: "GPU 0".into(), uuid: "GPU-a".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 2_000.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0 }];
+        sample.processes = vec![ProcessMetric { is_current_user: false, ..gpu_process("GPU-a", "alice", "python train.py", 2_000.0) }];
+        db.save_snapshot(&sample).unwrap();
+
+        let history = db.get_history(&server.id, 0).unwrap();
+        assert_eq!(history[0].gpu_other_user_occupancies.get("GPU-a"), Some(&true));
+        let stored: String = db.connection.lock().unwrap().query_row("SELECT gpu_other_user_occupancy_json FROM snapshots", [], |row| row.get(0)).unwrap();
+        assert_eq!(stored, r#"{"GPU-a":true}"#);
+        assert!(!stored.contains("alice"));
+        assert!(!stored.contains("python"));
+    }
+
+    #[test]
+    fn backfills_anonymous_occupancy_from_recent_legacy_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-occupancy.sqlite");
+        let server_id = {
+            let db = Database::open(&path).unwrap();
+            let server = db.save_server(draft("Legacy occupancy", 30)).unwrap();
+            let mut sample = snapshot(&server.id, 10_000);
+            sample.gpus = vec![GpuMetric { index: 0, name: "GPU 0".into(), uuid: "GPU-a".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 2_000.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0 }];
+            sample.processes = vec![ProcessMetric { is_current_user: false, ..gpu_process("GPU-a", "alice", "python train.py", 2_000.0) }];
+            db.save_snapshot(&sample).unwrap();
+            db.connection.lock().unwrap().execute("ALTER TABLE snapshots DROP COLUMN gpu_other_user_occupancy_json", []).unwrap();
+            server.id
+        };
+
+        let reopened = Database::open(&path).unwrap();
+        let history = reopened.get_history(&server_id, 0).unwrap();
+        assert_eq!(history[0].gpu_other_user_occupancies.get("GPU-a"), Some(&true));
+    }
+
+    #[test]
     fn server_round_trip_does_not_store_password() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
@@ -1058,6 +1549,39 @@ mod tests {
         assert_eq!(saved.sampling_interval_seconds, 2);
         assert_eq!(saved.location.as_deref(), Some("Lab 301 / Rack R2"));
         assert_eq!(db.list_servers().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn new_password_server_requires_a_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let result = db.save_server(ServerDraft { auth_method: "password".into(), password: None, ..draft("Password", 30) });
+
+        assert_eq!(result.unwrap_err(), "使用密码认证时必须输入 SSH 密码");
+        assert!(db.list_servers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unsaved_password_does_not_read_the_keychain_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sqlite");
+        let db = Database::open(&path).unwrap();
+        let saved = db.save_server(ServerDraft { auth_method: "password".into(), password: Some("session-only".into()), save_password: false, ..draft("Password", 30) }).unwrap();
+        drop(db);
+
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(reopened.credential_storage_state(&saved.id).unwrap(), "none");
+        assert_eq!(reopened.get_password(&saved.id, false).unwrap(), None);
+    }
+
+    #[test]
+    fn denied_keychain_access_requires_manual_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let saved = db.save_server(draft("Password", 30)).unwrap();
+        db.set_credential_storage_state(&saved.id, "denied").unwrap();
+
+        assert_eq!(db.get_password(&saved.id, false).unwrap_err(), "系统钥匙串访问已被拒绝；请在服务器详情页手动重新连接");
     }
 
     #[test]
@@ -1186,6 +1710,11 @@ mod tests {
         let long = history.iter().find(|point| point.cpu_max == 75.0).unwrap();
         assert!((long.cpu_utilization - 40.0).abs() < 0.01);
         assert_eq!(long.cpu_min, 5.0);
+
+        let uniform = reopened.get_compacted_history(&server_id, 2_000_000 - 36 * 3_600, LONG_HISTORY_BUCKET_SECONDS).unwrap();
+        assert!(uniform.iter().all(|point| point.is_compacted));
+        assert!(uniform.iter().any(|point| point.cpu_max == 90.0));
+        assert!(uniform.iter().any(|point| point.cpu_max == 75.0));
     }
 
     #[test]
@@ -1216,11 +1745,13 @@ mod tests {
         let server = db.save_server(ServerDraft { remote_history_enabled: true, ..draft("Remote", 30) }).unwrap();
         let point = HistoryPoint {
             timestamp: 1_722_700_800,
+            is_compacted: false,
             cpu_utilization: 12.5,
             memory_utilization: 40.0,
             swap_utilization: 3.0,
             gpu_utilizations: HashMap::from([("GPU-a".into(), 80.0)]),
             gpu_memory_utilizations: HashMap::from([("GPU-a".into(), 50.0)]),
+            gpu_other_user_occupancies: HashMap::from([("GPU-a".into(), false)]),
             cpu_min: 12.5, cpu_max: 12.5, memory_min: 40.0, memory_max: 40.0, swap_min: 3.0, swap_max: 3.0,
             gpu_mins: HashMap::from([("GPU-a".into(), 80.0)]), gpu_maxes: HashMap::from([("GPU-a".into(), 80.0)]),
             gpu_memory_mins: HashMap::from([("GPU-a".into(), 50.0)]), gpu_memory_maxes: HashMap::from([("GPU-a".into(), 50.0)]),
@@ -1337,7 +1868,7 @@ mod tests {
         assert_eq!(tasks[0].expires_at, 10_000 + 86_400);
         assert_eq!(tasks[0].managed_public_key.as_deref(), Some("ssh-ed25519 test-key"));
 
-        db.finish_remote_cleanup(&saved.id).unwrap();
+        db.finish_remote_cleanup(&saved.id, false).unwrap();
         assert!(db.list_remote_cleanup_tasks().unwrap().is_empty());
     }
 
@@ -1392,5 +1923,209 @@ mod tests {
             ..draft("Legacy GPU", 30)
         }).unwrap();
         assert_eq!(updated.location.as_deref(), Some("Lab 301 / Rack R2 / U18"));
+    }
+
+    #[test]
+    fn project_round_trip_preserves_target_paths_and_priority() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("projects.sqlite")).unwrap();
+        let source = db.save_server(draft("Source", 30)).unwrap();
+        let target = db.save_server(ServerDraft { host: "10.0.0.2".into(), ..draft("Target", 30) }).unwrap();
+        let dataset = db.save_project(ProjectDraft {
+            id: None,
+            name: "Shared data".into(),
+            kind: "dataset".into(),
+            source_server_id: source.id.clone(),
+            source_path: "~/datasets/shared".into(),
+            dataset_ids: vec![],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: target.id.clone(), path: "~/datasets/shared-copy".into() }],
+        }).unwrap();
+        let project = db.save_project(ProjectDraft {
+            id: None,
+            name: "Training".into(),
+            kind: "project".into(),
+            source_server_id: source.id,
+            source_path: "~/training".into(),
+            dataset_ids: vec![dataset.id.clone()],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: target.id, path: "~/training".into() }],
+        }).unwrap();
+
+        let projects = db.list_projects().unwrap();
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0].id, project.id);
+        assert_eq!(projects[0].dataset_ids, vec![dataset.id.clone()]);
+        assert_eq!(projects[1].id, dataset.id);
+        assert_eq!(projects[1].targets[0].path, "~/datasets/shared-copy");
+
+        db.delete_project(&dataset.id).unwrap();
+        let remaining = db.list_projects().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].dataset_ids.is_empty());
+    }
+
+    #[test]
+    fn changing_project_source_invalidates_previous_sync_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("project-source-change.sqlite")).unwrap();
+        let source = db.save_server(draft("Source", 30)).unwrap();
+        let replacement = db.save_server(ServerDraft { host: "10.0.0.2".into(), ..draft("Replacement", 30) }).unwrap();
+        let target = db.save_server(ServerDraft { host: "10.0.0.3".into(), ..draft("Target", 30) }).unwrap();
+        let project = db.save_project(ProjectDraft {
+            id: None,
+            name: "Training".into(),
+            kind: "project".into(),
+            source_server_id: source.id,
+            source_path: "~/training".into(),
+            dataset_ids: vec![],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: target.id.clone(), path: "~/training".into() }],
+        }).unwrap();
+        db.mark_project_synced(&project.id, &target.id, 8_192, 12, Some(1_700_000_000), 8_192, 12, Some(1_700_000_000), true).unwrap();
+
+        let updated = db.save_project(ProjectDraft {
+            id: Some(project.id),
+            name: "Training".into(),
+            kind: "project".into(),
+            source_server_id: replacement.id,
+            source_path: "~/training-v2".into(),
+            dataset_ids: vec![],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: target.id, path: "~/training".into() }],
+        }).unwrap();
+
+        assert_eq!(updated.status, "unknown");
+        assert_eq!(updated.targets[0].status, "unknown");
+        assert_eq!(updated.targets[0].synced_source_size_bytes, None);
+        assert_eq!(updated.targets[0].synced_source_file_count, None);
+    }
+
+    #[test]
+    fn project_paths_reject_roots_parent_segments_and_overlap() {
+        assert!(dangerous_sync_path("/"));
+        assert!(dangerous_sync_path("~/"));
+        assert!(dangerous_sync_path("$HOME"));
+        assert!(dangerous_sync_path("~/projects/../secrets"));
+        assert!(!dangerous_sync_path("~/projects/demo"));
+        assert!(project_paths_overlap("~/projects/demo", "~/projects/demo/checkpoints"));
+        assert!(project_paths_overlap("~/projects/demo/checkpoints", "~/projects/demo"));
+        assert!(!project_paths_overlap("~/projects/demo", "~/projects/demo-2"));
+    }
+
+    #[test]
+    fn interrupted_project_sync_recovers_as_paused_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("project-paused.sqlite");
+        let (project_id, target_id) = {
+            let db = Database::open(&path).unwrap();
+            let source = db.save_server(draft("Source", 30)).unwrap();
+            let target = db.save_server(ServerDraft { host: "10.0.0.2".into(), ..draft("Target", 30) }).unwrap();
+            let project = db.save_project(ProjectDraft {
+                id: None, name: "Training".into(), kind: "project".into(), source_server_id: source.id,
+                source_path: "~/training".into(), dataset_ids: vec![],
+                targets: vec![crate::models::ProjectTargetDraft { server_id: target.id.clone(), path: "~/training".into() }],
+            }).unwrap();
+            db.mark_project_syncing(&project.id, &target.id).unwrap();
+            (project.id, target.id)
+        };
+
+        let reopened = Database::open(&path).unwrap();
+        let project = reopened.get_project(&project_id).unwrap();
+        let target = project.targets.iter().find(|item| item.server_id == target_id).unwrap();
+        assert_eq!(target.status, "paused");
+        assert_eq!(target.error.as_deref(), Some("上次同步被中断，可继续同步"));
+    }
+
+    #[test]
+    fn deleting_server_keeps_source_projects_and_removes_only_target_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("project-server-delete.sqlite")).unwrap();
+        let removed = db.save_server(draft("Removed", 30)).unwrap();
+        let remaining = db.save_server(ServerDraft { host: "10.0.0.2".into(), ..draft("Remaining", 30) }).unwrap();
+        let dataset = db.save_project(ProjectDraft {
+            id: None,
+            name: "Dataset".into(),
+            kind: "dataset".into(),
+            source_server_id: removed.id.clone(),
+            source_path: "~/dataset".into(),
+            dataset_ids: vec![],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: remaining.id.clone(), path: "~/dataset".into() }],
+        }).unwrap();
+        let project = db.save_project(ProjectDraft {
+            id: None,
+            name: "Project".into(),
+            kind: "project".into(),
+            source_server_id: remaining.id,
+            source_path: "~/project".into(),
+            dataset_ids: vec![dataset.id.clone()],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: removed.id.clone(), path: "~/project".into() }],
+        }).unwrap();
+
+        db.delete_server(&removed.id).unwrap();
+
+        let projects = db.list_projects().unwrap();
+        let kept_dataset = projects.iter().find(|item| item.id == dataset.id).unwrap();
+        let kept_project = projects.iter().find(|item| item.id == project.id).unwrap();
+        assert_eq!(kept_dataset.status, "error");
+        assert!(!kept_dataset.source_exists);
+        assert_eq!(kept_dataset.last_error.as_deref(), Some("主服务器已移除"));
+        assert_eq!(kept_project.dataset_ids, vec![dataset.id]);
+        assert!(kept_project.targets.is_empty());
+        assert!(db.get_server(&removed.id).is_err());
+    }
+
+    #[test]
+    fn migrates_legacy_project_foreign_key_before_server_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-project-source.sqlite");
+        let (source_id, project_id) = {
+            let db = Database::open(&path).unwrap();
+            let source = db.save_server(draft("Legacy source", 30)).unwrap();
+            let project = db.save_project(ProjectDraft {
+                id: None,
+                name: "Legacy project".into(),
+                kind: "project".into(),
+                source_server_id: source.id.clone(),
+                source_path: "~/legacy-project".into(),
+                dataset_ids: vec![],
+                targets: vec![],
+            }).unwrap();
+            (source.id, project.id)
+        };
+
+        let legacy = Connection::open(&path).unwrap();
+        legacy.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             DROP INDEX idx_projects_updated;
+             ALTER TABLE projects RENAME TO projects_without_source_fk;
+             CREATE TABLE projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                source_server_id TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                source_exists INTEGER NOT NULL DEFAULT 0,
+                source_is_directory INTEGER NOT NULL DEFAULT 0,
+                source_size_bytes INTEGER NOT NULL DEFAULT 0,
+                source_file_count INTEGER NOT NULL DEFAULT 0,
+                source_modified_at INTEGER,
+                dataset_ids_json TEXT NOT NULL DEFAULT '[]',
+                targets_json TEXT NOT NULL DEFAULT '[]',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_sync_at INTEGER,
+                status TEXT NOT NULL DEFAULT 'unknown',
+                last_error TEXT,
+                FOREIGN KEY(source_server_id) REFERENCES servers(id) ON DELETE CASCADE
+             );
+             INSERT INTO projects SELECT * FROM projects_without_source_fk;
+             DROP TABLE projects_without_source_fk;
+             CREATE INDEX idx_projects_updated ON projects(updated_at DESC);"
+        ).unwrap();
+        drop(legacy);
+
+        let db = Database::open(&path).unwrap();
+        db.delete_server(&source_id).unwrap();
+        let project = db.get_project(&project_id).unwrap();
+        assert_eq!(project.status, "error");
+        assert_eq!(project.last_error.as_deref(), Some("主服务器已移除"));
+        assert_eq!(project.source_server_id, source_id);
     }
 }

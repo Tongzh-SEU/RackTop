@@ -17,4 +17,13 @@ describe('MetricBar current-user marker', () => {
     expect(markup).toContain('--own-position:25%')
     expect(markup).toContain('你 10.0 GB')
   })
+
+  it('uses the cursor marker for current-user CPU utilization', () => {
+    const markup = renderToStaticMarkup(<MetricBar label="CPU UTL" value={62} currentUserValue={18.5} currentUserDetail="18.5%" />)
+
+    expect(markup).toContain('metric-bar__own-marker')
+    expect(markup).toContain('--own-position:18.5%')
+    expect(markup).toContain('你 18.5%')
+    expect(markup).not.toContain('metric-bar__own"')
+  })
 })

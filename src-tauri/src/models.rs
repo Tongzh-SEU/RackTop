@@ -96,6 +96,113 @@ pub struct InteractionLogSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectTarget {
+    pub server_id: String,
+    pub path: String,
+    pub status: String,
+    pub exists: bool,
+    pub is_directory: bool,
+    pub size_bytes: u64,
+    pub file_count: u64,
+    #[serde(default)]
+    pub modified_at: Option<i64>,
+    pub last_checked_at: Option<i64>,
+    pub last_synced_at: Option<i64>,
+    #[serde(default)]
+    pub synced_source_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub synced_source_file_count: Option<u64>,
+    #[serde(default)]
+    pub synced_source_modified_at: Option<i64>,
+    #[serde(default)]
+    pub synced_target_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub synced_target_file_count: Option<u64>,
+    #[serde(default)]
+    pub synced_target_modified_at: Option<i64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub source_server_id: String,
+    pub source_path: String,
+    pub source_exists: bool,
+    pub source_is_directory: bool,
+    pub source_size_bytes: u64,
+    pub source_file_count: u64,
+    pub source_modified_at: Option<i64>,
+    pub dataset_ids: Vec<String>,
+    pub targets: Vec<ProjectTarget>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_sync_at: Option<i64>,
+    pub status: String,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTargetDraft {
+    pub server_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDraft {
+    pub id: Option<String>,
+    pub name: String,
+    pub kind: String,
+    pub source_server_id: String,
+    pub source_path: String,
+    #[serde(default)]
+    pub dataset_ids: Vec<String>,
+    pub targets: Vec<ProjectTargetDraft>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPathCheck {
+    pub server_id: String,
+    pub requested_path: String,
+    pub suggested_path: String,
+    pub exists: bool,
+    pub is_directory: bool,
+    pub size_bytes: u64,
+    pub file_count: u64,
+    pub modified_at: Option<i64>,
+    pub matches: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSyncResult {
+    pub project_id: String,
+    pub target_server_id: String,
+    pub transferred_bytes: u64,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSyncProgress {
+    pub project_id: String,
+    pub target_server_id: String,
+    pub transferred_bytes: u64,
+    pub resumed_bytes: u64,
+    pub total_bytes: u64,
+    pub started_at: i64,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GpuMetric {
     pub index: u32,
     pub uuid: String,
@@ -194,6 +301,8 @@ pub struct Snapshot {
 #[serde(rename_all = "camelCase")]
 pub struct HistoryPoint {
     pub timestamp: i64,
+    #[serde(default)]
+    pub is_compacted: bool,
     pub cpu_utilization: f64,
     pub memory_utilization: f64,
     #[serde(default)]
@@ -201,6 +310,8 @@ pub struct HistoryPoint {
     pub gpu_utilizations: HashMap<String, f64>,
     #[serde(default)]
     pub gpu_memory_utilizations: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_other_user_occupancies: HashMap<String, bool>,
     #[serde(default)]
     pub cpu_min: f64,
     #[serde(default)]
@@ -313,12 +424,15 @@ pub struct AppSettings {
     pub temperature_threshold_celsius: f64,
     pub current_user_accent: String,
     pub theme: String,
+    #[serde(default = "default_menu_bar_mode")]
+    pub menu_bar_mode: String,
     pub reduce_motion: bool,
     #[serde(default = "default_true")]
     pub show_add_server_guide: bool,
 }
 
 fn default_true() -> bool { true }
+fn default_menu_bar_mode() -> String { "compact".into() }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -335,6 +449,7 @@ impl Default for AppSettings {
             temperature_threshold_celsius: 85.0,
             current_user_accent: "#0a84ff".into(),
             theme: "system".into(),
+            menu_bar_mode: default_menu_bar_mode(),
             reduce_motion: false,
             show_add_server_guide: true,
         }
@@ -350,5 +465,14 @@ mod tests {
         let settings = AppSettings::default();
         assert_eq!(settings.history_retention_days, 90);
         assert!(settings.history_enabled);
+        assert_eq!(settings.menu_bar_mode, "compact");
+    }
+
+    #[test]
+    fn existing_settings_default_to_compact_menu_bar() {
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("menuBarMode");
+        let settings: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings.menu_bar_mode, "compact");
     }
 }

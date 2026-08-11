@@ -56,7 +56,7 @@ export function idleFilterSummaryParts(filters: IdleFilters): string[] {
     filters.otherUserProcess === 'all' ? '进程占用：不限' : '无人占用',
     ...(filters.gpuModel === 'all' ? [] : [filters.gpuModel.replace(/^NVIDIA\s+/i, '')]),
     ...(filters.cpuModel === 'all' ? [] : [filters.cpuModel]),
-    filters.duration ? `MEM 持续 ${filters.duration} 分钟` : '当前快照',
+    filters.duration ? `持续 ${filters.duration} 分钟` : '当前快照',
     ...(filters.tag === 'all' ? [] : [filters.tag]),
   ]
 }
@@ -96,12 +96,20 @@ export function rankIdleGpuItems(servers: Server[], snapshots: Record<string, Sn
     const coversWindow = points.length >= 2 && points[0].timestamp <= cutoff + Math.max(60, server.samplingIntervalSeconds * 3)
     const gpuTotalMb = Math.max(0, gpu.memoryTotalMb)
     const cpuTotalMb = Math.max(0, (snapshot?.system.memoryTotalBytes ?? 0) / 1024 ** 2)
-    const meetsDuration = coversWindow && points.every((point) => {
+    const meetsResourceDuration = coversWindow && points.every((point) => {
       const historicalGpuFreeMb = gpuTotalMb * (1 - clampPercent(point.gpuMemoryUtilizations?.[gpu.uuid] ?? gpuMemoryPercent(gpu)) / 100)
       const historicalCpuFreeMb = cpuTotalMb * (1 - clampPercent(point.memoryUtilization) / 100)
       return displayedFreeMemoryGb(historicalGpuFreeMb) >= filters.gpuMemoryGb && displayedFreeMemoryGb(historicalCpuFreeMb) >= filters.cpuMemoryGb
     })
-    return { server, gpu, available: meetsSnapshot && meetsDuration }
+    const processPoints = points.filter((point) => point.gpuOtherUserOccupancies?.[gpu.uuid] !== undefined)
+    const processCoverageTolerance = Math.max(60, server.samplingIntervalSeconds * 3)
+    const coversProcessWindow = filters.otherUserProcess === 'all' || (
+      processPoints.length >= 2
+      && processPoints[0].timestamp <= cutoff + processCoverageTolerance
+      && processPoints[processPoints.length - 1].timestamp >= snapshotTime - processCoverageTolerance
+    )
+    const meetsProcessDuration = filters.otherUserProcess === 'all' || (coversProcessWindow && processPoints.every((point) => point.gpuOtherUserOccupancies?.[gpu.uuid] === false))
+    return { server, gpu, available: meetsSnapshot && meetsResourceDuration && meetsProcessDuration }
   }).sort((left, right) => Number(right.available) - Number(left.available)
     || (right.gpu.memoryTotalMb - right.gpu.memoryUsedMb) - (left.gpu.memoryTotalMb - left.gpu.memoryUsedMb)
     || ((snapshots[right.server.id]?.system.memoryTotalBytes ?? 0) - (snapshots[right.server.id]?.system.memoryUsedBytes ?? 0))
