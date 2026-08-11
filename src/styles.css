@@ -717,6 +717,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
 .project-target-row.is-selected { background: color-mix(in srgb, var(--text) 2%, var(--surface)); }
 .project-target-server-icon, .is-selected .project-target-server-icon { color: var(--text-tertiary); background: transparent; }
 .project-target-row:focus-within { box-shadow: inset 0 0 0 1px var(--border-strong); }
+.project-dataset-row--editing { grid-template-columns: minmax(190px, 1fr) minmax(150px, .8fr) auto; }
 
 @media (hover: hover) and (pointer: fine) {
   .workspace__scroll:hover { scrollbar-color: color-mix(in srgb, var(--text-tertiary) 34%, transparent) transparent; }

@@ -30,7 +30,7 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
   const [checking, setChecking] = useState(false)
   const [datasetChecks, setDatasetChecks] = useState<Record<string, Record<string, ProjectPathCheck>>>({})
   const [checkingDatasets, setCheckingDatasets] = useState(false)
-  const [firstSyncDatasetIds, setFirstSyncDatasetIds] = useState<Set<string>>(new Set())
+  const [datasetSyncIds, setDatasetSyncIds] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState<'save' | 'sync' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const datasetCheckGeneration = useRef(0)
@@ -107,6 +107,14 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
             ?? defaultProjectTargetPath(dataset.sourcePath, dataset.name),
         })),
     }
+  }
+
+  function missingDatasetTargets(dataset: Project) {
+    const checks = datasetChecks[dataset.id] ?? {}
+    return datasetProbeDraft(dataset).targets.filter((target) => {
+      const check = checks[target.serverId]
+      return check && !check.exists && !check.error && check.matches.length === 0
+    }).map((target) => ({ ...target, path: checks[target.serverId]?.suggestedPath ?? target.path }))
   }
 
   async function detectLinkedDatasets(datasetIds = draft.datasetIds) {
@@ -195,12 +203,11 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
     setSaving(syncAfterSave ? 'sync' : 'save')
     setError(null)
     const linkedDatasets = availableDatasets.filter((dataset) => draft.datasetIds.includes(dataset.id)).map((dataset) => {
-      const checks = datasetChecks[dataset.id] ?? {}
-      const probe = datasetProbeDraft(dataset)
+      const targets = missingDatasetTargets(dataset)
       return {
         datasetId: dataset.id,
-        syncOnSave: !initial && firstSyncDatasetIds.has(dataset.id),
-        targets: probe.targets.map((target) => ({ ...target, path: checks[target.serverId]?.suggestedPath ?? target.path })),
+        syncOnSave: datasetSyncIds.has(dataset.id) && targets.length > 0,
+        targets,
       }
     })
     try { await onSave(draft, syncAfterSave, linkedDatasets) } catch (reason) { setError(String(reason)); setSaving(null) }
@@ -208,6 +215,7 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
 
   const sourceCheck = checks[draft.sourceServerId]
   const sourceServer = servers.find((server) => server.id === draft.sourceServerId)
+  const plannedDatasetSyncCount = availableDatasets.filter((dataset) => draft.datasetIds.includes(dataset.id) && datasetSyncIds.has(dataset.id) && missingDatasetTargets(dataset).length > 0).length
   return (
     <div className="scrim" role="presentation">
       <section ref={sheetRef} className="sheet project-form-sheet" role="dialog" aria-modal="true" aria-labelledby="project-form-title">
@@ -226,7 +234,7 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
               </div>
             </section>
             {draft.kind === 'project' && <section className="project-dataset-links" aria-label="关联数据集">
-              <header><div><strong>关联数据集</strong><small>在目标服务器查找同名数据集；项目后续同步不会自动带上它们</small></div><div className="project-dataset-links__actions"><span>{draft.datasetIds.length} 个</span>{!initial && <><button type="button" className="button button--secondary button--small" disabled={draft.datasetIds.length === 0 || firstSyncDatasetIds.size === draft.datasetIds.length} onClick={() => setFirstSyncDatasetIds(new Set(draft.datasetIds))}>全选同步</button><button type="button" className="button button--secondary button--small" disabled={firstSyncDatasetIds.size === 0} onClick={() => setFirstSyncDatasetIds(new Set())}>清除</button></>}<button type="button" className="icon-button" disabled={checkingDatasets || draft.datasetIds.length === 0 || draft.targets.length === 0} onClick={() => void detectLinkedDatasets().catch((reason) => setError(String(reason)))} aria-label="重新检查关联数据集"><RefreshCw className={checkingDatasets ? 'spin' : ''} size={13} /></button></div></header>
+              <header><div><strong>关联数据集</strong><small>勾选缺失副本后，仅在点击“保存并同步”时补齐</small></div><div className="project-dataset-links__actions"><span>{draft.datasetIds.length} 个</span><button type="button" className="button button--secondary button--small" disabled={draft.datasetIds.length === 0 || checkingDatasets} onClick={() => setDatasetSyncIds(new Set(availableDatasets.filter((dataset) => draft.datasetIds.includes(dataset.id) && missingDatasetTargets(dataset).length > 0).map((dataset) => dataset.id)))}>全选补齐</button><button type="button" className="button button--secondary button--small" disabled={plannedDatasetSyncCount === 0} onClick={() => setDatasetSyncIds(new Set())}>清除</button><button type="button" className="icon-button" disabled={checkingDatasets || draft.datasetIds.length === 0 || draft.targets.length === 0} onClick={() => void detectLinkedDatasets().catch((reason) => setError(String(reason)))} aria-label="重新检查关联数据集"><RefreshCw className={checkingDatasets ? 'spin' : ''} size={13} /></button></div></header>
               {availableDatasets.length > 0 ? <div className="project-dataset-list">{availableDatasets.map((dataset) => {
                 const linked = draft.datasetIds.includes(dataset.id)
                 const checks = datasetChecks[dataset.id] ?? {}
@@ -238,13 +246,13 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
                 const failed = targetChecks.filter((check) => Boolean(check?.error)).length
                 const checked = targetChecks.length === draft.targets.length && !checkingDatasets
                 const missing = checked ? Math.max(0, draft.targets.length - found - ambiguous - failed) : 0
-                const willSync = firstSyncDatasetIds.has(dataset.id)
-                const status = draft.targets.length === 0 ? '请先选择目标服务器' : checkingDatasets && linked ? '正在查找同名数据集…' : !checked ? '等待检查' : failed ? `${failed} 台连接失败` : ambiguous ? `${ambiguous} 台找到多个同名目录` : missing ? `${found} / ${draft.targets.length} 台已找到 · ${missing} 台缺失${willSync ? '，将首次同步' : ''}` : `${found} / ${draft.targets.length} 台已找到`
+                const willSync = datasetSyncIds.has(dataset.id) && missing > 0
+                const status = draft.targets.length === 0 ? '请先选择目标服务器' : checkingDatasets && linked ? '正在查找同名数据集…' : !checked ? '等待检查' : failed ? `${failed} 台连接失败` : ambiguous ? `${ambiguous} 台找到多个同名目录` : missing ? `${found} / ${draft.targets.length} 台已找到 · ${missing} 台缺失${willSync ? ' · 已加入本次同步' : ''}` : `${found} / ${draft.targets.length} 台已找到`
                 const problem = checked && (missing > 0 || ambiguous > 0 || failed > 0)
                 return <div key={dataset.id} className={`project-dataset-row${initial ? ' project-dataset-row--editing' : ''}${linked ? ' is-selected' : ''}`}>
-                  <label className="project-dataset-row__identity"><input type="checkbox" checked={linked} onChange={(event) => { const selected = event.target.checked; setDraft((current) => ({ ...current, datasetIds: selected ? [...current.datasetIds, dataset.id] : current.datasetIds.filter((id) => id !== dataset.id) })); if (!selected) setFirstSyncDatasetIds((current) => { const next = new Set(current); next.delete(dataset.id); return next }) }} /><Database size={13} /><span><strong>{dataset.name}</strong><small>{dataset.sourcePath}</small></span></label>
+                  <label className="project-dataset-row__identity"><input type="checkbox" checked={linked} onChange={(event) => { const selected = event.target.checked; setDraft((current) => ({ ...current, datasetIds: selected ? [...current.datasetIds, dataset.id] : current.datasetIds.filter((id) => id !== dataset.id) })); if (!selected) setDatasetSyncIds((current) => { const next = new Set(current); next.delete(dataset.id); return next }) }} /><Database size={13} /><span><strong>{dataset.name}</strong><small>{dataset.sourcePath}</small></span></label>
                   <span className={`project-dataset-row__status${problem ? ' is-warning' : checked ? ' is-found' : ''}`}>{status}</span>
-                  {!initial && <label className="project-dataset-row__sync"><input type="checkbox" checked={willSync} disabled={!linked} onChange={(event) => setFirstSyncDatasetIds((current) => { const next = new Set(current); if (event.target.checked) next.add(dataset.id); else next.delete(dataset.id); return next })} /><span>首次同步</span></label>}
+                  {linked && checked && missing > 0 && <label className="project-dataset-row__sync"><input type="checkbox" checked={willSync} onChange={(event) => setDatasetSyncIds((current) => { const next = new Set(current); if (event.target.checked) next.add(dataset.id); else next.delete(dataset.id); return next })} /><span>随本次同步补齐 {missing} 台</span></label>}
                 </div>
               })}</div> : <p>当前还没有可关联的数据集，可以先保存项目，之后再编辑关联。</p>}
             </section>}
@@ -261,7 +269,7 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
             <p className="project-safety-note">主服务器是唯一来源。同步会将目标目录替换为完整副本；已有内容或后续修改必须先确认。</p>
             {error && <p className="form-error" role="alert">{error}</p>}
           </div>
-          <footer className="sheet__footer"><button type="button" className="button button--secondary" onClick={onClose} disabled={Boolean(saving)}>取消</button><button className="button button--secondary" type="submit" disabled={Boolean(saving)}><Check size={16} />{saving === 'save' ? '保存中…' : '保存'}</button><button className="button button--primary" type="button" disabled={Boolean(saving)} onClick={() => void submit(true)}><RefreshCw size={16} />{saving === 'sync' ? '正在准备…' : '保存并同步'}</button></footer>
+          <footer className="sheet__footer"><button type="button" className="button button--secondary" onClick={onClose} disabled={Boolean(saving)}>取消</button><button className="button button--secondary" type="submit" disabled={Boolean(saving)}><Check size={16} />{saving === 'save' ? '保存中…' : '保存'}</button><button className="button button--primary" type="button" disabled={Boolean(saving)} onClick={() => void submit(true)}><RefreshCw size={16} />{saving === 'sync' ? '正在准备…' : plannedDatasetSyncCount > 0 ? `保存并同步（含 ${plannedDatasetSyncCount} 个数据集）` : '保存并同步'}</button></footer>
         </form>
       </section>
     </div>

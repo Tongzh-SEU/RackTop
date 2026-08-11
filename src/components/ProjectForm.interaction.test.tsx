@@ -4,6 +4,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Project, Server } from '../types/models'
+import { api } from '../services/api'
 import { ProjectForm } from './ProjectForm'
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -26,6 +27,7 @@ afterEach(() => {
   container?.remove()
   root = null
   container = null
+  vi.restoreAllMocks()
 })
 
 describe('ProjectForm focus management', () => {
@@ -61,5 +63,65 @@ describe('ProjectForm focus management', () => {
     const checkbox = alternateRow?.querySelector<HTMLInputElement>('input[type="checkbox"]')
     act(() => checkbox?.click())
     expect(alternateRow?.querySelector<HTMLInputElement>('[aria-label="Alternate 目标目录"]')).not.toBeNull()
+  })
+
+  it('adds only missing dataset replicas to save and sync', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    const project: Project = {
+      ...dataset,
+      id: 'project',
+      kind: 'project',
+      datasetIds: [dataset.id],
+      targets: [
+        { serverId: target.id, path: '~/projects/target', status: 'synced', exists: true, isDirectory: true, sizeBytes: 10, fileCount: 1 },
+        { serverId: alternateTarget.id, path: '~/projects/alternate', status: 'synced', exists: true, isDirectory: true, sizeBytes: 10, fileCount: 1 },
+      ],
+    }
+    vi.spyOn(api, 'probeProjectPaths').mockResolvedValue([
+      { serverId: target.id, requestedPath: '~/datasets/target', suggestedPath: '~/datasets/target', exists: false, isDirectory: false, sizeBytes: 0, fileCount: 0, matches: [] },
+      { serverId: alternateTarget.id, requestedPath: '~/datasets/alternate', suggestedPath: '~/datasets/alternate', exists: true, isDirectory: true, sizeBytes: 10, fileCount: 1, matches: [] },
+    ])
+    const onSave = vi.fn().mockResolvedValue(undefined)
+
+    act(() => root?.render(<ProjectForm initial={project} projects={[project, dataset]} servers={[source, target, alternateTarget]} onClose={vi.fn()} onSave={onSave} />))
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 550)) })
+
+    const syncPlan = [...document.querySelectorAll<HTMLLabelElement>('.project-dataset-row__sync')].find((label) => label.textContent?.includes('补齐 1 台'))
+    expect(syncPlan).not.toBeNull()
+    act(() => syncPlan?.querySelector<HTMLInputElement>('input')?.click())
+    expect(document.querySelector('.sheet__footer')?.textContent).toContain('保存并同步（含 1 个数据集）')
+
+    const syncButton = [...document.querySelectorAll<HTMLButtonElement>('.sheet__footer button')].find((button) => button.textContent?.includes('保存并同步'))
+    await act(async () => { syncButton?.click(); await Promise.resolve() })
+    expect(onSave).toHaveBeenCalledTimes(1)
+    expect(onSave.mock.calls[0][1]).toBe(true)
+    expect(onSave.mock.calls[0][2][0]).toMatchObject({
+      datasetId: dataset.id,
+      syncOnSave: true,
+      targets: [{ serverId: target.id, path: '~/datasets/target' }],
+    })
+  })
+
+  it('keeps a planned dataset transfer dormant when choosing save only', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    const project: Project = { ...dataset, id: 'project-save', kind: 'project', datasetIds: [dataset.id] }
+    vi.spyOn(api, 'probeProjectPaths').mockResolvedValue([
+      { serverId: target.id, requestedPath: '~/datasets/target', suggestedPath: '~/datasets/target', exists: false, isDirectory: false, sizeBytes: 0, fileCount: 0, matches: [] },
+    ])
+    const onSave = vi.fn().mockResolvedValue(undefined)
+
+    act(() => root?.render(<ProjectForm initial={project} projects={[project, dataset]} servers={[source, target]} onClose={vi.fn()} onSave={onSave} />))
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 550)) })
+    act(() => document.querySelector<HTMLInputElement>('.project-dataset-row__sync input')?.click())
+    const saveButton = document.querySelector<HTMLButtonElement>('.sheet__footer button[type="submit"]')
+    await act(async () => { saveButton?.click(); await Promise.resolve() })
+
+    expect(onSave).toHaveBeenCalledTimes(1)
+    expect(onSave.mock.calls[0][1]).toBe(false)
+    expect(onSave.mock.calls[0][2][0].syncOnSave).toBe(true)
   })
 })

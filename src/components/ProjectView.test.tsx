@@ -75,14 +75,14 @@ describe('Project source removal', () => {
     expect(markup).toContain('Target')
   })
 
-  it('offers per-dataset and select-all first sync controls only while adding', () => {
+  it('explains that missing dataset replicas sync only through the bottom action', () => {
     const adding = renderToStaticMarkup(<ProjectForm projects={[dataset]} servers={[sourceServer, targetServer]} onClose={vi.fn()} onSave={vi.fn()} />)
     const editing = renderToStaticMarkup(<ProjectForm initial={{ ...detachedProject, sourceServerId: sourceServer.id }} projects={[dataset]} servers={[sourceServer, targetServer]} onClose={vi.fn()} onSave={vi.fn()} />)
 
-    expect(adding).toContain('首次同步')
-    expect(adding).toContain('全选同步')
-    expect(adding).toContain('在目标服务器查找同名数据集')
-    expect(editing).not.toContain('首次同步')
+    expect(adding).toContain('仅在点击“保存并同步”时补齐')
+    expect(adding).toContain('全选补齐')
+    expect(editing).toContain('仅在点击“保存并同步”时补齐')
+    expect(editing).toContain('全选补齐')
     expect(editing).toContain('project-dataset-row--editing')
   })
 
