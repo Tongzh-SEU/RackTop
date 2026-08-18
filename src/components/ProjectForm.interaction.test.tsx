@@ -31,6 +31,21 @@ afterEach(() => {
 })
 
 describe('ProjectForm focus management', () => {
+  it('creates models with the same server and directory workflow without dataset linking', () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    act(() => root?.render(<ProjectForm projects={[dataset]} servers={[source, target]} onClose={vi.fn()} onSave={vi.fn()} />))
+    const modelButton = [...document.querySelectorAll<HTMLButtonElement>('.project-kind-segmented button')].find((button) => button.textContent === '模型')
+    act(() => modelButton?.click())
+
+    expect(modelButton?.classList.contains('is-selected')).toBe(true)
+    expect(document.querySelector<HTMLInputElement>('input[placeholder="例如：Llama-3-8B"]')).not.toBeNull()
+    expect(document.body.textContent).toContain('目标服务器')
+    expect(document.body.textContent).not.toContain('关联数据集')
+  })
+
   it('does not steal focus from an address when parent callbacks change', () => {
     container = document.createElement('div')
     document.body.appendChild(container)

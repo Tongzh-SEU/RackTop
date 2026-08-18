@@ -1252,11 +1252,11 @@ impl Database {
         let name = draft.name.trim();
         let source_path = draft.source_path.trim();
         if name.is_empty() || source_path.is_empty() { return Err("项目名称和主目录不能为空".into()); }
-        if !matches!(draft.kind.as_str(), "project" | "dataset") { return Err("项目类型无效".into()); }
-        if draft.kind == "dataset" && !draft.dataset_ids.is_empty() { return Err("数据集不能附属其他数据集".into()); }
+        if !matches!(draft.kind.as_str(), "project" | "dataset" | "model") { return Err("同步对象类型无效".into()); }
+        if draft.kind != "project" && !draft.dataset_ids.is_empty() { return Err("只有项目可以关联数据集".into()); }
         let existing_projects = self.list_projects()?;
         if let Some(existing) = draft.id.as_ref().and_then(|id| existing_projects.iter().find(|project| &project.id == id)) {
-            if existing.kind != draft.kind { return Err("创建后不能修改项目或数据集的类型".into()); }
+            if existing.kind != draft.kind { return Err("创建后不能修改同步对象类型".into()); }
         }
         if dangerous_sync_path(source_path) { return Err("主目录不能是根目录、Home 根目录或包含 ..".into()); }
         let source_server = self.get_server(&draft.source_server_id)?;

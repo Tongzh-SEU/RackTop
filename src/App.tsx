@@ -58,7 +58,7 @@ import { isRackTopManagedIdentity } from './utils/sshSetup'
 import { DeleteServerDialog } from './components/DeleteServerDialog'
 import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
-import { ManagedProcessView } from './components/ManagedProcessView'
+import { ManagedProcessView, type ManagedLaunchIntent } from './components/ManagedProcessView'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { ProjectForm } from './components/ProjectForm'
 import { ProjectConflictDialog, ProjectDeleteDialog, ProjectView, syncableProjectTargets } from './components/ProjectView'
@@ -83,6 +83,7 @@ import { previewServerOrder, serverDropTarget, type ServerDropPlacement } from '
 import { serverMatchesSearch } from './utils/serverSearch'
 import { updateSharedGpuWarnings, type MineProcessWarning, type SharedGpuWatchMap } from './utils/mineProcessWarnings'
 import { gpuContextName, serverDisplayName } from './utils/serverName'
+import { loadManagedRuns } from './utils/managedRuns'
 import authorAvatar from './assets/tongzh-seu.png'
 import packageInfo from '../package.json'
 
@@ -252,6 +253,7 @@ function App() {
   const [projectSyncProgress, setProjectSyncProgress] = useState<ProjectSyncProgress[]>([])
   const [preparingProjectIds, setPreparingProjectIds] = useState<Set<string>>(new Set())
   const [mineProcessWarnings, setMineProcessWarnings] = useState<MineProcessWarning[]>([])
+  const [managedLaunchIntent, setManagedLaunchIntent] = useState<ManagedLaunchIntent | null>(null)
   const [fleetSort, setFleetSort] = useState<'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount'>(() => (localStorage.getItem('racktop.fleetSort') as 'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount') || 'name')
   const [fleetDescending, setFleetDescending] = useState(() => localStorage.getItem('racktop.fleetDescending') === 'true')
   const [idleFilters, setIdleFilters] = useState<IdleFilters>(loadIdleFilters)
@@ -849,6 +851,19 @@ function App() {
   }, [servers, snapshots, search])
 
   const idleGpuItems = useMemo(() => rankIdleGpuItems(servers, snapshots, idleFilterHistory, idleFilters), [servers, snapshots, idleFilterHistory, idleFilters])
+  const projectRecentRunAt = useMemo(() => {
+    const recentRunAt: Record<string, number> = {}
+    for (const run of loadManagedRuns()) {
+      if (!run.projectId) continue
+      recentRunAt[run.projectId] = Math.max(recentRunAt[run.projectId] ?? 0, run.startedAt)
+    }
+    for (const project of projects) {
+      const projectRunAt = recentRunAt[project.id]
+      if (!projectRunAt) continue
+      for (const datasetId of project.datasetIds) recentRunAt[datasetId] = Math.max(recentRunAt[datasetId] ?? 0, projectRunAt)
+    }
+    return recentRunAt
+  }, [mainView, projects])
   const idleAvailableCount = idleGpuItems.filter((item) => item.available).length
   const currentIdleReservation = idleReservations.find((reservation) => (reservation.status === 'active' || reservation.status === 'paused') && idleReservationFiltersEqual(reservation.filters, idleFilters))
   const activeIdleReservationCount = idleReservations.filter((reservation) => reservation.status === 'active').length
@@ -1340,11 +1355,11 @@ function App() {
           {servers.length === 0 ? (
             <EmptyState onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
           ) : mainView === 'projects' ? (
-            <ProjectView projects={projects} servers={servers} busyTargets={busyProjectTargets} syncProgress={projectSyncProgress} preparingProjectIds={preparingProjectIds} onAdd={() => setProjectEditor('new')} onEdit={setProjectEditor} onDelete={setProjectPendingDelete} onInspect={inspectProject} onSync={(project, targetServerId) => { const target = project.targets.find((item) => item.serverId === targetServerId); if (target?.status === 'conflict') setProjectConflictTarget({ project, targetServerId }); else void syncProjectTarget(project, targetServerId) }} onCancel={(projectId, targetServerId) => void cancelProjectTarget(projectId, targetServerId)} onSyncAll={(project) => void syncAllProjectTargets(project)} />
+            <ProjectView projects={projects} recentRunAt={projectRecentRunAt} servers={servers} busyTargets={busyProjectTargets} syncProgress={projectSyncProgress} preparingProjectIds={preparingProjectIds} onAdd={() => setProjectEditor('new')} onLaunch={(project) => { setManagedLaunchIntent({ id: crypto.randomUUID(), projectId: project.id }); setMainView('mine') }} onEdit={setProjectEditor} onDelete={setProjectPendingDelete} onInspect={inspectProject} onSync={(project, targetServerId) => { const target = project.targets.find((item) => item.serverId === targetServerId); if (target?.status === 'conflict') setProjectConflictTarget({ project, targetServerId }); else void syncProjectTarget(project, targetServerId) }} onCancel={(projectId, targetServerId) => void cancelProjectTarget(projectId, targetServerId)} onSyncAll={(project) => void syncAllProjectTargets(project)} />
           ) : mainView === 'idle' ? (
-            <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} currentReservation={currentIdleReservation} onFiltersChange={setIdleFilters} onReserve={() => setReservationEditor({ filters: { ...idleFilters }, reservation: currentIdleReservation })} sortRevision={manualRefreshRevision} onSelect={(serverId) => { setSelectedServerId(serverId); setSelectedGpuUuid(null); setSelectedTab('overview'); setMainView('server') }} onQuickTerminal={(server, gpu) => setQuickTerminal({ server, gpu })} onReserveGpu={(server, gpu) => setReservationEditor({ filters: { ...idleFilters, duration: 0, targetServerId: server.id, targetGpuUuid: gpu.uuid } })} />
+            <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} currentReservation={currentIdleReservation} onFiltersChange={setIdleFilters} onReserve={() => setReservationEditor({ filters: { ...idleFilters }, reservation: currentIdleReservation })} sortRevision={manualRefreshRevision} onLaunch={(server, gpu) => { setManagedLaunchIntent({ id: crypto.randomUUID(), serverId: server.id, gpuUuid: gpu.uuid }); setMainView('mine') }} onQuickTerminal={(server, gpu) => setQuickTerminal({ server, gpu })} onSelect={(serverId, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu'); setMainView('server') }} onReserveGpu={(server, gpu) => setReservationEditor({ filters: { ...idleFilters, duration: 0, targetServerId: server.id, targetGpuUuid: gpu.uuid } })} />
           ) : mainView === 'mine' ? (
-            <ManagedProcessView servers={servers} snapshots={snapshots} projects={projects} warnings={mineProcessWarnings} onDismissWarning={(warningId) => { ignoredMineProcessWarningsRef.current.add(warningId); localStorage.setItem('racktop.ignoredMineProcessWarnings.v1', JSON.stringify([...ignoredMineProcessWarningsRef.current])); setMineProcessWarnings((current) => current.filter((warning) => warning.id !== warningId)) }} onOpenTerminal={(serverId) => { const server = servers.find((item) => item.id === serverId); if (server) setQuickTerminal({ server }) }} onNotice={setToast} onRefreshServer={(serverId) => refreshServer(serverId)} />
+            <ManagedProcessView servers={servers} snapshots={snapshots} projects={projects} warnings={mineProcessWarnings} launchIntent={managedLaunchIntent} onLaunchIntentConsumed={() => setManagedLaunchIntent(null)} onDismissWarning={(warningId) => { ignoredMineProcessWarningsRef.current.add(warningId); localStorage.setItem('racktop.ignoredMineProcessWarnings.v1', JSON.stringify([...ignoredMineProcessWarningsRef.current])); setMineProcessWarnings((current) => current.filter((warning) => warning.id !== warningId)) }} onOpenTerminal={(serverId) => { const server = servers.find((item) => item.id === serverId); if (server) setQuickTerminal({ server }) }} onNotice={setToast} onRefreshServer={(serverId) => refreshServer(serverId)} />
           ) : mainView === 'fleet' ? (
             <FleetOverview servers={servers} snapshots={snapshots} settings={settings} totals={totals} sort={fleetSort} descending={fleetDescending} onSort={setFleetSort} onToggleOrder={() => setFleetDescending((value) => !value)} onSelect={(serverId, tab, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid ?? null); setSelectedTab(tab); setMainView('server') }} />
           ) : selectedServer && selectedSnapshot && canDisplayServerDetails(selectedServer.status) ? (
@@ -1873,7 +1888,7 @@ function MineProcessView({ servers, snapshots, warnings, terminatingProcess, onD
   return <div className="detail-page mine-process-page">{successNotices.length > 0 && <section className="mine-process-successes" aria-live="polite" aria-label="进程状态">{successNotices.map((notice) => <div className="mine-process-success" role="status" key={notice.id}><CheckCircle2 size={16} /><span>{notice.message}</span></div>)}</section>}{mineServers.length > 0 && <section className="mine-process-summary" aria-label="我的进程摘要"><span>{mineServers.length} 台服务器</span><strong>{mineCount} 个进程</strong></section>}{persistentWarnings.length > 0 && <section className="mine-process-warnings" aria-live="polite">{persistentWarnings.map((warning) => <div className="mine-process-warning mine-process-warning--warning" key={warning.id}><AlertCircle size={17} /><span>{warning.message}</span><button type="button" className="mine-process-warning__dismiss" onClick={() => onDismissWarning(warning.id)} aria-label="忽略这条提示" title="忽略"><X size={13} /></button></div>)}</section>}{mineServers.length > 0 ? <div className="mine-process-list">{mineServers.map(({ server, snapshot }) => <section className="mine-process-server" key={server.id}><PanelHeader icon={<ServerIcon />} title={server.name} subtitle={`${server.host} · 最近采集 ${relativeTime(snapshot.timestamp)}`} action={<button className="icon-button" aria-label={`打开 ${server.name} 终端`} title="打开终端" onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={16} /></button>} /><ProcessBlocks snapshot={snapshot} hideEmptyBlocks terminatingPid={terminatingProcess?.serverId === server.id ? terminatingProcess.pid : undefined} onRequestTerminate={(target) => onRequestTerminate(server.id, target)} /></section>)}</div> : <div className="mine-process-empty" role="status"><UserRound size={28} /><strong>没有我的进程</strong><p>当前已连接的服务器上没有检测到你的 GPU 或 CPU 进程。</p></div>}</div>
 }
 
-function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentReservation, onFiltersChange, onReserve, sortRevision, onSelect, onQuickTerminal, onReserveGpu }: { servers: Server[]; snapshots: Record<string, Snapshot>; items: IdleGpuItem[]; filters: IdleFilters; currentReservation?: IdleReservation; onFiltersChange: (filters: IdleFilters) => void; onReserve: () => void; sortRevision: number; onSelect: (serverId: string, gpuUuid: string) => void; onQuickTerminal: (server: Server, gpu: Snapshot['gpus'][number]) => void; onReserveGpu: (server: Server, gpu: Snapshot['gpus'][number]) => void }) {
+function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentReservation, onFiltersChange, onReserve, sortRevision, onLaunch, onQuickTerminal, onSelect, onReserveGpu }: { servers: Server[]; snapshots: Record<string, Snapshot>; items: IdleGpuItem[]; filters: IdleFilters; currentReservation?: IdleReservation; onFiltersChange: (filters: IdleFilters) => void; onReserve: () => void; sortRevision: number; onLaunch: (server: Server, gpu: Snapshot['gpus'][number]) => void; onQuickTerminal: (server: Server, gpu: Snapshot['gpus'][number]) => void; onSelect: (serverId: string, gpuUuid: string) => void; onReserveGpu: (server: Server, gpu: Snapshot['gpus'][number]) => void }) {
   const [gpuMemoryInput, setGpuMemoryInput] = useState(String(filters.gpuMemoryGb))
   const [cpuMemoryInput, setCpuMemoryInput] = useState(String(filters.cpuMemoryGb))
   const { gpuMemoryGb, cpuMemoryGb, otherUserProcess, duration, gpuModel, cpuModel, tag } = filters
@@ -1922,12 +1937,12 @@ function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentR
       const freeCpuGb = displayedFreeMemoryGb(((snapshot?.system.memoryTotalBytes ?? 0) - (snapshot?.system.memoryUsedBytes ?? 0)) / 1024 ** 2)
       const occupiedProcessCount = countOtherUserGpuWorkloads(gpu, snapshot?.processes ?? [])
       return <article className={`panel idle-card ${available ? '' : 'idle-card--unavailable'}`} key={`${server.id}-${gpu.uuid}`}>
-        <button className="idle-card__target" onClick={() => available ? onQuickTerminal(server, gpu) : onReserveGpu(server, gpu)} aria-label={`${available ? '打开终端' : '预约'} ${server.name} GPU ${gpu.index}`} title={available ? '打开终端' : '预约此卡'} />
+        <button className="idle-card__target" onClick={() => available ? onLaunch(server, gpu) : onReserveGpu(server, gpu)} aria-label={`${available ? '使用算力启动任务' : '预约'} ${server.name} GPU ${gpu.index}`} title={available ? '使用此 GPU 启动任务' : '预约此卡'} />
         <div className="idle-card__body">
-          <div className="idle-card__top"><span className={`idle-badge ${available ? '' : 'idle-badge--unavailable'}`}>{available ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}{available ? '可用' : '不可用'}</span><span className="idle-card__primary-action" aria-hidden="true">{available ? <TerminalSquare size={15} /> : <BellPlus size={15} />}</span></div>
+          <div className="idle-card__top"><span className={`idle-badge ${available ? '' : 'idle-badge--unavailable'}`}>{available ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}{available ? '可用' : '不可用'}</span>{!available && <span className="idle-card__primary-action" aria-hidden="true"><BellPlus size={15} /></span>}</div>
           <h3>{server.name} · GPU {gpu.index}</h3><p>{gpu.name} · {snapshot?.system.cpuModel || '未知 CPU'}</p><div className="idle-card__stats"><span><strong>{freeGpuGb.toFixed(1)} GB</strong><small>GPU MEM</small></span><span><strong>{freeCpuGb.toFixed(1)} GB</strong><small>CPU MEM</small></span><span><strong>{occupiedProcessCount > 0 ? `有 ${occupiedProcessCount} 个` : '无'}</strong><small>进程占用</small></span></div><div className="tag-row">{server.tags.map((item) => <span key={item}>{item}</span>)}</div>
         </div>
-        <button className="icon-button idle-card__detail" onClick={() => onSelect(server.id, gpu.uuid)} aria-label={`打开 ${server.name} GPU ${gpu.index} 详情`} title="查看详情"><ChevronRight size={16} /></button>
+        <div className="idle-card__actions">{available && <><button className="icon-button idle-card__launch" onClick={() => onLaunch(server, gpu)} aria-label={`使用 ${server.name} GPU ${gpu.index} 启动任务`} title="启动任务"><Play size={15} /></button><button className="icon-button idle-card__terminal" onClick={() => onQuickTerminal(server, gpu)} aria-label={`打开 ${server.name} GPU ${gpu.index} 终端`} title="打开终端"><TerminalSquare size={15} /></button></>}<button className="icon-button idle-card__detail" onClick={() => onSelect(server.id, gpu.uuid)} aria-label={`打开 ${server.name} GPU ${gpu.index} 详情`} title="查看详情"><ChevronRight size={15} /></button></div>
       </article>
     })}{items.length === 0 && <div className="inline-empty inline-empty--wide"><WifiOff size={28} /><strong>没有对应范围的 GPU</strong><p>当前没有符合所选 GPU 型号、CPU 型号或服务器标签的设备。</p></div>}</section>
   </div>

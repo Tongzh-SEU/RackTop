@@ -292,7 +292,7 @@ export interface InteractionLogSummary {
   servers: InteractionServerSummary[]
 }
 
-export type ProjectKind = 'project' | 'dataset'
+export type ProjectKind = 'project' | 'dataset' | 'model'
 export type ProjectTargetStatus = 'unknown' | 'found' | 'missing' | 'offline' | 'syncing' | 'paused' | 'synced' | 'conflict' | 'error'
 
 export interface ProjectTarget {
@@ -387,6 +387,7 @@ export interface LaunchProfile {
   projectId?: string | null
   workingDirectory: string
   command: string
+  projectLogPath?: string | null
   gpuCount: number
   gpuModel?: string | null
   minimumGpuMemoryGb: number

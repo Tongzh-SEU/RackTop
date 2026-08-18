@@ -201,6 +201,16 @@ let browserProjects: Project[] = [
     ],
     createdAt: now - 1_209_600, updatedAt: now - 20, lastSyncAt: now - 3_000, status: 'synced', lastError: null,
   },
+  {
+    id: 'demo-model-llama', name: 'Llama-3-8B', kind: 'model', sourceServerId: 'demo-132', sourcePath: '~/models/Llama-3-8B',
+    sourceExists: true, sourceIsDirectory: true, sourceSizeBytes: 15.2 * 1024 ** 3, sourceFileCount: 18, sourceModifiedAt: now - 1_800,
+    datasetIds: [],
+    targets: [
+      { serverId: 'demo-233', path: '~/models/Llama-3-8B', status: 'synced', exists: true, isDirectory: true, sizeBytes: 15.2 * 1024 ** 3, fileCount: 18, modifiedAt: now - 1_800, lastCheckedAt: now - 40, lastSyncedAt: now - 1_200, syncedSourceSizeBytes: 15.2 * 1024 ** 3, syncedSourceFileCount: 18, syncedSourceModifiedAt: now - 1_800, syncedTargetSizeBytes: 15.2 * 1024 ** 3, syncedTargetFileCount: 18, syncedTargetModifiedAt: now - 1_800 },
+      { serverId: 'demo-h100', path: '~/models/Llama-3-8B', status: 'missing', exists: false, isDirectory: false, sizeBytes: 0, fileCount: 0, modifiedAt: null, lastCheckedAt: now - 35 },
+    ],
+    createdAt: now - 86_400, updatedAt: now - 35, lastSyncAt: now - 1_200, status: 'unknown', lastError: null,
+  },
 ]
 const browserProjectSyncProgress: ProjectSyncProgress[] = [{ projectId: 'demo-project-waterflower', targetServerId: 'demo-h100', transferredBytes: 31 * 1024, resumedBytes: 12 * 1024, totalBytes: 48 * 1024, startedAt: now - 12, state: 'transferring' }]
 const historyRequests = new Map<string, { expiresAt: number; request: Promise<HistoryPoint[]> }>()
@@ -465,8 +475,8 @@ export const api = {
     if (isTauri) return invoke('terminate_process', { serverId, pid, confirmed: true })
     return `已在演示服务器 ${serverId} 上模拟结束 PID ${pid}。`
   },
-  async launchManagedRun(serverId: string, runId: string, workingDirectory: string, command: string, gpuIndices: number[]): Promise<ManagedRunLaunchResult> {
-    if (isTauri) return invoke('launch_managed_run', { serverId, runId, workingDirectory, command, gpuIndices })
+  async launchManagedRun(serverId: string, runId: string, workingDirectory: string, command: string, gpuIndices: number[], projectLogPath: string | null = null): Promise<ManagedRunLaunchResult> {
+    if (isTauri) return invoke('launch_managed_run', { serverId, runId, workingDirectory, command, gpuIndices, projectLogPath })
     await new Promise((resolve) => window.setTimeout(resolve, 500))
     return { pid: 60_000 + Math.floor(Math.random() * 9_000), logPath: `~/.racktop/runs/${runId}/output.log` }
   },

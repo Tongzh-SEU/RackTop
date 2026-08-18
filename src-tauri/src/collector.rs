@@ -527,24 +527,36 @@ fn validate_run_id(run_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn launch_managed_run(server: &Server, password: Option<&str>, run_id: &str, working_directory: &str, task_command: &str, gpu_indices: &[u32]) -> Result<ManagedRunLaunchResult, String> {
+pub async fn launch_managed_run(server: &Server, password: Option<&str>, run_id: &str, working_directory: &str, task_command: &str, gpu_indices: &[u32], project_log_path: Option<&str>) -> Result<ManagedRunLaunchResult, String> {
     validate_run_id(run_id)?;
     if working_directory.trim().is_empty() { return Err("工作目录不能为空".into()); }
     if task_command.trim().is_empty() { return Err("启动命令不能为空".into()); }
     if task_command.len() > 32_768 || working_directory.len() > 4_096 || task_command.contains('\0') || working_directory.contains('\0') {
         return Err("工作目录或启动命令过长".into());
     }
+    if let Some(path) = project_log_path {
+        if path.len() > 4_096 || path.contains('\0') { return Err("项目日志路径无效".into()); }
+    }
     let workdir = STANDARD.encode(working_directory.trim());
     let payload = STANDARD.encode(task_command.trim());
+    let project_log = STANDARD.encode(project_log_path.unwrap_or("").trim());
     let gpu_csv = gpu_indices.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
     let script = format!(r#"set -eu
 decode_base64() {{ printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | base64 --decode; }}
 workdir="$(decode_base64 '{workdir}')"
 task_command="$(decode_base64 '{payload}')"
+project_log_path="$(decode_base64 '{project_log}')"
 case "$workdir" in '~') workdir="$HOME" ;; '~/'*) workdir="$HOME/${{workdir#\~/}}" ;; esac
 if [ ! -d "$workdir" ]; then printf '__RACKTOP_RUN_DIR_MISSING__\n'; exit 42; fi
 run_dir="$HOME/.racktop/runs/{run_id}"
 mkdir -p "$run_dir"
+if [ -n "$project_log_path" ]; then
+  case "$project_log_path" in '~') project_log_path="$HOME" ;; '~/'*) project_log_path="$HOME/${{project_log_path#\~/}}" ;; /*) ;; *) project_log_path="$workdir/$project_log_path" ;; esac
+  project_log_dir="$(dirname "$project_log_path")"
+  mkdir -p "$project_log_dir"
+  if [ -e "$project_log_path" ] && [ ! -L "$project_log_path" ]; then printf '__RACKTOP_PROJECT_LOG_EXISTS__%s\n' "$project_log_path"; exit 44; fi
+  ln -sfn "$run_dir/output.log" "$project_log_path"
+fi
 launch_script="$run_dir/launch.sh"
 {{
   printf '#!/bin/sh\n'
@@ -571,6 +583,7 @@ printf '__RACKTOP_RUN_OK__%s\n' "$pid"
     let output = timeout(Duration::from_secs(15), command.output()).await.map_err(|_| "启动任务超时（15 秒）".to_string())?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.contains("__RACKTOP_RUN_DIR_MISSING__") { return Err(format!("远端工作目录不存在：{}", working_directory.trim())); }
+    if stdout.contains("__RACKTOP_PROJECT_LOG_EXISTS__") { return Err(stdout.replace("__RACKTOP_PROJECT_LOG_EXISTS__", "项目日志路径已存在，未覆盖：").trim().to_string()); }
     if stdout.contains("__RACKTOP_RUN_FAILED__") { return Err(stdout.replace("__RACKTOP_RUN_FAILED__", "任务启动后立即退出：").trim().to_string()); }
     if output.status.success() {
         if let Some(pid) = stdout.lines().find_map(|line| line.strip_prefix("__RACKTOP_RUN_OK__").and_then(|value| value.trim().parse::<u32>().ok())) {

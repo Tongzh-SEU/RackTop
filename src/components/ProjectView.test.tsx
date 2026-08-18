@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import type { Project, Server } from '../types/models'
 import { ProjectForm } from './ProjectForm'
-import { formatProjectSize, projectCardState, ProjectView, projectCardRowSpan, syncableProjectTargets } from './ProjectView'
+import { formatProjectSize, projectCardState, ProjectView, projectCardRowSpan, sortProjectsByRecentUse, syncableProjectTargets } from './ProjectView'
 
 const targetServer: Server = {
   id: 'target',
@@ -47,7 +47,45 @@ const dataset: Project = {
   sourcePath: '~/datasets/ImageNet',
 }
 
+const model: Project = {
+  ...detachedProject,
+  id: 'model-1',
+  name: 'Llama-3-8B',
+  kind: 'model',
+  sourceServerId: sourceServer.id,
+  sourcePath: '~/models/Llama-3-8B',
+}
+
 describe('Project source removal', () => {
+  it('sorts recently executed items first, then falls back to recently added', () => {
+    const older = { ...detachedProject, id: 'older', name: 'Older', createdAt: 10 }
+    const newer = { ...detachedProject, id: 'newer', name: 'Newer', createdAt: 30 }
+    const recentlyRun = { ...detachedProject, id: 'recently-run', name: 'Recently run', createdAt: 1 }
+
+    expect(sortProjectsByRecentUse([older, recentlyRun, newer], { 'recently-run': 100 }).map((item) => item.id)).toEqual(['recently-run', 'newer', 'older'])
+  })
+
+  it('shows projects, datasets, and models as separate tabs', () => {
+    const markup = renderToStaticMarkup(<ProjectView projects={[detachedProject, dataset, model]} servers={[sourceServer, targetServer]} busyTargets={new Set()} syncProgress={[]} preparingProjectIds={new Set()} onAdd={vi.fn()} onEdit={vi.fn()} onDelete={vi.fn()} onInspect={vi.fn()} onSync={vi.fn()} onCancel={vi.fn()} onSyncAll={vi.fn()} />)
+
+    expect(markup).toContain('role="tablist"')
+    expect(markup).toContain('项目 <span>1</span>')
+    expect(markup).toContain('数据集 <span>1</span>')
+    expect(markup).toContain('模型 <span>1</span>')
+    expect(markup).toContain('Training')
+    expect(markup).not.toContain('ImageNet')
+    expect(markup).not.toContain('Llama-3-8B')
+  })
+
+  it('uses the model tab when only model sync objects exist', () => {
+    const markup = renderToStaticMarkup(<ProjectView projects={[model]} servers={[sourceServer, targetServer]} busyTargets={new Set()} syncProgress={[]} preparingProjectIds={new Set()} onAdd={vi.fn()} onEdit={vi.fn()} onDelete={vi.fn()} onInspect={vi.fn()} onSync={vi.fn()} onCancel={vi.fn()} onSyncAll={vi.fn()} />)
+
+    expect(markup).toContain('aria-selected="true">模型')
+    expect(markup).toContain('Llama-3-8B')
+    expect(markup).toContain('project-card__icon--model')
+    expect(markup).not.toContain('启动 Llama-3-8B')
+  })
+
   it('includes the grid row gap when calculating masonry spans', () => {
     expect(projectCardRowSpan(240, 4, 12)).toBe(16)
   })

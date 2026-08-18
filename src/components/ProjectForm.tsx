@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
-import { Check, Database, Folder, FolderGit2, FolderSearch, RefreshCw, Server as ServerIcon, X } from 'lucide-react'
+import { Box, Check, Database, Folder, FolderGit2, FolderSearch, RefreshCw, Server as ServerIcon, X } from 'lucide-react'
 import type { LinkedDatasetPlan, Project, ProjectDraft, ProjectKind, ProjectPathCheck, Server } from '../types/models'
 import { api } from '../services/api'
 import { defaultProjectTargetPath, isLegacyProjectNameTargetPath } from '../utils/projectPaths'
@@ -68,7 +68,7 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
   }, [draft.sourceServerId])
 
   const availableDatasets = projects.filter((project) => project.kind === 'dataset' && project.id !== initial?.id)
-  function setKind(kind: ProjectKind) { setDraft((current) => ({ ...current, kind, datasetIds: kind === 'dataset' ? [] : current.datasetIds })) }
+  function setKind(kind: ProjectKind) { setDraft((current) => ({ ...current, kind, datasetIds: kind === 'project' ? current.datasetIds : [] })) }
   function toggleTarget(serverId: string, checked: boolean) {
     setChecks((current) => { const next = { ...current }; delete next[serverId]; return next })
     setDraft((current) => ({
@@ -228,15 +228,15 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
   return (
     <div className="scrim" role="presentation">
       <section ref={sheetRef} className="sheet project-form-sheet" role="dialog" aria-modal="true" aria-labelledby="project-form-title">
-        <header className="sheet__header"><div><p className="eyebrow">跨服务器同步</p><h2 id="project-form-title">{initial ? `编辑${initial.kind === 'project' ? '项目' : '数据集'}` : '添加同步对象'}</h2></div><button className="icon-button" onClick={onClose} disabled={Boolean(saving)} aria-label="关闭"><X size={18} /></button></header>
+        <header className="sheet__header"><div><p className="eyebrow">跨服务器同步</p><h2 id="project-form-title">{initial ? `编辑${initial.kind === 'project' ? '项目' : initial.kind === 'dataset' ? '数据集' : '模型'}` : '添加同步对象'}</h2></div><button className="icon-button" onClick={onClose} disabled={Boolean(saving)} aria-label="关闭"><X size={18} /></button></header>
         <form className="project-form" onSubmit={(event) => void submit(false, event)}>
           <div className="project-form__body">
             <div className="project-identity-fields">
-              <label>名称<input required value={draft.name} placeholder={draft.kind === 'project' ? '例如：Llama 微调项目' : '例如：ImageNet-1K'} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} /></label>
-              <fieldset className="project-kind-field"><legend>类型</legend><div className="segmented project-kind-segmented"><button type="button" disabled={Boolean(initial)} className={draft.kind === 'project' ? 'is-selected' : ''} onClick={() => setKind('project')}><FolderGit2 size={13} />项目</button><button type="button" disabled={Boolean(initial)} className={draft.kind === 'dataset' ? 'is-selected' : ''} onClick={() => setKind('dataset')}><Database size={13} />数据集</button></div></fieldset>
+              <label>名称<input required value={draft.name} placeholder={draft.kind === 'project' ? '例如：Llama 微调项目' : draft.kind === 'dataset' ? '例如：ImageNet-1K' : '例如：Llama-3-8B'} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} /></label>
+              <fieldset className="project-kind-field"><legend>类型</legend><div className="segmented project-kind-segmented"><button type="button" disabled={Boolean(initial)} className={draft.kind === 'project' ? 'is-selected' : ''} onClick={() => setKind('project')}><FolderGit2 size={13} />项目</button><button type="button" disabled={Boolean(initial)} className={draft.kind === 'dataset' ? 'is-selected' : ''} onClick={() => setKind('dataset')}><Database size={13} />数据集</button><button type="button" disabled={Boolean(initial)} className={draft.kind === 'model' ? 'is-selected' : ''} onClick={() => setKind('model')}><Box size={13} />模型</button></div></fieldset>
             </div>
             <section className="project-source-section" aria-label="同步来源">
-              <header><span>{draft.kind === 'project' ? <FolderGit2 size={16} /> : <Database size={16} />}</span><div><strong>同步来源</strong><small>选择主服务器和来源目录</small></div></header>
+              <header><span>{draft.kind === 'project' ? <FolderGit2 size={16} /> : draft.kind === 'dataset' ? <Database size={16} /> : <Box size={16} />}</span><div><strong>同步来源</strong><small>选择主服务器和来源目录</small></div></header>
               <div className="project-source-fields">
                 <label>主服务器<select required value={draft.sourceServerId} className={sourceServerMissing ? 'is-invalid' : ''} onChange={(event) => { const sourceServerId = event.target.value; setChecks({}); setDraft((current) => ({ ...current, sourceServerId, targets: current.targets.filter((target) => target.serverId !== sourceServerId) })) }}>{sourceServerMissing && <option value={draft.sourceServerId} disabled>原主服务器已移除，请重新选择</option>}{servers.map((server) => <option key={server.id} value={server.id}>{server.name}</option>)}</select><span className="project-source-server-meta">{sourceServer ? `${sourceServer.username}@${sourceServer.host}` : '请选择新的主服务器'}</span></label>
                 <label className="project-source-path">主目录<RemotePathInput required serverId={draft.sourceServerId} value={draft.sourcePath} ariaLabel="主目录" placeholder="~/project-name" onChange={setSourcePath} /><PathStatus check={sourceCheck} idle="等待检测主目录" onChoose={setSourcePath} /></label>

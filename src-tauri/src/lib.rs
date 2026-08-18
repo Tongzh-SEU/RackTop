@@ -490,10 +490,10 @@ async fn terminate_process(database: State<'_, Database>, server_id: String, pid
 }
 
 #[tauri::command]
-async fn launch_managed_run(database: State<'_, Database>, server_id: String, run_id: String, working_directory: String, command: String, gpu_indices: Vec<u32>) -> Result<ManagedRunLaunchResult, String> {
+async fn launch_managed_run(database: State<'_, Database>, server_id: String, run_id: String, working_directory: String, command: String, gpu_indices: Vec<u32>, project_log_path: Option<String>) -> Result<ManagedRunLaunchResult, String> {
     let server = database.get_server(&server_id)?;
     let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
-    collector::launch_managed_run(&server, password.as_deref(), &run_id, &working_directory, &command, &gpu_indices).await
+    collector::launch_managed_run(&server, password.as_deref(), &run_id, &working_directory, &command, &gpu_indices, project_log_path.as_deref()).await
 }
 
 #[tauri::command]
