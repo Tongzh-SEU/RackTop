@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { flushSync } from 'react-dom'
 import { listen } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   Activity,
@@ -161,12 +162,11 @@ async function toggleWindowMaximize(event: MouseEvent<HTMLElement>) {
 
 function WindowsWindowControls() {
   if (appPlatform !== 'windows') return null
-  const window = getCurrentWindow()
   return (
     <div className="window-controls" aria-label="窗口控制" onMouseDown={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
-      <button type="button" onClick={() => void window.minimize()} aria-label="最小化窗口"><Minus size={15} /></button>
-      <button type="button" onClick={() => void window.toggleMaximize()} aria-label="最大化或还原窗口"><Square size={12} /></button>
-      <button type="button" className="window-controls__close" onClick={() => void window.close()} aria-label="关闭窗口"><X size={15} /></button>
+      <button type="button" onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); void invoke('window_minimize') }} aria-label="最小化窗口"><Minus size={15} /></button>
+      <button type="button" onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); void invoke('window_toggle_maximize') }} aria-label="最大化或还原窗口"><Square size={12} /></button>
+      <button type="button" className="window-controls__close" onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); void invoke('window_close') }} aria-label="关闭窗口"><X size={15} /></button>
     </div>
   )
 }
