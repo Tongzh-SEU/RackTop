@@ -1,7 +1,0 @@
-node_modules/
-dist/
-src-tauri/target/
-.playwright-cli/
-output/playwright/
-.DS_Store
-*.log

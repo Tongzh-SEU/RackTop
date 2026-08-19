@@ -1,19 +1,52 @@
-# RackTop
+<p align="center">
+  <img src="docs/assets/readme/racktop-logo.svg" alt="RackTop Logo" width="96" />
+</p>
 
-RackTop 是一个基于 Tauri 2、React、TypeScript、Rust 和 SQLite 的桌面 GPU 服务器监控工具。它通过本机 OpenSSH 并发采集 Linux 服务器的 GPU、CPU、内存、负载与进程信息，不要求在服务器安装 Agent。
+<h1 align="center">RackTop</h1>
 
-## 功能
+<p align="center">多服务器 GPU 算力与训练任务工作台</p>
 
-- 多服务器总览、GPU 瀑布流状态墙和可自定义排序
-- 空闲 GPU 筛选：利用率、可用显存、持续时间、型号和服务器标签
-- GPU/CPU/进程详情与本地历史趋势
-- SSH Agent、密钥、密码、`~/.ssh/config`、ProxyJump 和 Host Key 核验
-- SQLite 历史数据、系统托盘、离线/高温/空闲/进程退出通知
-- 浅色、深色、减少动效、减少透明度和高对比度适配
+RackTop 是面向个人研究者和小型团队的 GPU 服务器工作台。它把多台 Linux 服务器的算力状态、远程终端、项目资料和训练任务集中到一个桌面应用中，让你可以在启动任务前看清资源，在运行过程中持续掌握状态，在不同服务器之间保持项目资料一致。
 
-## 开发
+RackTop 通过本机 OpenSSH 连接服务器，不要求在远程机器安装常驻 Agent。服务器、项目、数据集、模型和启动配置都保存在本地，连接信息和密钥由用户掌控。
 
-需要 Node.js 20+、Rust stable、系统 OpenSSH。
+## 主要功能
+
+- **多服务器算力总览**：集中查看 GPU、CPU、系统内存、温度、利用率和进程状态，并按服务器与 GPU 快速定位资源。
+- **空闲算力发现**：按显存、利用率、占用状态和持续空闲时间筛选可用 GPU，直接打开远程终端或进入启动任务流程。
+- **远程终端**：通过 SSH 打开服务器终端，适合临时检查环境、查看文件和处理启动前问题。
+- **项目资料管理**：按项目管理工作目录，并关联数据集和模型；支持跨服务器检查状态、同步副本和补齐缺失资料。
+- **启动配置与任务管理**：保存项目级启动配置，在不同服务器和 GPU 上切换工作目录、GPU 卡号、Shell 命令、超参数和日志路径，再统一启动和监测任务。
+- **运行状态与历史**：查看 RackTop 任务和外部进程、日志、资源监测、历史热力图，以及离线、高温、空闲和进程退出通知。
+- **安全连接**：支持 SSH Agent、密钥、密码、`~/.ssh/config`、ProxyJump 和 Host Key 指纹核验，不自动接受未知主机。
+
+## 下载
+
+当前稳定版：**v1.24.4**
+
+| 平台 | 安装包 | 下载 |
+| --- | --- | --- |
+| macOS Apple Silicon | `RackTop_1.24.4_aarch64.dmg` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.24.4/RackTop_1.24.4_aarch64.dmg) |
+| Windows x64 | `RackTop_1.24.4_x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.24.4/RackTop_1.24.4_x64-setup.exe) |
+
+更多版本和校验信息见 [GitHub Releases](https://github.com/Tongzh-SEU/RackTop/releases)。macOS 首次打开若提示来源限制，请在“系统设置 → 隐私与安全性”中确认打开。
+
+## 作者的话
+
+实验室服务器越来越多以后，项目之间的同步、任务运行和服务器状态查看会变得越来越麻烦。把这些事情交给 AI 做，往往又会浪费不少 token 和时间，所以我决定开发 RackTop，把这些重复的操作收进一个真正可操作的工具里。
+
+当然，开发这个 App 的过程本身也花了很多 token，笑死。至少现在，下一次启动任务时不用再从头解释一遍服务器、项目和命令了。
+
+## 安全与数据
+
+- Host Key 未确认时不会自动接受；指纹变化会阻止连接。
+- 密码不会写入命令行、日志或 SQLite，只保存在会话内存或系统钥匙串。
+- RackTop 不会自动执行 `sudo` 或未经确认修改远程服务器。
+- 服务器、项目、数据集、模型、启动配置和历史数据保存在本机应用数据目录；卸载应用通常不会自动删除这些数据，如需彻底清理请先在应用设置中导出或删除，再按操作系统清理应用数据目录。
+
+## 开发者说明
+
+RackTop 使用 Tauri 2、React、TypeScript、Rust 和 SQLite 构建。开发环境需要 Node.js 20+、Rust stable 和系统 OpenSSH。
 
 ```bash
 npm install
@@ -21,36 +54,65 @@ npm run dev
 npm run tauri dev
 ```
 
-完整检查：
+运行前端构建和 Rust 测试：
 
 ```bash
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-双服务器采集探针：
-
-```bash
-cargo run --manifest-path src-tauri/Cargo.toml --features integration-probe --bin racktop-probe -- \
-  tongzh@10.201.37.233 tongzh@10.201.127.132
-```
-
-## 打包
+本地打包：
 
 ```bash
 npm run tauri build
 ```
 
-macOS 应用输出到 `src-tauri/target/release/bundle/macos/RackTop.app`，DMG 输出到 `src-tauri/target/release/bundle/dmg/`。GitHub Actions 工作流会在 macOS 和 Windows 上分别生成平台安装包。
+macOS 的应用和 DMG 会输出到 `src-tauri/target/release/bundle/`。GitHub Actions 会分别构建 macOS 和 Windows 安装包。
 
-如果当前 macOS 环境无法运行 Tauri 的 Finder 美化步骤，可使用可复现的本地打包命令；它会构建并 ad-hoc 签名 `.app`，再生成带 Applications 安装入口的 DMG：
+## 产品说明书
 
-```bash
-npm run bundle:macos
-```
+### 1. 添加服务器
 
-## 安全
+第一次使用时，从“添加服务器”开始。填写 SSH 地址、端口和登录用户，按需要选择 SSH Agent、密钥或密码，并完成 Host Key 核验。RackTop 会通过 SSH 读取服务器资源，不需要在服务器安装额外服务。
 
-- Host Key 未确认时不会自动接受；指纹变化会阻止连接。
-- 密码不写入命令行、日志或 SQLite，只保存在会话内存或系统钥匙串。
-- RackTop 不会自动执行 `sudo` 或未经确认修改远程服务器；仅在 Ubuntu/Debian 缺少 NVIDIA 驱动且用户连续两次确认后，才会尝试用免交互 `sudo -n` 执行安装。
+![添加 SSH 服务器](docs/assets/readme/add-server.png)
+
+### 2. 查看服务器与 GPU 状态
+
+总览页按服务器展示 GPU 数量、GPU 显存、系统内存和在线状态。进入服务器后，可以查看每张 GPU 的利用率、显存、温度、当前进程和 CPU 状态；点击卡片可以继续查看细节。
+
+![服务器概览](docs/assets/readme/overview.png)
+
+![全局算力总览](docs/assets/readme/fleet-overview.png)
+
+### 3. 使用远程终端
+
+需要临时检查环境时，打开对应服务器的远程终端。终端复用已配置的 SSH 连接，适合执行检查命令、确认目录、验证 Python 环境或排查任务启动问题。
+
+![远程终端](docs/assets/readme/terminal.png)
+
+### 4. 发现空闲算力
+
+在“空闲算力”中按 GPU 使用情况、可用显存和是否有进程占用筛选资源。点击启动按钮会进入启动任务，点击终端按钮只打开远程终端，不会改变任务配置。
+
+![空闲算力筛选](docs/assets/readme/idle-compute.png)
+
+### 5. 查看资源历史
+
+资源历史以热力图展示近期 GPU 使用情况，时间坐标固定在左侧并随窗口自适应。它适合快速判断一台服务器什么时候繁忙、哪些 GPU 长时间空闲，以及任务运行是否出现异常波动。
+
+![资源历史热力图](docs/assets/readme/history-heatmap.png)
+
+### 6. 管理项目、数据集和模型
+
+项目是长期管理的核心。为项目关联数据集和模型后，RackTop 会检查它们在目标服务器上的路径和副本状态；需要在另一台服务器运行时，可以从同步弹窗查看缺失项并执行同步或补齐。一个数据集或模型可以被多个项目关联。
+
+![项目、数据集和模型同步](docs/assets/readme/sync-dialog.png)
+
+### 7. 创建启动任务
+
+启动配置按项目保存。同一套超参数可以针对不同服务器切换工作目录、GPU 卡号和运行命令；粘贴已有命令时，RackTop 会识别其中的 `cd`、`CUDA_VISIBLE_DEVICES` 和项目日志路径，并在启动前生成预览。未提供项目日志路径时，RackTop 使用自己的受管日志路径，便于在任务页统一查看日志。
+
+![启动任务](docs/assets/readme/launch-task.png)
+
+启动后可以在“我的进程”中查看任务状态、日志和资源占用，并安全结束任务或外部进程。
