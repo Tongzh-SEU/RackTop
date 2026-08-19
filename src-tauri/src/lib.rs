@@ -719,6 +719,11 @@ pub fn run() {
             }
 
             #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unmaximize();
+            }
+
+            #[cfg(target_os = "macos")]
             app.set_menu(build_application_menu(&app.handle())?)?;
 
             let menu = build_tray_menu(&app.handle(), 0, 0)?;
