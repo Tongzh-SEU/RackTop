@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/readme/racktop-icons.png" alt="RackTop macOS Logo" width="300" />
+  <img src="docs/assets/readme/racktop-icon.png" alt="RackTop macOS Logo" width="300" />
 </p>
 
 ## 
