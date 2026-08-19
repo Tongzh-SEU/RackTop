@@ -715,7 +715,8 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_decorations(false);
-                let _ = window.maximize();
+                let _ = window.unmaximize();
+                let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(1500.0, 900.0)));
             }
 
             #[cfg(target_os = "macos")]

@@ -5,8 +5,8 @@
       {
         "label": "main",
         "title": "RackTop",
-        "width": 1320,
-        "height": 820,
+        "width": 1500,
+        "height": 900,
         "minWidth": 900,
         "minHeight": 620,
         "resizable": true,
