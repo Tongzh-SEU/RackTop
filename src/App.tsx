@@ -30,6 +30,7 @@ import {
   ListFilter,
   ScrollText,
   MemoryStick,
+  Minus,
   MoreHorizontal,
   Network,
   OctagonX,
@@ -44,6 +45,7 @@ import {
   Settings,
   ShieldAlert,
   SlidersHorizontal,
+  Square,
   TerminalSquare,
   Trash2,
   UserRound,
@@ -85,8 +87,11 @@ import { serverMatchesSearch } from './utils/serverSearch'
 import { updateSharedGpuWarnings, type MineProcessWarning, type SharedGpuWatchMap } from './utils/mineProcessWarnings'
 import { gpuContextName, serverDisplayName } from './utils/serverName'
 import { loadLaunchProfiles, loadManagedRuns } from './utils/managedRuns'
+import { detectAppPlatform } from './utils/platform'
 import authorAvatar from './assets/tongzh-seu.png'
 import packageInfo from '../package.json'
+
+const appPlatform = detectAppPlatform(api.isDesktop, navigator.userAgent)
 
 const ONBOARDING_DISMISSED_KEY = 'racktop.onboardingDismissed.v1'
 
@@ -152,6 +157,22 @@ async function toggleWindowMaximize(event: MouseEvent<HTMLElement>) {
   if ((event.target as HTMLElement).closest('button, input, select, textarea, a, [role="button"]')) return
   event.preventDefault()
   await getCurrentWindow().toggleMaximize()
+}
+
+function WindowsWindowControls() {
+  if (appPlatform !== 'windows') return null
+  const window = getCurrentWindow()
+  return (
+    <div className="window-controls" aria-label="窗口控制">
+      <button type="button" onClick={() => void window.minimize()} aria-label="最小化窗口"><Minus size={15} /></button>
+      <button type="button" onClick={() => void window.toggleMaximize()} aria-label="最大化或还原窗口"><Square size={12} /></button>
+      <button type="button" className="window-controls__close" onClick={() => void window.close()} aria-label="关闭窗口"><X size={15} /></button>
+    </div>
+  )
+}
+
+export function shouldShowGuidedEmptyState(mainView: string, serverCount: number) {
+  return mainView === 'fleet' && serverCount === 0
 }
 
 function serverToDraft(server: Server): Partial<ServerDraft> {
@@ -1367,11 +1388,14 @@ function App() {
             <span className={`refresh-label ${paused ? 'is-paused' : ''}`}><Clock3 size={14} />{paused ? '采集已暂停' : mainView === 'server' && selectedServer ? relativeTime(selectedServer.lastSeenAt) : totals.latestRefresh ? relativeTime(totals.latestRefresh) : `${settings?.defaultSamplingIntervalSeconds ?? 2} 秒采样`}</span>
             <button className="button button--secondary" onClick={() => void runManualRefreshAll()} disabled={manualRefreshingAll}><RefreshCw size={16} className={manualRefreshingAll ? 'spin' : ''} />刷新全部</button>
             <button className="icon-button" aria-label="预约与通知" onClick={() => setShowReservationCenter(true)}><Bell size={18} />{(totals.hot > 0 || activeIdleReservationCount > 0 || gpuMemoryStallWarnings.length > 0 || mineProcessWarnings.length > 0) && <span className="notification-dot" />}</button>
+            <WindowsWindowControls />
           </div>
         </header>
 
         <div className="workspace__scroll">
-          {servers.length === 0 ? (
+          {shouldShowGuidedEmptyState(mainView, servers.length) ? (
+            <EmptyState onboarding={<OnboardingChecklist steps={onboardingSteps} previewStep={onboardingPreviewStep} collapsed={onboardingCollapsed} dismissed={onboardingDismissed} useActualState={onboardingUseActualState} showPreviewControls={!api.isDesktop} onPreviewStepChange={setOnboardingPreviewStep} onCollapsedChange={setOnboardingCollapsed} onDismiss={() => { localStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true'); setOnboardingDismissed(true); setToast('已隐藏新手引导，可在“设置 → 通用”中重新显示') }} onUseActualStateChange={setOnboardingUseActualState} />} onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
+          ) : servers.length === 0 ? (
             <EmptyState onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
           ) : mainView === 'projects' ? (
             <ProjectView projects={projects} recentRunAt={projectRecentRunAt} servers={servers} busyTargets={busyProjectTargets} syncProgress={projectSyncProgress} preparingProjectIds={preparingProjectIds} onAdd={() => setProjectEditor('new')} onLaunch={(project) => { setManagedLaunchIntent({ id: crypto.randomUUID(), projectId: project.id }); setMainView('mine') }} onEdit={setProjectEditor} onDelete={setProjectPendingDelete} onInspect={inspectProject} onSync={(project, targetServerId) => { const target = project.targets.find((item) => item.serverId === targetServerId); if (target?.status === 'conflict') setProjectConflictTarget({ project, targetServerId }); else void syncProjectTarget(project, targetServerId) }} onCancel={(projectId, targetServerId) => void cancelProjectTarget(projectId, targetServerId)} onSyncAll={(project) => void syncAllProjectTargets(project)} />
@@ -1430,13 +1454,16 @@ function App() {
   )
 }
 
-function EmptyState({ onAdd, onImport }: { onAdd: () => void; onImport: () => void }) {
+export function EmptyState({ onboarding, onAdd, onImport }: { onboarding?: React.ReactNode; onAdd: () => void; onImport: () => void }) {
   return (
-    <div className="empty-state">
-      <span className="empty-state__icon"><ServerIcon size={28} /></span>
-      <h2>连接第一台服务器</h2>
-      <p>添加 SSH 主机或导入现有 OpenSSH Config，RackTop 会自动采集 GPU、CPU、内存和进程指标。</p>
-      <div><button className="button button--primary" onClick={onAdd}><Plus size={17} />添加服务器</button><button className="button button--secondary" onClick={onImport}><Download size={17} />导入配置</button></div>
+    <div className={`empty-fleet${onboarding ? ' empty-fleet--guided' : ''}`}>
+      {onboarding}
+      <div className="empty-state">
+        <span className="empty-state__icon"><ServerIcon size={28} /></span>
+        <h2>连接第一台服务器</h2>
+        <p>添加 SSH 主机或导入现有 OpenSSH Config，RackTop 会自动采集 GPU、CPU、内存和进程指标。</p>
+        <div><button className="button button--primary" onClick={onAdd}><Plus size={17} />添加服务器</button><button className="button button--secondary" onClick={onImport}><Download size={17} />导入配置</button></div>
+      </div>
     </div>
   )
 }

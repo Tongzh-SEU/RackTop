@@ -15,7 +15,9 @@ use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::Database;
 use terminal::TerminalManager;
-use tauri::{image::Image, menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID}, tray::TrayIconBuilder, AppHandle, Emitter, Manager, State};
+use tauri::{image::Image, menu::{Menu, MenuBuilder, MenuItemBuilder}, tray::TrayIconBuilder, AppHandle, Emitter, Manager, State};
+#[cfg(target_os = "macos")]
+use tauri::menu::{SubmenuBuilder, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID};
 
 #[derive(Default)]
 struct InteractionLogStore {
@@ -626,6 +628,7 @@ fn build_tray_menu(app: &AppHandle, reservation_pending: usize, process_warnings
     Ok(MenuBuilder::new(app).item(&open).separator().items(&[&reservations, &processes]).separator().item(&quit).build()?)
 }
 
+#[cfg(target_os = "macos")]
 fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
     let about = MenuItemBuilder::with_id("menu-about", "关于 RackTop").build(app)?;
     let settings = MenuItemBuilder::with_id("menu-settings", "设置…").accelerator("CmdOrCtrl+,").build(app)?;
@@ -690,6 +693,7 @@ pub fn run() {
             app.manage(TerminalManager::default());
             app.manage(InteractionLogStore::default());
 
+            #[cfg(target_os = "macos")]
             app.set_menu(build_application_menu(&app.handle())?)?;
 
             let menu = build_tray_menu(&app.handle(), 0, 0)?;
