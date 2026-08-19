@@ -706,6 +706,9 @@ impl Database {
         if draft.host.trim().is_empty() || draft.username.trim().is_empty() {
             return Err("主机地址和用户名不能为空".into());
         }
+        if !draft.name.trim().is_empty() && draft.name.trim().chars().count() > 24 {
+            return Err("服务器名称不能超过 24 个字符".into());
+        }
         if draft.auth_method == "password" && draft.id.is_none() && draft.password.as_deref().is_none_or(|value| value.trim().is_empty()) {
             return Err("使用密码认证时必须输入 SSH 密码".into());
         }
@@ -1935,6 +1938,14 @@ mod tests {
             ..draft("Legacy GPU", 30)
         }).unwrap();
         assert_eq!(updated.location.as_deref(), Some("Lab 301 / Rack R2 / U18"));
+    }
+
+    #[test]
+    fn rejects_server_names_longer_than_sidebar_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("server-name-limit.sqlite")).unwrap();
+        let result = db.save_server(ServerDraft { name: "server-name-that-is-longer-than-24".into(), ..draft("short", 30) });
+        assert_eq!(result.unwrap_err(), "服务器名称不能超过 24 个字符");
     }
 
     #[test]

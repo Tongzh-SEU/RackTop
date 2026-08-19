@@ -49,4 +49,9 @@ describe('ServerForm onboarding', () => {
     expect(privateKeyMarkup).not.toContain('SSH 密钥快速配置')
     expect(sshConfigMarkup).not.toContain('SSH 密钥快速配置')
   })
+
+  it('limits custom server names to keep the sidebar readable', () => {
+    const markup = renderToStaticMarkup(<ServerForm {...handlers} showGuide={false} />)
+    expect(markup).toContain('maxLength="24"')
+  })
 })

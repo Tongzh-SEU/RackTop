@@ -3,6 +3,8 @@ import { AlertTriangle, ArrowRight, Check, ChevronRight, Copy, Database, KeyRoun
 import type { ServerDraft } from '../types/models'
 import { RACKTOP_MANAGED_IDENTITY_PATH, sshSetupTargetValidationMessage, unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
 
+const MAX_SERVER_NAME_LENGTH = 24
+
 interface ServerFormProps {
   initial?: Partial<ServerDraft>
   defaultRemoteHistoryEnabled?: boolean
@@ -123,7 +125,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
         <form onSubmit={submit} className="server-form">
           <div className="server-form__body">
             <div className="form-grid form-grid--2">
-              <label>显示名称<input value={draft.name} onChange={(event) => set('name', event.target.value)} placeholder="训练服务器 A" /></label>
+              <label>显示名称<input value={draft.name} maxLength={MAX_SERVER_NAME_LENGTH} onChange={(event) => set('name', event.target.value)} placeholder="训练服务器 A" /></label>
               <label>服务器位置<input value={draft.location ?? ''} onChange={(event) => set('location', event.target.value)} placeholder="例如：实验室 301 / R2 机架 / U18" /></label>
             </div>
             <div className="form-grid form-grid--host">
