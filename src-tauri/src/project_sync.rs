@@ -532,7 +532,7 @@ mod tests {
         let project = Project {
             id: "project".into(), name: "demo".into(), kind: "project".into(), source_server_id: "source".into(), source_path: "~/demo".into(),
             source_exists: true, source_is_directory: true, source_size_bytes: 10, source_file_count: 1, source_modified_at: Some(100),
-            dataset_ids: vec![], targets: vec![target], created_at: 1, updated_at: 1, last_sync_at: Some(100), status: "synced".into(), last_error: None,
+            dataset_ids: vec![], model_ids: vec![], targets: vec![target], created_at: 1, updated_at: 1, last_sync_at: Some(100), status: "synced".into(), last_error: None,
         };
         let changed = ProjectPathCheck {
             server_id: "source".into(), requested_path: "~/demo".into(), suggested_path: "~/demo".into(), exists: true, is_directory: true,
@@ -605,7 +605,7 @@ mod tests {
             super::remote_output(&source, None, format!("mkdir -p {path}; printf 'source-v1' > {path}/model.txt", path = shell_quote(&source_path)), 15).await?;
             let project = database.save_project(ProjectDraft {
                 id: None, name: "SSH integration".into(), kind: "project".into(), source_server_id: source.id.clone(), source_path: source_path.clone(),
-                dataset_ids: vec![], targets: vec![ProjectTargetDraft { server_id: target.id.clone(), path: target_path.clone() }],
+                dataset_ids: vec![], model_ids: vec![], targets: vec![ProjectTargetDraft { server_id: target.id.clone(), path: target_path.clone() }],
             })?;
             let inspected = super::inspect(&database, &project).await?;
             if inspected.targets[0].status != "missing" { return Err(format!("expected missing target, got {}", inspected.targets[0].status)); }
@@ -647,7 +647,7 @@ mod tests {
             super::remote_output(&source, None, format!("dd if=/dev/zero of={} bs=1M count=256 status=none", shell_quote(&source_path)), 30).await?;
             let project = database.save_project(ProjectDraft {
                 id: None, name: "Resume integration".into(), kind: "project".into(), source_server_id: source.id.clone(), source_path: source_path.clone(),
-                dataset_ids: vec![], targets: vec![ProjectTargetDraft { server_id: target.id.clone(), path: target_path.clone() }],
+                dataset_ids: vec![], model_ids: vec![], targets: vec![ProjectTargetDraft { server_id: target.id.clone(), path: target_path.clone() }],
             })?;
             let inspected = super::inspect(&database, &project).await?;
             let project_id = inspected.id.clone();

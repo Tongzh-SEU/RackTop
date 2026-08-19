@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, CircleDot, Database, FolderGit2, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, RotateCcw, Save, ScrollText, Server as ServerIcon, SlidersHorizontal, Square, TerminalSquare, Trash2, X } from 'lucide-react'
+import { AlertCircle, Box, CheckCircle2, ChevronDown, ChevronRight, CircleDot, Database, FolderGit2, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, RotateCcw, Save, ScrollText, Server as ServerIcon, SlidersHorizontal, Square, TerminalSquare, Trash2, X } from 'lucide-react'
 import { api } from '../services/api'
 import type { LaunchProfile, ManagedRun, Project, Server, Snapshot } from '../types/models'
 import { hasOtherUserGpuWorkload } from '../utils/gpu'
@@ -11,6 +11,20 @@ import type { UnmanagedProcessGroup } from '../utils/unmanagedProcessGroups'
 import { normalizeLaunchCommand, parseTaskParameters, replaceLaunchContext, resolveProjectLogPath, updateLaunchParameter } from '../utils/launchCommand'
 
 type ViewTab = 'running' | 'profiles' | 'recent'
+
+export function launchDependencyIssue(project: Project, projects: Project[], serverId: string) {
+  for (const [kind, ids] of [['dataset', project.datasetIds], ['model', project.modelIds]] as const) {
+    for (const id of ids) {
+      const resource = projects.find((item) => item.id === id && item.kind === kind)
+      const label = kind === 'dataset' ? '数据集' : '模型'
+      if (!resource) return `关联${label}已移除，请先更新项目配置。`
+      if (resource.sourceServerId !== serverId && !resource.targets.some((target) => target.serverId === serverId)) {
+        return `关联${label}“${resource.name}”尚未配置到所选服务器，请先在“我的项目”中补齐目标路径。`
+      }
+    }
+  }
+  return null
+}
 
 export type ManagedLaunchIntent = {
   id: string
@@ -337,16 +351,20 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
     const normalizedCommand = normalizeLaunchCommand(profile.command)
     if (!normalizedCommand.command) { setLaunchError('启动命令在移除目录、GPU 和后台包装后为空。请保留实际执行命令。'); return }
     const preparedProfile = { ...profile, command: normalizedCommand.command }
+    if (selectedProject) {
+      const dependencyIssue = launchDependencyIssue(selectedProject, projects, server.id)
+      if (dependencyIssue) { setLaunchError(dependencyIssue); return }
+    }
     setLaunching(true)
     setLaunchError(null)
     try {
       if (syncDependencies && selectedProject && selectedProject.sourceServerId !== server.id) {
         const target = selectedProject.targets.find((item) => item.serverId === server.id)
         if (target && target.status !== 'synced') await api.syncProject(selectedProject.id, server.id)
-        for (const datasetId of selectedProject.datasetIds) {
-          const dataset = projects.find((item) => item.id === datasetId)
-          const datasetTarget = dataset?.targets.find((item) => item.serverId === server.id)
-          if (dataset && dataset.sourceServerId !== server.id && datasetTarget && datasetTarget.status !== 'synced') await api.syncProject(dataset.id, server.id)
+        for (const resourceId of [...selectedProject.datasetIds, ...selectedProject.modelIds]) {
+          const resource = projects.find((item) => item.id === resourceId)
+          const resourceTarget = resource?.targets.find((item) => item.serverId === server.id)
+          if (resource && resource.sourceServerId !== server.id && resourceTarget && resourceTarget.status !== 'synced') await api.syncProject(resource.id, server.id)
         }
       }
       const runId = crypto.randomUUID()
@@ -550,7 +568,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
               </div>}
             </section>
             <section><header><span>2</span><div><strong>运行位置</strong><small>{selectedProject ? '仅显示已配置当前项目的服务器。' : '自动推荐按空闲显存排序，也可以指定具体 GPU。'}</small></div></header><div className="managed-launch-server-list">{launchServers.map((server) => { const system = snapshots[server.id]?.system; const availableMemoryBytes = system?.memoryAvailableBytes ?? Math.max(0, (system?.memoryTotalBytes ?? 0) - (system?.memoryUsedBytes ?? 0)); return <button className={server.id === selectedServerId ? 'is-selected' : ''} key={server.id} onClick={() => { setSelectedServerId(server.id); setSelectedGpuUuids([]); setLaunchError(null) }}><span><i className={`server-row__status server-row__status--${server.status}`} /><strong>{server.name}</strong></span><small>{snapshots[server.id]?.gpus.length ?? 0} 张 GPU · {formatMemoryBytes(availableMemoryBytes).replace(' GB', '')} / {formatMemoryBytes(system?.memoryTotalBytes ?? 0)} 系统 MEM 可用</small></button>})}{launchServers.length === 0 && <p className="managed-launch-server-empty">当前没有已配置该项目且在线的服务器，请先在“我的项目”中配置同步目标。</p>}</div><div className="managed-assignment-mode"><button className={assignmentMode === 'automatic' ? 'is-selected' : ''} onClick={() => setAssignmentMode('automatic')}>自动推荐</button><button className={assignmentMode === 'manual' ? 'is-selected' : ''} onClick={() => setAssignmentMode('manual')}>指定 GPU</button></div><div className="managed-gpu-list">{availableGpus.map((gpu, index) => { const selected = selectedGpuUuids.includes(gpu.uuid); return <label className={selected ? 'is-selected' : ''} key={gpu.uuid}><input type="checkbox" checked={selected} disabled={assignmentMode === 'automatic'} onChange={(event) => setSelectedGpuUuids((current) => event.target.checked ? [...current, gpu.uuid] : current.filter((uuid) => uuid !== gpu.uuid))} /><span><strong>GPU {gpu.index}</strong><small>{((gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024).toFixed(1)} / {(gpu.memoryTotalMb / 1024).toFixed(1)} GB MEM 可用</small></span>{assignmentMode === 'automatic' && index < launchProfile.gpuCount && <em>推荐</em>}</label>})}{selectedServerId && availableGpus.length === 0 && <p>没有满足当前筛选条件的 GPU。</p>}</div><div className="managed-resource-fields"><label>GPU 数量<input type="number" min="0" max="16" value={launchProfile.gpuCount} onChange={(event) => updateLaunchProfile({ gpuCount: Math.max(0, Number(event.target.value) || 0) })} /></label><label>每卡最低空闲显存<input type="number" min="0" value={launchProfile.minimumGpuMemoryGb} onChange={(event) => updateLaunchProfile({ minimumGpuMemoryGb: Math.max(0, Number(event.target.value) || 0) })} /></label><label className="managed-resource-occupancy"><span>GPU 使用情况</span><span className="managed-resource-occupancy__control"><span>是否独占</span><input type="checkbox" checked={excludeOccupiedGpus} onChange={(event) => setExcludeOccupiedGpus(event.target.checked)} /></span></label></div></section>
-            <section><header><span>3</span><div><strong>启动前检查</strong><small>项目和数据集只在确实缺少副本时同步。</small></div></header><div className="managed-preflight"><div><CheckCircle2 size={15} /><span><strong>{selectedProject?.name ?? '临时命令'}</strong><small>{selectedProject ? selectedProjectPath || '所选服务器没有项目副本' : launchProfile.workingDirectory}</small></span></div>{selectedProject?.datasetIds.map((id) => { const dataset = projects.find((item) => item.id === id); const path = dataset && selectedServerId ? projectPathOnServer(dataset, selectedServerId) : ''; return dataset ? <div key={id}><Database size={15} /><span><strong>{dataset.name}</strong><small>{path || '所选服务器尚未配置数据集副本'}</small></span></div> : null })}<label><input type="checkbox" checked={syncDependencies} onChange={(event) => setSyncDependencies(event.target.checked)} /><span><strong>启动前补齐待更新副本</strong><small>遇到冲突时停止启动，不覆盖远端修改。</small></span></label></div><pre className="managed-command-preview"><code>{replaceLaunchContext(launchProfile.command, selectedProjectPath || launchProfile.workingDirectory, selectedGpuIndices)}{'\n\n'}# RackTop 受管日志: ~/.racktop/runs/&lt;task-id&gt;/output.log{launchProfile.projectLogPath ? `\n# 同步到项目: ${resolveProjectLogPath(launchProfile.projectLogPath, launchProfile.command)}` : ''}</code></pre><label className="managed-save-profile"><input type="checkbox" checked={saveProfile} onChange={(event) => setSaveProfile(event.target.checked)} />启动后保存为启动配置</label>{launchError && <p className="form-error" role="alert">{launchError}</p>}</section>
+            <section><header><span>3</span><div><strong>启动前检查</strong><small>项目、数据集和模型只在确实缺少副本时同步。</small></div></header><div className="managed-preflight"><div><CheckCircle2 size={15} /><span><strong>{selectedProject?.name ?? '临时命令'}</strong><small>{selectedProject ? selectedProjectPath || '所选服务器没有项目副本' : launchProfile.workingDirectory}</small></span></div>{selectedProject?.datasetIds.map((id) => { const dataset = projects.find((item) => item.id === id); const path = dataset && selectedServerId ? projectPathOnServer(dataset, selectedServerId) : ''; return dataset ? <div key={id}><Database size={15} /><span><strong>{dataset.name}</strong><small>{path || '所选服务器尚未配置数据集副本'}</small></span></div> : null })}{selectedProject?.modelIds.map((id) => { const model = projects.find((item) => item.id === id); const path = model && selectedServerId ? projectPathOnServer(model, selectedServerId) : ''; return model ? <div key={id}><Box size={15} /><span><strong>{model.name}</strong><small>{path || '所选服务器尚未配置模型副本'}</small></span></div> : null })}<label><input type="checkbox" checked={syncDependencies} onChange={(event) => setSyncDependencies(event.target.checked)} /><span><strong>启动前补齐待更新副本</strong><small>遇到冲突时停止启动，不覆盖远端修改。</small></span></label></div><pre className="managed-command-preview"><code>{replaceLaunchContext(launchProfile.command, selectedProjectPath || launchProfile.workingDirectory, selectedGpuIndices)}{'\n\n'}# RackTop 受管日志: ~/.racktop/runs/&lt;task-id&gt;/output.log{launchProfile.projectLogPath ? `\n# 同步到项目: ${resolveProjectLogPath(launchProfile.projectLogPath, launchProfile.command)}` : ''}</code></pre><label className="managed-save-profile"><input type="checkbox" checked={saveProfile} onChange={(event) => setSaveProfile(event.target.checked)} />启动后保存为启动配置</label>{launchError && <p className="form-error" role="alert">{launchError}</p>}</section>
           </div>
         </div>
         <footer className="sheet__footer"><span className="managed-launch-readiness">{selectedGpuUuids.length === launchProfile.gpuCount && (selectedProjectPath || launchProfile.workingDirectory) ? <><CheckCircle2 size={13} />配置完整，可以启动</> : <><AlertCircle size={13} />请完成运行位置与资源选择</>}</span><button className="button button--secondary" onClick={() => setLaunchOpen(false)} disabled={launching}>取消</button><button className="button button--secondary" onClick={saveLaunchProfile} disabled={launching}><Save size={14} />{profiles.some((profile) => profile.id === launchProfile.id) ? '保存配置' : '添加配置'}</button><button className="button button--primary" onClick={() => void launch()} disabled={launching}>{launching ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}{launching ? '正在准备…' : '启动任务'}</button></footer>

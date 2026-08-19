@@ -53,7 +53,7 @@ import {
 } from 'lucide-react'
 import { api } from './services/api'
 import { openExternalUrl } from './services/external'
-import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, LinkedDatasetPlan, Project, ProjectDraft, ProjectSyncProgress, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
+import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, LinkedProjectResourcePlan, Project, ProjectDraft, ProjectSyncProgress, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
 import { isRackTopManagedIdentity } from './utils/sshSetup'
 import { DeleteServerDialog } from './components/DeleteServerDialog'
 import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
@@ -860,7 +860,7 @@ function App() {
     for (const project of projects) {
       const projectRunAt = recentRunAt[project.id]
       if (!projectRunAt) continue
-      for (const datasetId of project.datasetIds) recentRunAt[datasetId] = Math.max(recentRunAt[datasetId] ?? 0, projectRunAt)
+      for (const resourceId of [...project.datasetIds, ...project.modelIds]) recentRunAt[resourceId] = Math.max(recentRunAt[resourceId] ?? 0, projectRunAt)
     }
     return recentRunAt
   }, [mainView, projects])
@@ -965,32 +965,33 @@ function App() {
     await refreshServer(saved.id)
   }
 
-  async function saveProject(draft: ProjectDraft, syncAfterSave: boolean, linkedDatasets: LinkedDatasetPlan[]) {
+  async function saveProject(draft: ProjectDraft, syncAfterSave: boolean, linkedResources: LinkedProjectResourcePlan[]) {
     const saved = await api.saveProject(draft)
     setProjects((current) => [saved, ...current.filter((item) => item.id !== saved.id)])
     setProjectEditor(null)
-    const prepareLinkedDatasets = async () => {
+    const prepareLinkedResources = async () => {
       const prepared: Array<{ project: Project; syncTargetIds: string[] }> = []
-      for (const plan of linkedDatasets.filter((item) => item.syncOnSave)) {
-        const dataset = projects.find((item) => item.id === plan.datasetId && item.kind === 'dataset')
-        if (!dataset) continue
-        setPreparingProjectIds((current) => new Set(current).add(dataset.id))
+      for (const plan of linkedResources.filter((item) => item.syncOnSave)) {
+        const resource = projects.find((item) => item.id === plan.resourceId && item.kind === plan.kind)
+        if (!resource) continue
+        setPreparingProjectIds((current) => new Set(current).add(resource.id))
         try {
           const plannedIds = new Set(plan.targets.map((target) => target.serverId))
           const configured = await api.saveProject({
-            id: dataset.id,
-            name: dataset.name,
-            kind: 'dataset',
-            sourceServerId: dataset.sourceServerId,
-            sourcePath: dataset.sourcePath,
+            id: resource.id,
+            name: resource.name,
+            kind: resource.kind,
+            sourceServerId: resource.sourceServerId,
+            sourcePath: resource.sourcePath,
             datasetIds: [],
-            targets: [...dataset.targets.filter((target) => !plannedIds.has(target.serverId)).map(({ serverId, path }) => ({ serverId, path })), ...plan.targets],
+            modelIds: [],
+            targets: [...resource.targets.filter((target) => !plannedIds.has(target.serverId)).map(({ serverId, path }) => ({ serverId, path })), ...plan.targets],
           })
           const inspected = await api.inspectProject(configured.id)
           setProjects((current) => current.map((item) => item.id === inspected.id ? inspected : item))
           prepared.push({ project: inspected, syncTargetIds: plan.targets.map((target) => target.serverId) })
         } finally {
-          setPreparingProjectIds((current) => { const next = new Set(current); next.delete(dataset.id); return next })
+          setPreparingProjectIds((current) => { const next = new Set(current); next.delete(resource.id); return next })
         }
       }
       return prepared
@@ -999,22 +1000,22 @@ function App() {
       setPreparingProjectIds((current) => new Set(current).add(saved.id))
       setToast(`“${saved.name}”已保存，正在准备同步`)
       try {
-        const [inspected, preparedDatasets] = await Promise.all([api.inspectProject(saved.id), prepareLinkedDatasets()])
+        const [inspected, preparedResources] = await Promise.all([api.inspectProject(saved.id), prepareLinkedResources()])
         setProjects((current) => current.map((item) => item.id === inspected.id ? inspected : item))
         if (!inspected.sourceExists) throw new Error('主目录不存在，无法开始同步')
         const projectTargetTotal = syncableProjectTargets(inspected).length
         const syncing = syncAllProjectTargets(inspected, false)
         setPreparingProjectIds((current) => { const next = new Set(current); next.delete(saved.id); return next })
         const completed = await syncing
-        let datasetCompleted = 0
-        let datasetTotal = 0
-        for (const prepared of preparedDatasets) {
-          datasetTotal += prepared.syncTargetIds.length
+        let resourceCompleted = 0
+        let resourceTotal = 0
+        for (const prepared of preparedResources) {
+          resourceTotal += prepared.syncTargetIds.length
           const results = await Promise.all(prepared.syncTargetIds.map((serverId) => syncProjectTarget(prepared.project, serverId, false)))
-          datasetCompleted += results.filter(Boolean).length
+          resourceCompleted += results.filter(Boolean).length
         }
-        const datasetMessage = datasetTotal > 0 ? `；数据集 ${datasetCompleted} / ${datasetTotal} 个目标同步成功` : ''
-        setToast(completed === projectTargetTotal ? `“${saved.name}”已更新 ${completed} 个目标${datasetMessage}` : `“${saved.name}”已保存；${completed} / ${projectTargetTotal} 个目标同步成功${datasetMessage}`)
+        const resourceMessage = resourceTotal > 0 ? `；关联资源 ${resourceCompleted} / ${resourceTotal} 个目标同步成功` : ''
+        setToast(completed === projectTargetTotal ? `“${saved.name}”已更新 ${completed} 个目标${resourceMessage}` : `“${saved.name}”已保存；${completed} / ${projectTargetTotal} 个目标同步成功${resourceMessage}`)
       } catch (reason) {
         setToast(`“${saved.name}”已保存，准备同步失败：${String(reason)}`)
       } finally {

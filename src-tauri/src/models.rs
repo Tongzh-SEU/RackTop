@@ -136,7 +136,10 @@ pub struct Project {
     pub source_size_bytes: u64,
     pub source_file_count: u64,
     pub source_modified_at: Option<i64>,
+    #[serde(default)]
     pub dataset_ids: Vec<String>,
+    #[serde(default)]
+    pub model_ids: Vec<String>,
     pub targets: Vec<ProjectTarget>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -162,6 +165,8 @@ pub struct ProjectDraft {
     pub source_path: String,
     #[serde(default)]
     pub dataset_ids: Vec<String>,
+    #[serde(default)]
+    pub model_ids: Vec<String>,
     pub targets: Vec<ProjectTargetDraft>,
 }
 

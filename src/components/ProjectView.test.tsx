@@ -30,7 +30,7 @@ const detachedProject: Project = {
   sourceIsDirectory: true,
   sourceSizeBytes: 0,
   sourceFileCount: 0,
-  datasetIds: [],
+  datasetIds: [], modelIds: [],
   targets: [{ serverId: targetServer.id, path: '~/training', status: 'unknown', exists: false, isDirectory: false, sizeBytes: 0, fileCount: 0 }],
   createdAt: 1,
   updatedAt: 2,
@@ -113,14 +113,16 @@ describe('Project source removal', () => {
     expect(markup).toContain('Target')
   })
 
-  it('places target servers before linked datasets and explains the combined sync action', () => {
-    const adding = renderToStaticMarkup(<ProjectForm projects={[dataset]} servers={[sourceServer, targetServer]} onClose={vi.fn()} onSave={vi.fn()} />)
-    const editing = renderToStaticMarkup(<ProjectForm initial={{ ...detachedProject, sourceServerId: sourceServer.id }} projects={[dataset]} servers={[sourceServer, targetServer]} onClose={vi.fn()} onSave={vi.fn()} />)
+  it('places target servers before linked datasets and models and explains the combined sync action', () => {
+    const adding = renderToStaticMarkup(<ProjectForm projects={[dataset, model]} servers={[sourceServer, targetServer]} onClose={vi.fn()} onSave={vi.fn()} />)
+    const editing = renderToStaticMarkup(<ProjectForm initial={{ ...detachedProject, sourceServerId: sourceServer.id }} projects={[dataset, model]} servers={[sourceServer, targetServer]} onClose={vi.fn()} onSave={vi.fn()} />)
 
     expect(adding).toContain('缺失副本可随“保存并同步”一并补齐')
     expect(adding.indexOf('目标服务器')).toBeLessThan(adding.indexOf('关联数据集'))
+    expect(adding.indexOf('关联数据集')).toBeLessThan(adding.indexOf('关联模型'))
     expect(editing).toContain('缺失副本可随“保存并同步”一并补齐')
     expect(editing.indexOf('目标服务器')).toBeLessThan(editing.indexOf('关联数据集'))
+    expect(editing.indexOf('关联数据集')).toBeLessThan(editing.indexOf('关联模型'))
     expect(editing).toContain('project-dataset-row--editing')
   })
 

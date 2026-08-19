@@ -327,6 +327,7 @@ export interface Project {
   sourceFileCount: number
   sourceModifiedAt?: number | null
   datasetIds: string[]
+  modelIds: string[]
   targets: ProjectTarget[]
   createdAt: number
   updatedAt: number
@@ -342,11 +343,13 @@ export interface ProjectDraft {
   sourceServerId: string
   sourcePath: string
   datasetIds: string[]
+  modelIds: string[]
   targets: Array<{ serverId: string; path: string }>
 }
 
-export interface LinkedDatasetPlan {
-  datasetId: string
+export interface LinkedProjectResourcePlan {
+  resourceId: string
+  kind: 'dataset' | 'model'
   syncOnSave: boolean
   targets: Array<{ serverId: string; path: string }>
 }

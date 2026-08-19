@@ -108,18 +108,18 @@ function ProjectGrid({ items, allProjects, servers, busyTargets, syncProgress, p
     const syncableTargets = syncableProjectTargets(project)
     const cardState = source ? projectCardState(project, projectBusy) : { kind: 'error', label: '主服务器已移除' }
     const related = project.kind === 'project'
-      ? project.datasetIds.map((id) => allProjects.find((item) => item.id === id)).filter((item): item is Project => Boolean(item))
-      : project.kind === 'dataset' ? allProjects.filter((item) => item.kind === 'project' && item.datasetIds.includes(project.id)) : []
-    const relatedPresence = project.kind === 'project' ? Object.fromEntries(related.map((dataset) => {
+      ? [...project.datasetIds, ...project.modelIds].map((id) => allProjects.find((item) => item.id === id)).filter((item): item is Project => Boolean(item))
+      : allProjects.filter((item) => item.kind === 'project' && (project.kind === 'dataset' ? item.datasetIds : item.modelIds).includes(project.id))
+    const relatedPresence = project.kind === 'project' ? Object.fromEntries(related.map((resource) => {
       let missing = 0
       let unknown = 0
       for (const target of project.targets) {
-        if (target.serverId === dataset.sourceServerId) continue
-        const datasetTarget = dataset.targets.find((item) => item.serverId === target.serverId)
-        if (!datasetTarget) unknown += 1
-        else if (!datasetTarget.exists || ['missing', 'error', 'offline'].includes(datasetTarget.status)) missing += 1
+        if (target.serverId === resource.sourceServerId) continue
+        const resourceTarget = resource.targets.find((item) => item.serverId === target.serverId)
+        if (!resourceTarget) unknown += 1
+        else if (!resourceTarget.exists || ['missing', 'error', 'offline'].includes(resourceTarget.status)) missing += 1
       }
-      return [dataset.id, { missing, unknown }]
+      return [resource.id, { missing, unknown }]
     })) : {}
 
     return <article className={`panel project-card-wrap${source ? '' : ' is-source-missing'}${projectBusy ? ' is-syncing' : ''}`} key={project.id}>
@@ -131,7 +131,7 @@ function ProjectGrid({ items, allProjects, servers, busyTargets, syncProgress, p
           {related.length > 0 && <div className="project-card__relations">{related.map((item) => {
             const presence = relatedPresence[item.id]
             const relationState = presence?.missing ? `缺 ${presence.missing}` : presence?.unknown ? '待检测' : ''
-            return <em key={item.id} className={presence?.missing ? 'is-missing' : presence?.unknown ? 'is-unknown' : ''}>{project.kind === 'project' ? <Database size={11} /> : <FolderGit2 size={11} />}{item.name}{relationState && <small>{relationState}</small>}</em>
+            return <em key={item.id} className={presence?.missing ? 'is-missing' : presence?.unknown ? 'is-unknown' : ''}>{project.kind === 'project' ? <ProjectKindIcon kind={item.kind} size={11} /> : <FolderGit2 size={11} />}{item.name}{relationState && <small>{relationState}</small>}</em>
           })}</div>}
         </div>
         <div className="project-card__tools">{project.kind === 'project' && onLaunch && <button className="icon-button project-launch" disabled={projectBusy || !source} onClick={() => onLaunch(project)} aria-label={`启动 ${project.name}`} title="启动任务"><Play size={14} /></button>}<button className="icon-button" disabled={projectBusy} onClick={() => onEdit(project)} aria-label={`编辑 ${project.name}`} title="编辑"><Pencil size={14} /></button><button className="icon-button project-delete" disabled={projectBusy} onClick={() => onDelete(project)} aria-label={`删除 ${project.name}`} title="移除配置"><Trash2 size={14} /></button></div>
