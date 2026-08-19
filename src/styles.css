@@ -65,7 +65,7 @@ button, input, select { font: inherit; }
 button { color: inherit; }
 button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid color-mix(in srgb, var(--blue) 35%, transparent); outline-offset: 2px; }
 
-.app-shell { height: 100%; display: grid; grid-template-columns: clamp(180px, 16vw, 248px) minmax(0, 1fr); }
+.app-shell { height: 100%; display: grid; grid-template-columns: clamp(220px, 16vw, 248px) minmax(0, 1fr); }
 .sidebar { position: relative; z-index: 2; display: flex; flex-direction: column; min-height: 0; padding: 12px 10px 10px; background: var(--sidebar); border-right: 1px solid var(--border); backdrop-filter: blur(28px) saturate(170%); -webkit-backdrop-filter: blur(28px) saturate(170%); }
 .sidebar__titlebar { margin: -12px -10px 0; padding: 12px 10px 0; }
 .sidebar__titlebar > * { pointer-events: none; }
