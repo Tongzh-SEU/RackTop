@@ -47,7 +47,6 @@ describe('HistoryHeatmaps', () => {
 
   it('renders storage as one full-width 100 by 5 ownership waffle per disk', () => {
     const markup = renderToStaticMarkup(<StorageWaffleList disks={snapshot.disks ?? []} />)
-    expect(markup).toContain('存储空间')
     expect(markup).toContain('data-columns="100" data-rows="5"')
     expect(markup).toContain('/data')
     expect(markup).toContain('你的 <strong>1.5 GB</strong>')

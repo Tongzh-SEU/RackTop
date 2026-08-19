@@ -462,7 +462,7 @@ impl Database {
                     proxy_jump TEXT,
                     tags_json TEXT NOT NULL DEFAULT '[]',
                     sampling_interval_seconds INTEGER NOT NULL DEFAULT 2,
-                    history_retention_days INTEGER NOT NULL DEFAULT 30,
+                    history_retention_days INTEGER NOT NULL DEFAULT 90,
                     remote_history_enabled INTEGER NOT NULL DEFAULT 0,
                     remote_history_last_sync_at INTEGER,
                     sort_order INTEGER NOT NULL DEFAULT 0,
@@ -568,6 +568,11 @@ impl Database {
             connection.execute("ALTER TABLE remote_cleanup_queue ADD COLUMN managed_public_key TEXT", []).map_err(|error| error.to_string())?;
         }
         connection.execute_batch("CREATE TABLE IF NOT EXISTS storage_migrations (key TEXT PRIMARY KEY, applied_at INTEGER NOT NULL);").map_err(|error| error.to_string())?;
+        let retention_migration_applied: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM storage_migrations WHERE key='server-history-retention-90d-v1')", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+        if !retention_migration_applied {
+            connection.execute("UPDATE servers SET history_retention_days=90 WHERE history_retention_days=30", []).map_err(|error| error.to_string())?;
+            connection.execute("INSERT INTO storage_migrations(key,applied_at) VALUES('server-history-retention-90d-v1',unixepoch())", []).map_err(|error| error.to_string())?;
+        }
         let snapshot_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(snapshots)").map_err(|error| error.to_string())?;
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;

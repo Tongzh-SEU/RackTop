@@ -119,7 +119,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .sidebar__footer { display: grid; gap: 2px; padding-top: 8px; border-top: 1px solid var(--border); }
 .sidebar__footer button { color: var(--text-secondary); font-size: 12px; }
 .workspace { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; background: var(--bg); }
-.workspace__scroll { min-width: 0; min-height: 0; overflow-y: auto; scrollbar-color: color-mix(in srgb, var(--text-tertiary) 20%, transparent) transparent; scrollbar-width: thin; }
+.workspace__scroll { min-width: 0; min-height: 0; overflow-y: auto; overflow-anchor: none; scrollbar-color: color-mix(in srgb, var(--text-tertiary) 20%, transparent) transparent; scrollbar-width: thin; }
 .workspace__scroll::-webkit-scrollbar { width: 9px; }
 .workspace__scroll::-webkit-scrollbar-track { background: transparent; }
 .workspace__scroll::-webkit-scrollbar-thumb { min-height: 44px; border: 3px solid transparent; border-radius: 999px; background: color-mix(in srgb, var(--text-tertiary) 20%, transparent); background-clip: padding-box; }
@@ -458,7 +458,7 @@ button.gpu-card:active { transform: scale(.99); }
 .history-page__state { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 180px; color: var(--text-tertiary); font-size: 11px; }
 .history-page__state--error { color: var(--red); }
 .history-heatmap-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 10px; }
-.history-heatmap { --heat-cell-size: 11px; min-width: 0; padding: 14px 15px 12px; }
+.history-heatmap { --heat-cell-size: 13px; min-width: 0; padding: 14px 15px 12px; }
 .history-heatmap--blue { --heat-color: var(--blue); }
 .history-heatmap--green { --heat-color: var(--green); }
 .history-heatmap--purple { --heat-color: var(--purple); }
@@ -474,7 +474,7 @@ button.gpu-card:active { transform: scale(.99); }
 .history-heatmap__scroll { overflow-x: auto; overflow-y: hidden; padding: 1px 0 5px; scrollbar-color: color-mix(in srgb, var(--text-tertiary) 20%, transparent) transparent; scrollbar-width: thin; }
 .history-heatmap__grid { display: grid; align-items: center; gap: 2px; width: 100%; }
 .history-heatmap__day { overflow: visible; color: var(--text-tertiary); font-size: 8px; line-height: 12px; white-space: nowrap; }
-.history-heatmap__time { padding-right: 4px; color: var(--text-tertiary); font-size: 8px; line-height: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+.history-heatmap__time { position: sticky; inset-inline-start: 0; z-index: 2; padding: 0 2px 0 0; color: var(--text-tertiary); background: var(--surface); font-size: 8px; line-height: 12px; text-align: left; font-variant-numeric: tabular-nums; }
 .history-heatmap__cell { display: block; min-width: 0; aspect-ratio: 1; border: 1px solid color-mix(in srgb, var(--border) 70%, transparent); border-radius: 2px; background: var(--surface-muted); }
 .history-heatmap__cell.is-empty { background: color-mix(in srgb, var(--surface-muted) 55%, transparent); }
 .history-heatmap .is-level-0 { background: color-mix(in srgb, var(--text-tertiary) 18%, var(--surface)); }
