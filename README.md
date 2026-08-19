@@ -1,11 +1,8 @@
 <p align="center">
-  <img src="docs/assets/readme/racktop-icons.png" alt="RackTop macOS Logo" width="96" />
+  <img src="docs/assets/readme/racktop-icons.png" alt="RackTop macOS Logo" width="300" />
 </p>
 
-<h1 align="center">RackTop</h1>
-
-<p align="center">多服务器 GPU 算力与训练任务工作台</p>
-
+## 
 RackTop 是面向个人研究者和小型团队的 GPU 服务器工作台。它把多台 Linux 服务器的算力状态、远程终端、项目资料和训练任务集中到一个桌面应用中，让你可以在启动任务前看清资源，在运行过程中持续掌握状态，在不同服务器之间保持项目资料一致。
 
 RackTop 通过本机 OpenSSH 连接服务器，不要求在远程机器安装常驻 Agent。服务器、项目、数据集、模型和启动配置都保存在本地，连接信息和密钥由用户掌控。
