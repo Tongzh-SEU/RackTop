@@ -2,6 +2,8 @@ use crate::models::{CpuProcessMetric, DiskMetric, GpuMetric, ManagedRunLaunchRes
 use crate::ssh_keys::expand_identity_path;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::{collections::{HashMap, HashSet}, process::Stdio, time::{SystemTime, UNIX_EPOCH}};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use tokio::{process::Command, time::{timeout, Duration}};
 
 const REMOTE_SCRIPT: &str = r#"export LANG=C LC_ALL=C;
@@ -182,6 +184,8 @@ pub(crate) fn configured_ssh_command_without_control(server: &Server, password: 
 
 fn configured_ssh_command_with_control(server: &Server, password: Option<&str>, _use_control_master: bool) -> Result<(Command, String), String> {
     let mut command = Command::new("ssh");
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
     command.args(["-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=yes"]);
     if server.auth_method == "password" {
         let password = password.ok_or("没有可用密码；请重新编辑服务器并输入密码")?;

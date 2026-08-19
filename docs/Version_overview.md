@@ -9,7 +9,8 @@
 - 修复 Windows 快捷方式图标白底或黑边，并移除侧栏顶部错误的 macOS 红绿灯留白。
 - 修复 Windows PowerShell 无法生成 RackTop 专用 SSH 密钥的问题，并在生成失败时立即给出明确错误。
 - 修复没有服务器时五步新手引导不显示的问题。
-- 清理 Windows 构建中的非致命 Rust 编译 warning。
+- 修复 Windows 后台 SSH 检查弹出并反复关闭命令行窗口的问题。
+- 修复 Windows 无边框窗口配置和自绘窗口控制按钮失效的问题。
 
 ## 1.24.3
 

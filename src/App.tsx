@@ -163,7 +163,7 @@ function WindowsWindowControls() {
   if (appPlatform !== 'windows') return null
   const window = getCurrentWindow()
   return (
-    <div className="window-controls" aria-label="窗口控制">
+    <div className="window-controls" aria-label="窗口控制" onMouseDown={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
       <button type="button" onClick={() => void window.minimize()} aria-label="最小化窗口"><Minus size={15} /></button>
       <button type="button" onClick={() => void window.toggleMaximize()} aria-label="最大化或还原窗口"><Square size={12} /></button>
       <button type="button" className="window-controls__close" onClick={() => void window.close()} aria-label="关闭窗口"><X size={15} /></button>

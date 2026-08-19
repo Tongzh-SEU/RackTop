@@ -2,12 +2,17 @@ use crate::models::{HostKeyInfo, Server};
 use base64::{engine::general_purpose::{STANDARD, STANDARD_NO_PAD}, Engine};
 use sha2::{Digest, Sha256};
 use std::{fs::OpenOptions, io::Write, path::PathBuf, process::Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use tokio::{process::Command, time::{timeout, Duration}};
 
 pub async fn scan(server: &Server) -> Result<HostKeyInfo, String> {
+    let mut command = Command::new("ssh-keyscan");
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
     let output = timeout(
         Duration::from_secs(8),
-        Command::new("ssh-keyscan")
+        command
             .args(["-T", "5", "-p", &server.port.to_string(), &server.host])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -31,7 +36,10 @@ async fn known_key_changed(server: &Server, scanned: &HostKeyInfo) -> Result<boo
     let path = known_hosts_path()?;
     if !path.exists() { return Ok(false); }
     let lookup = if server.port == 22 { server.host.clone() } else { format!("[{}]:{}", server.host, server.port) };
-    let output = Command::new("ssh-keygen").args(["-F", &lookup, "-f", &path.to_string_lossy()]).output().await.map_err(|error| format!("无法核对现有 Host Key：{error}"))?;
+    let mut command = Command::new("ssh-keygen");
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let output = command.args(["-F", &lookup, "-f", &path.to_string_lossy()]).output().await.map_err(|error| format!("无法核对现有 Host Key：{error}"))?;
     if !output.status.success() || output.stdout.is_empty() { return Ok(false); }
     let scanned_fields: Vec<&str> = scanned.key_line.split_whitespace().collect();
     let known_output = String::from_utf8_lossy(&output.stdout);
