@@ -1,0 +1,73 @@
+name: Build RackTop
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-14
+            args: --target aarch64-apple-darwin --bundles app,dmg
+            rust-target: aarch64-apple-darwin
+          - platform: windows-latest
+            args: --bundles msi,nsis
+            rust-target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+      - run: npm ci
+      - run: npm run build
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: ${{ matrix.args }}
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: racktop-[platform]-[arch]-[bundle]
+      - name: Smoke-test Windows installers
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = Get-ChildItem 'src-tauri/target/release/bundle/msi' -Filter '*.msi' | Select-Object -First 1
+          $nsis = Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $msi) { throw 'Windows build did not produce an MSI installer.' }
+          if (-not $nsis) { throw 'Windows build did not produce an NSIS setup executable.' }
+
+          $msiExtract = Join-Path $env:RUNNER_TEMP 'racktop-msi-extract'
+          $msiArgs = "/a `"$($msi.FullName)`" /qn /norestart TARGETDIR=`"$msiExtract`""
+          $msiProcess = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru
+          if ($msiProcess.ExitCode -ne 0) { throw "MSI administrative install failed with exit code $($msiProcess.ExitCode)." }
+          if (-not (Get-ChildItem $msiExtract -Recurse -Filter 'RackTop.exe' -ErrorAction SilentlyContinue)) {
+            throw 'MSI did not contain RackTop.exe.'
+          }
+
+          $nsisInstall = Join-Path $env:RUNNER_TEMP 'racktop-nsis-install'
+          $nsisProcess = Start-Process $nsis.FullName -ArgumentList "/S /D=$nsisInstall" -Wait -PassThru
+          if ($nsisProcess.ExitCode -ne 0) { throw "NSIS installation failed with exit code $($nsisProcess.ExitCode)." }
+          $app = Get-ChildItem $nsisInstall -Recurse -Filter 'RackTop.exe' | Select-Object -First 1
+          if (-not $app) { throw 'NSIS installation did not create RackTop.exe.' }
+
+          $appProcess = Start-Process $app.FullName -PassThru
+          Start-Sleep -Seconds 5
+          if ($appProcess.HasExited) { throw "Installed RackTop exited early with code $($appProcess.ExitCode)." }
+          Stop-Process -Id $appProcess.Id -Force
+
+          $uninstaller = Get-ChildItem $nsisInstall -Recurse -Filter 'uninstall.exe' | Select-Object -First 1
+          if (-not $uninstaller) { throw 'NSIS installation did not create an uninstaller.' }
+          $uninstallProcess = Start-Process $uninstaller.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($uninstallProcess.ExitCode -ne 0) { throw "NSIS uninstall failed with exit code $($uninstallProcess.ExitCode)." }
