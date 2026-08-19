@@ -1,7 +1,7 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Cpu, HardDrive, MemoryStick } from 'lucide-react'
 import type { DiskMetric, HistoryHeatmapPoint, Snapshot } from '../types/models'
-import { buildHeatmapDays, HEATMAP_BUCKET_HOURS, HEATMAP_ROWS_PER_DAY, heatmapLevel, historyHeatmapValue, indexHeatmapPoints } from '../utils/historyHeatmap'
+import { buildHeatmapDays, HEATMAP_BUCKET_HOURS, HEATMAP_LABEL_STEP_DAYS, HEATMAP_ROWS_PER_DAY, heatmapLevel, historyHeatmapValue, indexHeatmapPoints } from '../utils/historyHeatmap'
 
 type HeatmapMetric = 'utilization' | 'memory'
 type HeatmapTone = 'blue' | 'green' | 'purple'
@@ -23,9 +23,14 @@ interface ResourceHeatmapProps {
 
 function ResourceHeatmap({ title, subtitle, resource, points, days, defaultMetric, memoryTone, icon }: ResourceHeatmapProps) {
   const [metric, setMetric] = useState<HeatmapMetric>(defaultMetric)
+  const scrollRef = useRef<HTMLDivElement>(null)
   const pointIndex = useMemo(() => indexHeatmapPoints(points), [points])
-  const labelStep = Math.max(1, Math.ceil(days.length / 8))
   const metricLabel = metric === 'memory' ? 'MEM' : 'UTL'
+
+  useEffect(() => {
+    const element = scrollRef.current
+    if (element) element.scrollLeft = element.scrollWidth
+  }, [days.length])
 
   return (
     <section className={`panel history-heatmap history-heatmap--${historyHeatmapTone(metric, memoryTone)}`}>
@@ -36,10 +41,14 @@ function ResourceHeatmap({ title, subtitle, resource, points, days, defaultMetri
           <button type="button" aria-pressed={metric === 'memory'} onClick={() => setMetric('memory')}>MEM</button>
         </div>
       </header>
-      <div className="history-heatmap__scroll">
-        <div className="history-heatmap__grid" data-columns={days.length} data-rows={HEATMAP_ROWS_PER_DAY} style={{ gridTemplateColumns: `42px repeat(${days.length}, minmax(var(--heat-cell-size), 1fr))`, minWidth: `${42 + days.length * 13}px` }} role="img" aria-label={`${title} ${metricLabel} 每 3 小时平均值热力图`}>
+      <div className="history-heatmap__scroll" ref={scrollRef}>
+        <div className="history-heatmap__grid" data-columns={days.length} data-rows={HEATMAP_ROWS_PER_DAY} style={{ gridTemplateColumns: `32px repeat(${days.length}, minmax(var(--heat-cell-size), 1fr))`, minWidth: `${32 + days.length * 13}px` }} role="img" aria-label={`${title} ${metricLabel} 每 3 小时平均值热力图`}>
           <span aria-hidden="true" />
-          {days.map((day, index) => <span className="history-heatmap__day" key={day.key} title={day.fullLabel}>{index === 0 || index === days.length - 1 || (index % labelStep === 0 && days.length - index > 2) ? day.label : ''}</span>)}
+          {days.map((day, index) => {
+            const isEndLabel = index === days.length - 1
+            const isStepLabel = index % HEATMAP_LABEL_STEP_DAYS === 0 && days.length - index > 3
+            return <span className="history-heatmap__day" key={day.key} title={day.fullLabel}>{isStepLabel || isEndLabel ? day.label : ''}</span>
+          })}
           {Array.from({ length: HEATMAP_ROWS_PER_DAY }, (_, row) => {
             const startHour = row * HEATMAP_BUCKET_HOURS
             const endHour = startHour + HEATMAP_BUCKET_HOURS
@@ -80,12 +89,6 @@ function formatStorage(bytes: number) {
 export function StorageWaffleList({ disks }: { disks: DiskMetric[] }) {
   return (
     <section className="panel storage-waffle-panel">
-      <header className="history-heatmap__header">
-        <div className="history-heatmap__identity">
-          <span className="storage-waffle__icon"><HardDrive size={16} /></span>
-          <div><h3>存储空间</h3><p>深绿为你的占用，浅绿为其他占用，灰色为空闲</p></div>
-        </div>
-      </header>
       {disks.length === 0 ? <p className="storage-waffle__empty">暂无磁盘采样</p> : (
         <div className="storage-waffle-list">
           {disks.map((disk) => {

@@ -52,16 +52,21 @@ export function windowsSshSetupScript({ username, host, port }: SshSetupTarget) 
   const sshPort = Number.isInteger(port) && port > 0 ? port : 22
   return `# 在本机 PowerShell 执行。整段复制粘贴即可。
 # ssh 后面引号内的命令会自动在远程 Linux 服务器执行。
-$keyPath = Join-Path $env:USERPROFILE ".ssh\\racktop_ed25519"
+$sshDirectory = Join-Path $env:USERPROFILE ".ssh"
+$keyPath = Join-Path $sshDirectory "racktop_ed25519"
+$publicKeyPath = "$keyPath.pub"
 
 # 本机：生成 RackTop 专用密钥，已有密钥不会覆盖。
 if (-not (Test-Path $keyPath)) {
+  New-Item -ItemType Directory -Force -Path $sshDirectory | Out-Null
   $keyId = [guid]::NewGuid().ToString()
-  ssh-keygen -q -t ed25519 -N "" -C "racktop-managed:$keyId" -f $keyPath
+  ssh-keygen -q -t ed25519 -N '""' -C "racktop-managed:$keyId" -f $keyPath
+  if ($LASTEXITCODE -ne 0) { throw "RackTop 专用密钥生成失败（ssh-keygen 退出码 $LASTEXITCODE）。" }
 }
+if (-not (Test-Path $publicKeyPath)) { throw "未找到 RackTop 公钥：$publicKeyPath" }
 
 # 远程：创建 .ssh 并将本机公钥追加到 authorized_keys。
-Get-Content "$keyPath.pub" | ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no -p ${sshPort} ${target} 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys'
+Get-Content $publicKeyPath | ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no -p ${sshPort} ${target} 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys'
 
 # 本机：只使用 RackTop 专用私钥测试免密登录。
 ssh -o IdentitiesOnly=yes -i $keyPath -p ${sshPort} ${target}`

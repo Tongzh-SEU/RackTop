@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { flushSync } from 'react-dom'
 import { listen } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   Activity,
@@ -30,6 +31,7 @@ import {
   ListFilter,
   ScrollText,
   MemoryStick,
+  Minus,
   MoreHorizontal,
   Network,
   OctagonX,
@@ -44,6 +46,7 @@ import {
   Settings,
   ShieldAlert,
   SlidersHorizontal,
+  Square,
   TerminalSquare,
   Trash2,
   UserRound,
@@ -85,8 +88,11 @@ import { serverMatchesSearch } from './utils/serverSearch'
 import { updateSharedGpuWarnings, type MineProcessWarning, type SharedGpuWatchMap } from './utils/mineProcessWarnings'
 import { gpuContextName, serverDisplayName } from './utils/serverName'
 import { loadLaunchProfiles, loadManagedRuns } from './utils/managedRuns'
+import { detectAppPlatform } from './utils/platform'
 import authorAvatar from './assets/tongzh-seu.png'
 import packageInfo from '../package.json'
+
+const appPlatform = detectAppPlatform(api.isDesktop, navigator.userAgent)
 
 const ONBOARDING_DISMISSED_KEY = 'racktop.onboardingDismissed.v1'
 
@@ -152,6 +158,21 @@ async function toggleWindowMaximize(event: MouseEvent<HTMLElement>) {
   if ((event.target as HTMLElement).closest('button, input, select, textarea, a, [role="button"]')) return
   event.preventDefault()
   await getCurrentWindow().toggleMaximize()
+}
+
+function WindowsWindowControls() {
+  if (appPlatform !== 'windows') return null
+  return (
+    <div className="window-controls" aria-label="窗口控制" onMouseDown={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+      <button type="button" onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); void invoke('window_minimize') }} aria-label="最小化窗口"><Minus size={15} /></button>
+      <button type="button" onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); void invoke('window_toggle_maximize') }} aria-label="最大化或还原窗口"><Square size={12} /></button>
+      <button type="button" className="window-controls__close" onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); void invoke('window_close') }} aria-label="关闭窗口"><X size={15} /></button>
+    </div>
+  )
+}
+
+export function shouldShowGuidedEmptyState(mainView: string, serverCount: number) {
+  return mainView === 'fleet' && serverCount === 0
 }
 
 function serverToDraft(server: Server): Partial<ServerDraft> {
@@ -1367,11 +1388,14 @@ function App() {
             <span className={`refresh-label ${paused ? 'is-paused' : ''}`}><Clock3 size={14} />{paused ? '采集已暂停' : mainView === 'server' && selectedServer ? relativeTime(selectedServer.lastSeenAt) : totals.latestRefresh ? relativeTime(totals.latestRefresh) : `${settings?.defaultSamplingIntervalSeconds ?? 2} 秒采样`}</span>
             <button className="button button--secondary" onClick={() => void runManualRefreshAll()} disabled={manualRefreshingAll}><RefreshCw size={16} className={manualRefreshingAll ? 'spin' : ''} />刷新全部</button>
             <button className="icon-button" aria-label="预约与通知" onClick={() => setShowReservationCenter(true)}><Bell size={18} />{(totals.hot > 0 || activeIdleReservationCount > 0 || gpuMemoryStallWarnings.length > 0 || mineProcessWarnings.length > 0) && <span className="notification-dot" />}</button>
+            <WindowsWindowControls />
           </div>
         </header>
 
         <div className="workspace__scroll">
-          {servers.length === 0 ? (
+          {shouldShowGuidedEmptyState(mainView, servers.length) ? (
+            <EmptyState onboarding={<OnboardingChecklist steps={onboardingSteps} previewStep={onboardingPreviewStep} collapsed={onboardingCollapsed} dismissed={onboardingDismissed} useActualState={onboardingUseActualState} showPreviewControls={!api.isDesktop} onPreviewStepChange={setOnboardingPreviewStep} onCollapsedChange={setOnboardingCollapsed} onDismiss={() => { localStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true'); setOnboardingDismissed(true); setToast('已隐藏新手引导，可在“设置 → 通用”中重新显示') }} onUseActualStateChange={setOnboardingUseActualState} />} onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
+          ) : servers.length === 0 ? (
             <EmptyState onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
           ) : mainView === 'projects' ? (
             <ProjectView projects={projects} recentRunAt={projectRecentRunAt} servers={servers} busyTargets={busyProjectTargets} syncProgress={projectSyncProgress} preparingProjectIds={preparingProjectIds} onAdd={() => setProjectEditor('new')} onLaunch={(project) => { setManagedLaunchIntent({ id: crypto.randomUUID(), projectId: project.id }); setMainView('mine') }} onEdit={setProjectEditor} onDelete={setProjectPendingDelete} onInspect={inspectProject} onSync={(project, targetServerId) => { const target = project.targets.find((item) => item.serverId === targetServerId); if (target?.status === 'conflict') setProjectConflictTarget({ project, targetServerId }); else void syncProjectTarget(project, targetServerId) }} onCancel={(projectId, targetServerId) => void cancelProjectTarget(projectId, targetServerId)} onSyncAll={(project) => void syncAllProjectTargets(project)} />
@@ -1430,13 +1454,16 @@ function App() {
   )
 }
 
-function EmptyState({ onAdd, onImport }: { onAdd: () => void; onImport: () => void }) {
+export function EmptyState({ onboarding, onAdd, onImport }: { onboarding?: React.ReactNode; onAdd: () => void; onImport: () => void }) {
   return (
-    <div className="empty-state">
-      <span className="empty-state__icon"><ServerIcon size={28} /></span>
-      <h2>连接第一台服务器</h2>
-      <p>添加 SSH 主机或导入现有 OpenSSH Config，RackTop 会自动采集 GPU、CPU、内存和进程指标。</p>
-      <div><button className="button button--primary" onClick={onAdd}><Plus size={17} />添加服务器</button><button className="button button--secondary" onClick={onImport}><Download size={17} />导入配置</button></div>
+    <div className={`empty-fleet${onboarding ? ' empty-fleet--guided' : ''}`}>
+      {onboarding}
+      <div className="empty-state">
+        <span className="empty-state__icon"><ServerIcon size={28} /></span>
+        <h2>连接第一台服务器</h2>
+        <p>添加 SSH 主机或导入现有 OpenSSH Config，RackTop 会自动采集 GPU、CPU、内存和进程指标。</p>
+        <div><button className="button button--primary" onClick={onAdd}><Plus size={17} />添加服务器</button><button className="button button--secondary" onClick={onImport}><Download size={17} />导入配置</button></div>
+      </div>
     </div>
   )
 }
@@ -1750,7 +1777,7 @@ function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot 
   return <div className="history-page">
     <section className="history-section"><header className="history-page__header"><div><History size={18} /><span><h2>资源热力图</h2><p>每列 1 天，每格汇总连续 3 小时的平均使用率</p></span></div><small>最近 {Math.min(90, Math.max(1, server.historyRetentionDays))} 天</small></header>{heatmapError ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />资源历史读取失败：{heatmapError}</div> : <HistoryHeatmaps snapshot={snapshot} points={heatmapPoints} retentionDays={server.historyRetentionDays} />}</section>
     <section className="history-section"><header className="history-page__header"><div><History size={18} /><span><h2>GPU 使用分布</h2><p>按 Unix 用户聚合活跃时间与显存积分</p></span></div><div className="usage-range" aria-label="使用分布时间范围">{([7, 15, 30, 90] as const).map((days) => <button key={days} aria-pressed={usageDays === days} onClick={() => setUsageDays(days)}>{days === 7 ? '1 周' : days === 15 ? '半个月' : days === 30 ? '1 个月' : '3 个月'}</button>)}</div></header>{usageError ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />使用分布读取失败：{usageError}</div> : <UsageDistribution snapshot={snapshot} data={displayedUsage} />}</section>
-    <section className="history-section"><StorageWaffleList disks={snapshot.disks ?? []} /></section>
+    <section className="history-section"><header className="history-page__header"><div><HardDrive size={18} /><span><h2>存储空间</h2><p>服务器磁盘占用情况，区分当前用户、其他用户与空闲空间</p></span></div></header><StorageWaffleList disks={snapshot.disks ?? []} /></section>
     <section className="data-retention"><Database size={18} /><div><strong>{server.remoteHistoryEnabled ? '在线本地采样 · 离线远端补档' : '仅在线本地采样'}</strong><p>{server.remoteHistoryEnabled ? 'RackTop 在线时写入本机时间桶；远端隐藏进程仅在 App 离线后接管，重新打开时增量补齐缺口。' : 'RackTop 运行时在本机生成使用分布；App 离线期间不补零，缺失时段保持灰色。'}不会保存 PID、进程命令、路径或终端输入输出。</p></div></section>
   </div>
 }

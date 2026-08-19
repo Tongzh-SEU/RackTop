@@ -17,7 +17,7 @@ const demoServers: Server[] = [
     username: 'tongzh',
     tags: ['lab', '4090D'],
     samplingIntervalSeconds: 2,
-    historyRetentionDays: 30,
+    historyRetentionDays: 90,
     remoteHistoryEnabled: false,
     sortOrder: 0,
     authMethod: 'privateKey',
@@ -34,7 +34,7 @@ const demoServers: Server[] = [
     username: 'tongzh',
     tags: ['lab', 'A100'],
     samplingIntervalSeconds: 2,
-    historyRetentionDays: 30,
+    historyRetentionDays: 90,
     remoteHistoryEnabled: false,
     sortOrder: 1,
     authMethod: 'privateKey',
@@ -43,10 +43,10 @@ const demoServers: Server[] = [
     lastSeenAt: now,
   },
   {
-    id: 'demo-4090', name: '4*4090', location: '计算中心 2 楼 · R5 机架', host: '10.201.37.240', port: 22, username: 'tongzh', tags: ['lab', '4090'], samplingIntervalSeconds: 2, historyRetentionDays: 30, remoteHistoryEnabled: false, sortOrder: 2, authMethod: 'sshAgent', status: 'online', lastSeenAt: now,
+  id: 'demo-4090', name: '4*4090', location: '计算中心 2 楼 · R5 机架', host: '10.201.37.240', port: 22, username: 'tongzh', tags: ['lab', '4090'], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, sortOrder: 2, authMethod: 'sshAgent', status: 'online', lastSeenAt: now,
   },
   {
-    id: 'demo-h100', name: '8*H100', location: '计算中心 1 楼 · H2 机架', host: '10.201.37.250', port: 22, username: 'tongzh', tags: ['lab', 'H100'], samplingIntervalSeconds: 2, historyRetentionDays: 30, remoteHistoryEnabled: false, sortOrder: 3, authMethod: 'sshAgent', status: 'online', lastSeenAt: now,
+  id: 'demo-h100', name: '8*H100', location: '计算中心 1 楼 · H2 机架', host: '10.201.37.250', port: 22, username: 'tongzh', tags: ['lab', 'H100'], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, sortOrder: 3, authMethod: 'sshAgent', status: 'online', lastSeenAt: now,
   },
 ]
 

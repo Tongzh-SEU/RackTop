@@ -3,6 +3,7 @@ import { clampPercent } from './gpu'
 
 export const HEATMAP_BUCKET_HOURS = 3
 export const HEATMAP_ROWS_PER_DAY = 24 / HEATMAP_BUCKET_HOURS
+export const HEATMAP_LABEL_STEP_DAYS = 4
 
 export interface HeatmapDay {
   key: string
