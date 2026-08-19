@@ -1334,7 +1334,7 @@ function App() {
                   <span className="server-row__title">{server.name || server.host}</span>
                   <span className="server-row__meta">{snapshot ? `${snapshot.gpus.length} GPU ${Math.round(aggregateGpuMemoryPercent(snapshot.gpus))}% · CPU ${Math.round(clampPercent(snapshot.system.memoryTotalBytes ? snapshot.system.memoryUsedBytes / snapshot.system.memoryTotalBytes * 100 : 0))}%` : server.name.trim() === server.host.trim() ? (server.status === 'offline' ? '暂时离线 · 可重新连接' : '等待首次采样') : server.host}</span>
                 </span>
-                {snapshot?.processes.some((process) => process.isCurrentUser) && <span className="own-task-dot" title="有你的任务"><UserRound size={11} /></span>}
+                {snapshot && currentUserProcessCount(snapshot) > 0 && <span className="own-task-dot" title="有你的任务"><UserRound size={11} /></span>}
                 <ChevronRight size={14} className="server-row__chevron" />
               </button>
             )
