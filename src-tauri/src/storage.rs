@@ -397,6 +397,7 @@ fn migrate_projects_to_detached_sources(connection: &mut Connection) -> Result<(
             source_file_count INTEGER NOT NULL DEFAULT 0,
             source_modified_at INTEGER,
             dataset_ids_json TEXT NOT NULL DEFAULT '[]',
+            model_ids_json TEXT NOT NULL DEFAULT '[]',
             targets_json TEXT NOT NULL DEFAULT '[]',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
@@ -404,7 +405,7 @@ fn migrate_projects_to_detached_sources(connection: &mut Connection) -> Result<(
             status TEXT NOT NULL DEFAULT 'unknown',
             last_error TEXT
          );
-         INSERT INTO projects SELECT id,name,kind,source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,source_modified_at,dataset_ids_json,targets_json,created_at,updated_at,last_sync_at,status,last_error FROM projects_with_source_fk;
+         INSERT INTO projects SELECT id,name,kind,source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,source_modified_at,dataset_ids_json,'[]',targets_json,created_at,updated_at,last_sync_at,status,last_error FROM projects_with_source_fk;
          DROP TABLE projects_with_source_fk;
          CREATE INDEX idx_projects_updated ON projects(updated_at DESC);
          INSERT OR REPLACE INTO storage_migrations(key,applied_at) VALUES('projects-detached-source-v1',unixepoch());
@@ -536,6 +537,7 @@ impl Database {
                     source_file_count INTEGER NOT NULL DEFAULT 0,
                     source_modified_at INTEGER,
                     dataset_ids_json TEXT NOT NULL DEFAULT '[]',
+                    model_ids_json TEXT NOT NULL DEFAULT '[]',
                     targets_json TEXT NOT NULL DEFAULT '[]',
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
@@ -620,6 +622,9 @@ impl Database {
         };
         if !project_columns.contains("dataset_ids_json") {
             connection.execute("ALTER TABLE projects ADD COLUMN dataset_ids_json TEXT NOT NULL DEFAULT '[]'", []).map_err(|error| error.to_string())?;
+        }
+        if !project_columns.contains("model_ids_json") {
+            connection.execute("ALTER TABLE projects ADD COLUMN model_ids_json TEXT NOT NULL DEFAULT '[]'", []).map_err(|error| error.to_string())?;
         }
         if !project_columns.contains("source_modified_at") {
             connection.execute("ALTER TABLE projects ADD COLUMN source_modified_at INTEGER", []).map_err(|error| error.to_string())?;
@@ -1231,14 +1236,15 @@ impl Database {
 
     pub fn list_projects(&self) -> Result<Vec<Project>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let mut statement = connection.prepare("SELECT id,name,kind,source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,source_modified_at,dataset_ids_json,targets_json,created_at,updated_at,last_sync_at,status,last_error FROM projects ORDER BY CASE kind WHEN 'project' THEN 0 ELSE 1 END, updated_at DESC").map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT id,name,kind,source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,source_modified_at,dataset_ids_json,model_ids_json,targets_json,created_at,updated_at,last_sync_at,status,last_error FROM projects ORDER BY CASE kind WHEN 'project' THEN 0 ELSE 1 END, updated_at DESC").map_err(|error| error.to_string())?;
         let rows = statement.query_map([], |row| {
             let dataset_ids_json: String = row.get(10)?;
-            let targets_json: String = row.get(11)?;
+            let model_ids_json: String = row.get(11)?;
+            let targets_json: String = row.get(12)?;
             Ok(Project {
                 id: row.get(0)?, name: row.get(1)?, kind: row.get(2)?, source_server_id: row.get(3)?, source_path: row.get(4)?,
                 source_exists: row.get::<_, i64>(5)? != 0, source_is_directory: row.get::<_, i64>(6)? != 0, source_size_bytes: row.get::<_, i64>(7)?.max(0) as u64, source_file_count: row.get::<_, i64>(8)?.max(0) as u64, source_modified_at: row.get(9)?,
-                dataset_ids: serde_json::from_str(&dataset_ids_json).unwrap_or_default(), targets: serde_json::from_str(&targets_json).unwrap_or_default(), created_at: row.get(12)?, updated_at: row.get(13)?, last_sync_at: row.get(14)?, status: row.get(15)?, last_error: row.get(16)?,
+                dataset_ids: serde_json::from_str(&dataset_ids_json).unwrap_or_default(), model_ids: serde_json::from_str(&model_ids_json).unwrap_or_default(), targets: serde_json::from_str(&targets_json).unwrap_or_default(), created_at: row.get(13)?, updated_at: row.get(14)?, last_sync_at: row.get(15)?, status: row.get(16)?, last_error: row.get(17)?,
             })
         }).map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
@@ -1252,11 +1258,11 @@ impl Database {
         let name = draft.name.trim();
         let source_path = draft.source_path.trim();
         if name.is_empty() || source_path.is_empty() { return Err("项目名称和主目录不能为空".into()); }
-        if !matches!(draft.kind.as_str(), "project" | "dataset") { return Err("项目类型无效".into()); }
-        if draft.kind == "dataset" && !draft.dataset_ids.is_empty() { return Err("数据集不能附属其他数据集".into()); }
+        if !matches!(draft.kind.as_str(), "project" | "dataset" | "model") { return Err("同步对象类型无效".into()); }
+        if draft.kind != "project" && (!draft.dataset_ids.is_empty() || !draft.model_ids.is_empty()) { return Err("只有项目可以关联数据集和模型".into()); }
         let existing_projects = self.list_projects()?;
         if let Some(existing) = draft.id.as_ref().and_then(|id| existing_projects.iter().find(|project| &project.id == id)) {
-            if existing.kind != draft.kind { return Err("创建后不能修改项目或数据集的类型".into()); }
+            if existing.kind != draft.kind { return Err("创建后不能修改同步对象类型".into()); }
         }
         if dangerous_sync_path(source_path) { return Err("主目录不能是根目录、Home 根目录或包含 ..".into()); }
         let source_server = self.get_server(&draft.source_server_id)?;
@@ -1272,9 +1278,12 @@ impl Database {
                 return Err("主目录与目标目录不能在同一服务器上重合或相互包含".into());
             }
         }
-        let known_dataset_ids: HashSet<String> = existing_projects.into_iter().filter(|project| project.kind == "dataset").map(|project| project.id).collect();
+        let known_dataset_ids: HashSet<String> = existing_projects.iter().filter(|project| project.kind == "dataset").map(|project| project.id.clone()).collect();
+        let known_model_ids: HashSet<String> = existing_projects.iter().filter(|project| project.kind == "model").map(|project| project.id.clone()).collect();
         if draft.dataset_ids.iter().any(|dataset_id| !known_dataset_ids.contains(dataset_id)) { return Err("关联数据集不存在或类型无效".into()); }
         if draft.dataset_ids.iter().collect::<HashSet<_>>().len() != draft.dataset_ids.len() { return Err("关联数据集不能重复".into()); }
+        if draft.model_ids.iter().any(|model_id| !known_model_ids.contains(model_id)) { return Err("关联模型不存在或类型无效".into()); }
+        if draft.model_ids.iter().collect::<HashSet<_>>().len() != draft.model_ids.len() { return Err("关联模型不能重复".into()); }
         if draft.targets.iter().any(|target| target.server_id == draft.source_server_id) { return Err("主服务器不能同时作为目标服务器".into()); }
         if draft.targets.iter().map(|target| &target.server_id).collect::<HashSet<_>>().len() != draft.targets.len() { return Err("目标服务器不能重复".into()); }
         if draft.targets.iter().any(|target| target.path.trim().is_empty()) { return Err("每个目标服务器都必须指定目录".into()); }
@@ -1295,7 +1304,8 @@ impl Database {
         }).collect();
         let targets_json = serde_json::to_string(&targets).map_err(|error| error.to_string())?;
         let dataset_ids_json = serde_json::to_string(&draft.dataset_ids).map_err(|error| error.to_string())?;
-        connection.execute("INSERT INTO projects(id,name,kind,source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,source_modified_at,dataset_ids_json,targets_json,created_at,updated_at,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'unknown') ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,source_server_id=excluded.source_server_id,source_path=excluded.source_path,source_exists=excluded.source_exists,source_is_directory=excluded.source_is_directory,source_size_bytes=excluded.source_size_bytes,source_file_count=excluded.source_file_count,source_modified_at=excluded.source_modified_at,dataset_ids_json=excluded.dataset_ids_json,targets_json=excluded.targets_json,updated_at=excluded.updated_at", params![id, name, draft.kind, draft.source_server_id, source_path, source_exists, source_is_directory, source_size_bytes, source_file_count, source_modified_at, dataset_ids_json, targets_json, now, now]).map_err(|error| error.to_string())?;
+        let model_ids_json = serde_json::to_string(&draft.model_ids).map_err(|error| error.to_string())?;
+        connection.execute("INSERT INTO projects(id,name,kind,source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,source_modified_at,dataset_ids_json,model_ids_json,targets_json,created_at,updated_at,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,'unknown') ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,source_server_id=excluded.source_server_id,source_path=excluded.source_path,source_exists=excluded.source_exists,source_is_directory=excluded.source_is_directory,source_size_bytes=excluded.source_size_bytes,source_file_count=excluded.source_file_count,source_modified_at=excluded.source_modified_at,dataset_ids_json=excluded.dataset_ids_json,model_ids_json=excluded.model_ids_json,targets_json=excluded.targets_json,updated_at=excluded.updated_at", params![id, name, draft.kind, draft.source_server_id, source_path, source_exists, source_is_directory, source_size_bytes, source_file_count, source_modified_at, dataset_ids_json, model_ids_json, targets_json, now, now]).map_err(|error| error.to_string())?;
         if !same_source {
             connection.execute("UPDATE projects SET status='unknown',last_error=NULL WHERE id=?1", [&id]).map_err(|error| error.to_string())?;
         }
@@ -1373,16 +1383,18 @@ impl Database {
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let affected = {
-            let mut statement = connection.prepare("SELECT id,dataset_ids_json FROM projects WHERE kind='project'").map_err(|error| error.to_string())?;
-            statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|error| error.to_string())?.filter_map(Result::ok).filter_map(|(id, json)| {
-                let mut dataset_ids: Vec<String> = serde_json::from_str(&json).ok()?;
-                let previous_len = dataset_ids.len();
+            let mut statement = connection.prepare("SELECT id,dataset_ids_json,model_ids_json FROM projects WHERE kind='project'").map_err(|error| error.to_string())?;
+            statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).map_err(|error| error.to_string())?.filter_map(Result::ok).filter_map(|(id, dataset_json, model_json)| {
+                let mut dataset_ids: Vec<String> = serde_json::from_str(&dataset_json).ok()?;
+                let mut model_ids: Vec<String> = serde_json::from_str(&model_json).ok()?;
+                let previous_len = dataset_ids.len() + model_ids.len();
                 dataset_ids.retain(|dataset_id| dataset_id != project_id);
-                (dataset_ids.len() != previous_len).then_some((id, dataset_ids))
+                model_ids.retain(|model_id| model_id != project_id);
+                (dataset_ids.len() + model_ids.len() != previous_len).then_some((id, dataset_ids, model_ids))
             }).collect::<Vec<_>>()
         };
-        for (id, dataset_ids) in affected {
-            connection.execute("UPDATE projects SET dataset_ids_json=?2,updated_at=unixepoch() WHERE id=?1", params![id, serde_json::to_string(&dataset_ids).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
+        for (id, dataset_ids, model_ids) in affected {
+            connection.execute("UPDATE projects SET dataset_ids_json=?2,model_ids_json=?3,updated_at=unixepoch() WHERE id=?1", params![id, serde_json::to_string(&dataset_ids).map_err(|error| error.to_string())?, serde_json::to_string(&model_ids).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
         }
         connection.execute("DELETE FROM projects WHERE id=?1", [project_id]).map_err(|error| error.to_string())?;
         Ok(())
@@ -1937,8 +1949,17 @@ mod tests {
             kind: "dataset".into(),
             source_server_id: source.id.clone(),
             source_path: "~/datasets/shared".into(),
-            dataset_ids: vec![],
+            dataset_ids: vec![], model_ids: vec![],
             targets: vec![crate::models::ProjectTargetDraft { server_id: target.id.clone(), path: "~/datasets/shared-copy".into() }],
+        }).unwrap();
+        let model = db.save_project(ProjectDraft {
+            id: None,
+            name: "Shared model".into(),
+            kind: "model".into(),
+            source_server_id: source.id.clone(),
+            source_path: "~/models/shared".into(),
+            dataset_ids: vec![], model_ids: vec![],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: target.id.clone(), path: "~/models/shared-copy".into() }],
         }).unwrap();
         let project = db.save_project(ProjectDraft {
             id: None,
@@ -1946,21 +1967,24 @@ mod tests {
             kind: "project".into(),
             source_server_id: source.id,
             source_path: "~/training".into(),
-            dataset_ids: vec![dataset.id.clone()],
+            dataset_ids: vec![dataset.id.clone()], model_ids: vec![model.id.clone()],
             targets: vec![crate::models::ProjectTargetDraft { server_id: target.id, path: "~/training".into() }],
         }).unwrap();
 
         let projects = db.list_projects().unwrap();
-        assert_eq!(projects.len(), 2);
+        assert_eq!(projects.len(), 3);
         assert_eq!(projects[0].id, project.id);
         assert_eq!(projects[0].dataset_ids, vec![dataset.id.clone()]);
-        assert_eq!(projects[1].id, dataset.id);
-        assert_eq!(projects[1].targets[0].path, "~/datasets/shared-copy");
+        assert_eq!(projects[0].model_ids, vec![model.id.clone()]);
+        assert!(projects.iter().any(|item| item.id == dataset.id && item.targets[0].path == "~/datasets/shared-copy"));
+        assert!(projects.iter().any(|item| item.id == model.id && item.targets[0].path == "~/models/shared-copy"));
 
         db.delete_project(&dataset.id).unwrap();
+        db.delete_project(&model.id).unwrap();
         let remaining = db.list_projects().unwrap();
         assert_eq!(remaining.len(), 1);
         assert!(remaining[0].dataset_ids.is_empty());
+        assert!(remaining[0].model_ids.is_empty());
     }
 
     #[test]
@@ -1976,7 +2000,7 @@ mod tests {
             kind: "project".into(),
             source_server_id: source.id,
             source_path: "~/training".into(),
-            dataset_ids: vec![],
+            dataset_ids: vec![], model_ids: vec![],
             targets: vec![crate::models::ProjectTargetDraft { server_id: target.id.clone(), path: "~/training".into() }],
         }).unwrap();
         db.mark_project_synced(&project.id, &target.id, 8_192, 12, Some(1_700_000_000), 8_192, 12, Some(1_700_000_000), true).unwrap();
@@ -1987,7 +2011,7 @@ mod tests {
             kind: "project".into(),
             source_server_id: replacement.id,
             source_path: "~/training-v2".into(),
-            dataset_ids: vec![],
+            dataset_ids: vec![], model_ids: vec![],
             targets: vec![crate::models::ProjectTargetDraft { server_id: target.id, path: "~/training".into() }],
         }).unwrap();
 
@@ -2019,7 +2043,7 @@ mod tests {
             let target = db.save_server(ServerDraft { host: "10.0.0.2".into(), ..draft("Target", 30) }).unwrap();
             let project = db.save_project(ProjectDraft {
                 id: None, name: "Training".into(), kind: "project".into(), source_server_id: source.id,
-                source_path: "~/training".into(), dataset_ids: vec![],
+                source_path: "~/training".into(), dataset_ids: vec![], model_ids: vec![],
                 targets: vec![crate::models::ProjectTargetDraft { server_id: target.id.clone(), path: "~/training".into() }],
             }).unwrap();
             db.mark_project_syncing(&project.id, &target.id).unwrap();
@@ -2045,7 +2069,7 @@ mod tests {
             kind: "dataset".into(),
             source_server_id: removed.id.clone(),
             source_path: "~/dataset".into(),
-            dataset_ids: vec![],
+            dataset_ids: vec![], model_ids: vec![],
             targets: vec![crate::models::ProjectTargetDraft { server_id: remaining.id.clone(), path: "~/dataset".into() }],
         }).unwrap();
         let project = db.save_project(ProjectDraft {
@@ -2054,7 +2078,7 @@ mod tests {
             kind: "project".into(),
             source_server_id: remaining.id,
             source_path: "~/project".into(),
-            dataset_ids: vec![dataset.id.clone()],
+            dataset_ids: vec![dataset.id.clone()], model_ids: vec![],
             targets: vec![crate::models::ProjectTargetDraft { server_id: removed.id.clone(), path: "~/project".into() }],
         }).unwrap();
 
@@ -2084,7 +2108,7 @@ mod tests {
                 kind: "project".into(),
                 source_server_id: source.id.clone(),
                 source_path: "~/legacy-project".into(),
-                dataset_ids: vec![],
+                dataset_ids: vec![], model_ids: vec![],
                 targets: vec![],
             }).unwrap();
             (source.id, project.id)
@@ -2107,6 +2131,7 @@ mod tests {
                 source_file_count INTEGER NOT NULL DEFAULT 0,
                 source_modified_at INTEGER,
                 dataset_ids_json TEXT NOT NULL DEFAULT '[]',
+                model_ids_json TEXT NOT NULL DEFAULT '[]',
                 targets_json TEXT NOT NULL DEFAULT '[]',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,

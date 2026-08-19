@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import type { Project, Server } from '../types/models'
 import { ProjectForm } from './ProjectForm'
-import { formatProjectSize, projectCardState, ProjectView, projectCardRowSpan, syncableProjectTargets } from './ProjectView'
+import { formatProjectSize, projectCardState, ProjectView, projectCardRowSpan, sortProjectsByRecentUse, syncableProjectTargets } from './ProjectView'
 
 const targetServer: Server = {
   id: 'target',
@@ -30,7 +30,7 @@ const detachedProject: Project = {
   sourceIsDirectory: true,
   sourceSizeBytes: 0,
   sourceFileCount: 0,
-  datasetIds: [],
+  datasetIds: [], modelIds: [],
   targets: [{ serverId: targetServer.id, path: '~/training', status: 'unknown', exists: false, isDirectory: false, sizeBytes: 0, fileCount: 0 }],
   createdAt: 1,
   updatedAt: 2,
@@ -47,7 +47,45 @@ const dataset: Project = {
   sourcePath: '~/datasets/ImageNet',
 }
 
+const model: Project = {
+  ...detachedProject,
+  id: 'model-1',
+  name: 'Llama-3-8B',
+  kind: 'model',
+  sourceServerId: sourceServer.id,
+  sourcePath: '~/models/Llama-3-8B',
+}
+
 describe('Project source removal', () => {
+  it('sorts recently executed items first, then falls back to recently added', () => {
+    const older = { ...detachedProject, id: 'older', name: 'Older', createdAt: 10 }
+    const newer = { ...detachedProject, id: 'newer', name: 'Newer', createdAt: 30 }
+    const recentlyRun = { ...detachedProject, id: 'recently-run', name: 'Recently run', createdAt: 1 }
+
+    expect(sortProjectsByRecentUse([older, recentlyRun, newer], { 'recently-run': 100 }).map((item) => item.id)).toEqual(['recently-run', 'newer', 'older'])
+  })
+
+  it('shows projects, datasets, and models as separate tabs', () => {
+    const markup = renderToStaticMarkup(<ProjectView projects={[detachedProject, dataset, model]} servers={[sourceServer, targetServer]} busyTargets={new Set()} syncProgress={[]} preparingProjectIds={new Set()} onAdd={vi.fn()} onEdit={vi.fn()} onDelete={vi.fn()} onInspect={vi.fn()} onSync={vi.fn()} onCancel={vi.fn()} onSyncAll={vi.fn()} />)
+
+    expect(markup).toContain('role="tablist"')
+    expect(markup).toContain('项目 <span>1</span>')
+    expect(markup).toContain('数据集 <span>1</span>')
+    expect(markup).toContain('模型 <span>1</span>')
+    expect(markup).toContain('Training')
+    expect(markup).not.toContain('ImageNet')
+    expect(markup).not.toContain('Llama-3-8B')
+  })
+
+  it('uses the model tab when only model sync objects exist', () => {
+    const markup = renderToStaticMarkup(<ProjectView projects={[model]} servers={[sourceServer, targetServer]} busyTargets={new Set()} syncProgress={[]} preparingProjectIds={new Set()} onAdd={vi.fn()} onEdit={vi.fn()} onDelete={vi.fn()} onInspect={vi.fn()} onSync={vi.fn()} onCancel={vi.fn()} onSyncAll={vi.fn()} />)
+
+    expect(markup).toContain('aria-selected="true">模型')
+    expect(markup).toContain('Llama-3-8B')
+    expect(markup).toContain('project-card__icon--model')
+    expect(markup).not.toContain('启动 Llama-3-8B')
+  })
+
   it('includes the grid row gap when calculating masonry spans', () => {
     expect(projectCardRowSpan(240, 4, 12)).toBe(16)
   })
@@ -75,14 +113,16 @@ describe('Project source removal', () => {
     expect(markup).toContain('Target')
   })
 
-  it('places target servers before linked datasets and explains the combined sync action', () => {
-    const adding = renderToStaticMarkup(<ProjectForm projects={[dataset]} servers={[sourceServer, targetServer]} onClose={vi.fn()} onSave={vi.fn()} />)
-    const editing = renderToStaticMarkup(<ProjectForm initial={{ ...detachedProject, sourceServerId: sourceServer.id }} projects={[dataset]} servers={[sourceServer, targetServer]} onClose={vi.fn()} onSave={vi.fn()} />)
+  it('places target servers before linked datasets and models and explains the combined sync action', () => {
+    const adding = renderToStaticMarkup(<ProjectForm projects={[dataset, model]} servers={[sourceServer, targetServer]} onClose={vi.fn()} onSave={vi.fn()} />)
+    const editing = renderToStaticMarkup(<ProjectForm initial={{ ...detachedProject, sourceServerId: sourceServer.id }} projects={[dataset, model]} servers={[sourceServer, targetServer]} onClose={vi.fn()} onSave={vi.fn()} />)
 
     expect(adding).toContain('缺失副本可随“保存并同步”一并补齐')
     expect(adding.indexOf('目标服务器')).toBeLessThan(adding.indexOf('关联数据集'))
+    expect(adding.indexOf('关联数据集')).toBeLessThan(adding.indexOf('关联模型'))
     expect(editing).toContain('缺失副本可随“保存并同步”一并补齐')
     expect(editing.indexOf('目标服务器')).toBeLessThan(editing.indexOf('关联数据集'))
+    expect(editing.indexOf('关联数据集')).toBeLessThan(editing.indexOf('关联模型'))
     expect(editing).toContain('project-dataset-row--editing')
   })
 

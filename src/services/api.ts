@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
+import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
 import { clampPercent, gpuMemoryPercent, hasOtherUserGpuWorkload } from '../utils/gpu'
 import { RACKTOP_MANAGED_IDENTITY_PATH } from '../utils/sshSetup'
 
@@ -173,7 +173,7 @@ let browserProjects: Project[] = [
   {
     id: 'demo-project-waterflower', name: '水仙花数', kind: 'project', sourceServerId: 'demo-233', sourcePath: '~/projects/narcissistic-number',
     sourceExists: true, sourceIsDirectory: true, sourceSizeBytes: 48 * 1024, sourceFileCount: 5, sourceModifiedAt: now - 420,
-    datasetIds: ['demo-dataset-apps'],
+    datasetIds: ['demo-dataset-apps'], modelIds: [],
     targets: [
       { serverId: 'demo-132', path: '~/projects/narcissistic-number', status: 'found', exists: true, isDirectory: true, sizeBytes: 42 * 1024, fileCount: 4, modifiedAt: now - 3_600, lastCheckedAt: now - 30, lastSyncedAt: now - 86_400, syncedSourceSizeBytes: 40 * 1024, syncedSourceFileCount: 4, syncedSourceModifiedAt: now - 86_800, syncedTargetSizeBytes: 40 * 1024, syncedTargetFileCount: 4, syncedTargetModifiedAt: now - 86_800 },
       { serverId: 'demo-4090', path: '~/projects/narcissistic-number', status: 'synced', exists: true, isDirectory: true, sizeBytes: 48 * 1024, fileCount: 5, modifiedAt: now - 420, lastCheckedAt: now - 25, lastSyncedAt: now - 360, syncedSourceSizeBytes: 48 * 1024, syncedSourceFileCount: 5, syncedSourceModifiedAt: now - 420, syncedTargetSizeBytes: 48 * 1024, syncedTargetFileCount: 5, syncedTargetModifiedAt: now - 420 },
@@ -184,7 +184,7 @@ let browserProjects: Project[] = [
   {
     id: 'demo-project-training', name: 'Llama 微调', kind: 'project', sourceServerId: 'demo-132', sourcePath: '~/projects/llama-finetune',
     sourceExists: true, sourceIsDirectory: true, sourceSizeBytes: 286 * 1024 ** 2, sourceFileCount: 318, sourceModifiedAt: now - 120,
-    datasetIds: ['demo-dataset-apps'],
+    datasetIds: ['demo-dataset-apps'], modelIds: ['demo-model-llama'],
     targets: [
       { serverId: 'demo-233', path: '~/projects/llama-finetune', status: 'conflict', exists: true, isDirectory: true, sizeBytes: 282 * 1024 ** 2, fileCount: 320, modifiedAt: now - 60, lastCheckedAt: now - 20, lastSyncedAt: now - 7_200, syncedSourceSizeBytes: 282 * 1024 ** 2, syncedSourceFileCount: 318, syncedSourceModifiedAt: now - 7_300, syncedTargetSizeBytes: 282 * 1024 ** 2, syncedTargetFileCount: 318, syncedTargetModifiedAt: now - 7_300, error: '目标内容已在上次同步后修改' },
     ],
@@ -193,13 +193,23 @@ let browserProjects: Project[] = [
   {
     id: 'demo-dataset-apps', name: 'APPS_hf', kind: 'dataset', sourceServerId: 'demo-233', sourcePath: '~/datasets/APPS_hf',
     sourceExists: true, sourceIsDirectory: true, sourceSizeBytes: 8.6 * 1024 ** 3, sourceFileCount: 12_480, sourceModifiedAt: now - 3_600,
-    datasetIds: [],
+    datasetIds: [], modelIds: [],
     targets: [
       { serverId: 'demo-132', path: '~/datasets/APPS_hf', status: 'synced', exists: true, isDirectory: true, sizeBytes: 8.6 * 1024 ** 3, fileCount: 12_480, modifiedAt: now - 3_600, lastCheckedAt: now - 20, lastSyncedAt: now - 3_000, syncedSourceSizeBytes: 8.6 * 1024 ** 3, syncedSourceFileCount: 12_480, syncedSourceModifiedAt: now - 3_600, syncedTargetSizeBytes: 8.6 * 1024 ** 3, syncedTargetFileCount: 12_480, syncedTargetModifiedAt: now - 3_600 },
       { serverId: 'demo-4090', path: '~/datasets/APPS_hf', status: 'found', exists: true, isDirectory: true, sizeBytes: 8.4 * 1024 ** 3, fileCount: 12_102, modifiedAt: now - 86_400, lastCheckedAt: now - 20 },
       { serverId: 'demo-h100', path: '~/datasets/APPS_hf', status: 'missing', exists: false, isDirectory: false, sizeBytes: 0, fileCount: 0, modifiedAt: null, lastCheckedAt: now - 20 },
     ],
     createdAt: now - 1_209_600, updatedAt: now - 20, lastSyncAt: now - 3_000, status: 'synced', lastError: null,
+  },
+  {
+    id: 'demo-model-llama', name: 'Llama-3-8B', kind: 'model', sourceServerId: 'demo-132', sourcePath: '~/models/Llama-3-8B',
+    sourceExists: true, sourceIsDirectory: true, sourceSizeBytes: 15.2 * 1024 ** 3, sourceFileCount: 18, sourceModifiedAt: now - 1_800,
+    datasetIds: [], modelIds: [],
+    targets: [
+      { serverId: 'demo-233', path: '~/models/Llama-3-8B', status: 'synced', exists: true, isDirectory: true, sizeBytes: 15.2 * 1024 ** 3, fileCount: 18, modifiedAt: now - 1_800, lastCheckedAt: now - 40, lastSyncedAt: now - 1_200, syncedSourceSizeBytes: 15.2 * 1024 ** 3, syncedSourceFileCount: 18, syncedSourceModifiedAt: now - 1_800, syncedTargetSizeBytes: 15.2 * 1024 ** 3, syncedTargetFileCount: 18, syncedTargetModifiedAt: now - 1_800 },
+      { serverId: 'demo-h100', path: '~/models/Llama-3-8B', status: 'missing', exists: false, isDirectory: false, sizeBytes: 0, fileCount: 0, modifiedAt: null, lastCheckedAt: now - 35 },
+    ],
+    createdAt: now - 86_400, updatedAt: now - 35, lastSyncAt: now - 1_200, status: 'unknown', lastError: null,
   },
 ]
 const browserProjectSyncProgress: ProjectSyncProgress[] = [{ projectId: 'demo-project-waterflower', targetServerId: 'demo-h100', transferredBytes: 31 * 1024, resumedBytes: 12 * 1024, totalBytes: 48 * 1024, startedAt: now - 12, state: 'transferring' }]
@@ -382,6 +392,7 @@ export const api = {
       sourceExists: previous?.sourceExists ?? false, sourceIsDirectory: previous?.sourceIsDirectory ?? true,
       sourceSizeBytes: previous?.sourceSizeBytes ?? 0, sourceFileCount: previous?.sourceFileCount ?? 0, sourceModifiedAt: previous?.sourceModifiedAt ?? null,
       datasetIds: draft.kind === 'project' ? draft.datasetIds : [],
+      modelIds: draft.kind === 'project' ? draft.modelIds : [],
       targets: draft.targets.map((target) => ({ serverId: target.serverId, path: target.path, status: 'unknown', exists: false, isDirectory: true, sizeBytes: 0, fileCount: 0, modifiedAt: null })),
       createdAt: previous?.createdAt ?? timestamp, updatedAt: timestamp, lastSyncAt: previous?.lastSyncAt ?? null,
       status: 'unknown', lastError: null,
@@ -464,6 +475,19 @@ export const api = {
   async terminateProcess(serverId: string, pid: number): Promise<string> {
     if (isTauri) return invoke('terminate_process', { serverId, pid, confirmed: true })
     return `已在演示服务器 ${serverId} 上模拟结束 PID ${pid}。`
+  },
+  async launchManagedRun(serverId: string, runId: string, workingDirectory: string, command: string, gpuIndices: number[], projectLogPath: string | null = null): Promise<ManagedRunLaunchResult> {
+    if (isTauri) return invoke('launch_managed_run', { serverId, runId, workingDirectory, command, gpuIndices, projectLogPath })
+    await new Promise((resolve) => window.setTimeout(resolve, 500))
+    return { pid: 60_000 + Math.floor(Math.random() * 9_000), logPath: `~/.racktop/runs/${runId}/output.log` }
+  },
+  async readManagedRunLog(serverId: string, runId: string, lines = 400): Promise<string> {
+    if (isTauri) return invoke('read_managed_run_log', { serverId, runId, lines })
+    return `[RackTop 演示日志]\nserver=${serverId}\nrun=${runId}\nstep 1840 · loss 0.8421\nstep 1841 · loss 0.8376`
+  },
+  async getManagedRunStatus(serverId: string, runId: string, pid: number): Promise<ManagedRunRemoteStatus> {
+    if (isTauri) return invoke('get_managed_run_status', { serverId, runId, pid })
+    return { status: 'running', exitCode: null }
   },
   async notify(title: string, body: string, extra?: Record<string, unknown>): Promise<void> {
     if (!isTauri) return

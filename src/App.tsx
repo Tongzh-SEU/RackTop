@@ -53,11 +53,13 @@ import {
 } from 'lucide-react'
 import { api } from './services/api'
 import { openExternalUrl } from './services/external'
-import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, LinkedDatasetPlan, Project, ProjectDraft, ProjectSyncProgress, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
+import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, LinkedProjectResourcePlan, Project, ProjectDraft, ProjectSyncProgress, RemoteHistorySyncResult, Server, ServerDraft, Snapshot } from './types/models'
 import { isRackTopManagedIdentity } from './utils/sshSetup'
 import { DeleteServerDialog } from './components/DeleteServerDialog'
 import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
+import { ManagedProcessView, type ManagedLaunchIntent } from './components/ManagedProcessView'
+import { OnboardingChecklist, type OnboardingStep } from './components/OnboardingChecklist'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { ProjectForm } from './components/ProjectForm'
 import { ProjectConflictDialog, ProjectDeleteDialog, ProjectView, syncableProjectTargets } from './components/ProjectView'
@@ -82,8 +84,11 @@ import { previewServerOrder, serverDropTarget, type ServerDropPlacement } from '
 import { serverMatchesSearch } from './utils/serverSearch'
 import { updateSharedGpuWarnings, type MineProcessWarning, type SharedGpuWatchMap } from './utils/mineProcessWarnings'
 import { gpuContextName, serverDisplayName } from './utils/serverName'
+import { loadLaunchProfiles, loadManagedRuns } from './utils/managedRuns'
 import authorAvatar from './assets/tongzh-seu.png'
 import packageInfo from '../package.json'
+
+const ONBOARDING_DISMISSED_KEY = 'racktop.onboardingDismissed.v1'
 
 const tabs: Array<{ value: DetailTab; label: string }> = [
   { value: 'overview', label: '概览' },
@@ -251,6 +256,11 @@ function App() {
   const [projectSyncProgress, setProjectSyncProgress] = useState<ProjectSyncProgress[]>([])
   const [preparingProjectIds, setPreparingProjectIds] = useState<Set<string>>(new Set())
   const [mineProcessWarnings, setMineProcessWarnings] = useState<MineProcessWarning[]>([])
+  const [managedLaunchIntent, setManagedLaunchIntent] = useState<ManagedLaunchIntent | null>(null)
+  const [onboardingPreviewStep, setOnboardingPreviewStep] = useState(0)
+  const [onboardingCollapsed, setOnboardingCollapsed] = useState(false)
+  const [onboardingDismissed, setOnboardingDismissed] = useState(() => localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true')
+  const [onboardingUseActualState, setOnboardingUseActualState] = useState(api.isDesktop)
   const [fleetSort, setFleetSort] = useState<'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount'>(() => (localStorage.getItem('racktop.fleetSort') as 'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount') || 'name')
   const [fleetDescending, setFleetDescending] = useState(() => localStorage.getItem('racktop.fleetDescending') === 'true')
   const [idleFilters, setIdleFilters] = useState<IdleFilters>(loadIdleFilters)
@@ -848,6 +858,30 @@ function App() {
   }, [servers, snapshots, search])
 
   const idleGpuItems = useMemo(() => rankIdleGpuItems(servers, snapshots, idleFilterHistory, idleFilters), [servers, snapshots, idleFilterHistory, idleFilters])
+  const projectRecentRunAt = useMemo(() => {
+    const recentRunAt: Record<string, number> = {}
+    for (const run of loadManagedRuns()) {
+      if (!run.projectId) continue
+      recentRunAt[run.projectId] = Math.max(recentRunAt[run.projectId] ?? 0, run.startedAt)
+    }
+    for (const project of projects) {
+      const projectRunAt = recentRunAt[project.id]
+      if (!projectRunAt) continue
+      for (const resourceId of [...project.datasetIds, ...project.modelIds]) recentRunAt[resourceId] = Math.max(recentRunAt[resourceId] ?? 0, projectRunAt)
+    }
+    return recentRunAt
+  }, [mainView, projects])
+  const onboardingSteps = useMemo<OnboardingStep[]>(() => {
+    const project = projects.find((item) => item.kind === 'project')
+    const resources = projects.filter((item) => item.kind === 'dataset' || item.kind === 'model')
+    return [
+      { id: 'server', title: '添加第一台服务器', description: '连接 SSH 主机并开始采集算力状态。', actionLabel: '添加服务器', completed: servers.length > 0, onAction: () => { setEditingServer(null); setShowServerForm(true) } },
+      { id: 'resource', title: '添加数据集或模型', description: '保存可被多个项目复用的长期资源。', actionLabel: '添加资源', completed: resources.length > 0, onAction: () => { setMainView('projects'); setProjectEditor('new') } },
+      { id: 'project', title: '添加项目并关联数据集/模型', description: '创建项目并选择运行所需的长期资源。', actionLabel: '添加项目', completed: Boolean(project && (project.datasetIds.length > 0 || project.modelIds.length > 0)), onAction: () => { setMainView('projects'); setProjectEditor(project ?? 'new') } },
+      { id: 'profile', title: '创建启动配置', description: '按项目保存命令与可调超参数。', actionLabel: '创建配置', completed: loadLaunchProfiles().length > 0, onAction: () => { setManagedLaunchIntent({ id: crypto.randomUUID(), projectId: project?.id }); setMainView('mine') } },
+      { id: 'task', title: '启动第一个任务', description: '选择服务器和 GPU，完成检查后启动。', actionLabel: '启动任务', completed: loadManagedRuns().length > 0, onAction: () => { setManagedLaunchIntent({ id: crypto.randomUUID(), projectId: project?.id }); setMainView('mine') } },
+    ]
+  }, [mainView, projects, servers.length])
   const idleAvailableCount = idleGpuItems.filter((item) => item.available).length
   const currentIdleReservation = idleReservations.find((reservation) => (reservation.status === 'active' || reservation.status === 'paused') && idleReservationFiltersEqual(reservation.filters, idleFilters))
   const activeIdleReservationCount = idleReservations.filter((reservation) => reservation.status === 'active').length
@@ -949,32 +983,33 @@ function App() {
     await refreshServer(saved.id)
   }
 
-  async function saveProject(draft: ProjectDraft, syncAfterSave: boolean, linkedDatasets: LinkedDatasetPlan[]) {
+  async function saveProject(draft: ProjectDraft, syncAfterSave: boolean, linkedResources: LinkedProjectResourcePlan[]) {
     const saved = await api.saveProject(draft)
     setProjects((current) => [saved, ...current.filter((item) => item.id !== saved.id)])
     setProjectEditor(null)
-    const prepareLinkedDatasets = async () => {
+    const prepareLinkedResources = async () => {
       const prepared: Array<{ project: Project; syncTargetIds: string[] }> = []
-      for (const plan of linkedDatasets.filter((item) => item.syncOnSave)) {
-        const dataset = projects.find((item) => item.id === plan.datasetId && item.kind === 'dataset')
-        if (!dataset) continue
-        setPreparingProjectIds((current) => new Set(current).add(dataset.id))
+      for (const plan of linkedResources.filter((item) => item.syncOnSave)) {
+        const resource = projects.find((item) => item.id === plan.resourceId && item.kind === plan.kind)
+        if (!resource) continue
+        setPreparingProjectIds((current) => new Set(current).add(resource.id))
         try {
           const plannedIds = new Set(plan.targets.map((target) => target.serverId))
           const configured = await api.saveProject({
-            id: dataset.id,
-            name: dataset.name,
-            kind: 'dataset',
-            sourceServerId: dataset.sourceServerId,
-            sourcePath: dataset.sourcePath,
+            id: resource.id,
+            name: resource.name,
+            kind: resource.kind,
+            sourceServerId: resource.sourceServerId,
+            sourcePath: resource.sourcePath,
             datasetIds: [],
-            targets: [...dataset.targets.filter((target) => !plannedIds.has(target.serverId)).map(({ serverId, path }) => ({ serverId, path })), ...plan.targets],
+            modelIds: [],
+            targets: [...resource.targets.filter((target) => !plannedIds.has(target.serverId)).map(({ serverId, path }) => ({ serverId, path })), ...plan.targets],
           })
           const inspected = await api.inspectProject(configured.id)
           setProjects((current) => current.map((item) => item.id === inspected.id ? inspected : item))
           prepared.push({ project: inspected, syncTargetIds: plan.targets.map((target) => target.serverId) })
         } finally {
-          setPreparingProjectIds((current) => { const next = new Set(current); next.delete(dataset.id); return next })
+          setPreparingProjectIds((current) => { const next = new Set(current); next.delete(resource.id); return next })
         }
       }
       return prepared
@@ -983,22 +1018,22 @@ function App() {
       setPreparingProjectIds((current) => new Set(current).add(saved.id))
       setToast(`“${saved.name}”已保存，正在准备同步`)
       try {
-        const [inspected, preparedDatasets] = await Promise.all([api.inspectProject(saved.id), prepareLinkedDatasets()])
+        const [inspected, preparedResources] = await Promise.all([api.inspectProject(saved.id), prepareLinkedResources()])
         setProjects((current) => current.map((item) => item.id === inspected.id ? inspected : item))
         if (!inspected.sourceExists) throw new Error('主目录不存在，无法开始同步')
         const projectTargetTotal = syncableProjectTargets(inspected).length
         const syncing = syncAllProjectTargets(inspected, false)
         setPreparingProjectIds((current) => { const next = new Set(current); next.delete(saved.id); return next })
         const completed = await syncing
-        let datasetCompleted = 0
-        let datasetTotal = 0
-        for (const prepared of preparedDatasets) {
-          datasetTotal += prepared.syncTargetIds.length
+        let resourceCompleted = 0
+        let resourceTotal = 0
+        for (const prepared of preparedResources) {
+          resourceTotal += prepared.syncTargetIds.length
           const results = await Promise.all(prepared.syncTargetIds.map((serverId) => syncProjectTarget(prepared.project, serverId, false)))
-          datasetCompleted += results.filter(Boolean).length
+          resourceCompleted += results.filter(Boolean).length
         }
-        const datasetMessage = datasetTotal > 0 ? `；数据集 ${datasetCompleted} / ${datasetTotal} 个目标同步成功` : ''
-        setToast(completed === projectTargetTotal ? `“${saved.name}”已更新 ${completed} 个目标${datasetMessage}` : `“${saved.name}”已保存；${completed} / ${projectTargetTotal} 个目标同步成功${datasetMessage}`)
+        const resourceMessage = resourceTotal > 0 ? `；关联资源 ${resourceCompleted} / ${resourceTotal} 个目标同步成功` : ''
+        setToast(completed === projectTargetTotal ? `“${saved.name}”已更新 ${completed} 个目标${resourceMessage}` : `“${saved.name}”已保存；${completed} / ${projectTargetTotal} 个目标同步成功${resourceMessage}`)
       } catch (reason) {
         setToast(`“${saved.name}”已保存，准备同步失败：${String(reason)}`)
       } finally {
@@ -1339,13 +1374,13 @@ function App() {
           {servers.length === 0 ? (
             <EmptyState onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
           ) : mainView === 'projects' ? (
-            <ProjectView projects={projects} servers={servers} busyTargets={busyProjectTargets} syncProgress={projectSyncProgress} preparingProjectIds={preparingProjectIds} onAdd={() => setProjectEditor('new')} onEdit={setProjectEditor} onDelete={setProjectPendingDelete} onInspect={inspectProject} onSync={(project, targetServerId) => { const target = project.targets.find((item) => item.serverId === targetServerId); if (target?.status === 'conflict') setProjectConflictTarget({ project, targetServerId }); else void syncProjectTarget(project, targetServerId) }} onCancel={(projectId, targetServerId) => void cancelProjectTarget(projectId, targetServerId)} onSyncAll={(project) => void syncAllProjectTargets(project)} />
+            <ProjectView projects={projects} recentRunAt={projectRecentRunAt} servers={servers} busyTargets={busyProjectTargets} syncProgress={projectSyncProgress} preparingProjectIds={preparingProjectIds} onAdd={() => setProjectEditor('new')} onLaunch={(project) => { setManagedLaunchIntent({ id: crypto.randomUUID(), projectId: project.id }); setMainView('mine') }} onEdit={setProjectEditor} onDelete={setProjectPendingDelete} onInspect={inspectProject} onSync={(project, targetServerId) => { const target = project.targets.find((item) => item.serverId === targetServerId); if (target?.status === 'conflict') setProjectConflictTarget({ project, targetServerId }); else void syncProjectTarget(project, targetServerId) }} onCancel={(projectId, targetServerId) => void cancelProjectTarget(projectId, targetServerId)} onSyncAll={(project) => void syncAllProjectTargets(project)} />
           ) : mainView === 'idle' ? (
-            <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} currentReservation={currentIdleReservation} onFiltersChange={setIdleFilters} onReserve={() => setReservationEditor({ filters: { ...idleFilters }, reservation: currentIdleReservation })} sortRevision={manualRefreshRevision} onSelect={(serverId) => { setSelectedServerId(serverId); setSelectedGpuUuid(null); setSelectedTab('overview'); setMainView('server') }} onQuickTerminal={(server, gpu) => setQuickTerminal({ server, gpu })} onReserveGpu={(server, gpu) => setReservationEditor({ filters: { ...idleFilters, duration: 0, targetServerId: server.id, targetGpuUuid: gpu.uuid } })} />
+            <IdleGpuView servers={servers} snapshots={snapshots} items={idleGpuItems} filters={idleFilters} currentReservation={currentIdleReservation} onFiltersChange={setIdleFilters} onReserve={() => setReservationEditor({ filters: { ...idleFilters }, reservation: currentIdleReservation })} sortRevision={manualRefreshRevision} onLaunch={(server, gpu) => { setManagedLaunchIntent({ id: crypto.randomUUID(), serverId: server.id, gpuUuid: gpu.uuid }); setMainView('mine') }} onQuickTerminal={(server, gpu) => setQuickTerminal({ server, gpu })} onSelect={(serverId, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu'); setMainView('server') }} onReserveGpu={(server, gpu) => setReservationEditor({ filters: { ...idleFilters, duration: 0, targetServerId: server.id, targetGpuUuid: gpu.uuid } })} />
           ) : mainView === 'mine' ? (
-            <MineProcessView servers={servers} snapshots={snapshots} warnings={mineProcessWarnings} terminatingProcess={terminatingProcess} onDismissWarning={(warningId) => { ignoredMineProcessWarningsRef.current.add(warningId); localStorage.setItem('racktop.ignoredMineProcessWarnings.v1', JSON.stringify([...ignoredMineProcessWarningsRef.current])); setMineProcessWarnings((current) => current.filter((warning) => warning.id !== warningId)) }} onOpenTerminal={(serverId) => { const server = servers.find((item) => item.id === serverId); if (server) setQuickTerminal({ server }) }} onRequestTerminate={(serverId, target) => { const server = servers.find((item) => item.id === serverId); if (server) setProcessPendingTermination({ serverId, serverName: server.name, ...target }) }} />
+            <ManagedProcessView servers={servers} snapshots={snapshots} projects={projects} warnings={mineProcessWarnings} launchIntent={managedLaunchIntent} onLaunchIntentConsumed={() => setManagedLaunchIntent(null)} onDismissWarning={(warningId) => { ignoredMineProcessWarningsRef.current.add(warningId); localStorage.setItem('racktop.ignoredMineProcessWarnings.v1', JSON.stringify([...ignoredMineProcessWarningsRef.current])); setMineProcessWarnings((current) => current.filter((warning) => warning.id !== warningId)) }} onOpenTerminal={(serverId) => { const server = servers.find((item) => item.id === serverId); if (server) setQuickTerminal({ server }) }} onNotice={setToast} onRefreshServer={(serverId) => refreshServer(serverId)} />
           ) : mainView === 'fleet' ? (
-            <FleetOverview servers={servers} snapshots={snapshots} settings={settings} totals={totals} sort={fleetSort} descending={fleetDescending} onSort={setFleetSort} onToggleOrder={() => setFleetDescending((value) => !value)} onSelect={(serverId, tab, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid ?? null); setSelectedTab(tab); setMainView('server') }} />
+            <FleetOverview onboarding={<OnboardingChecklist steps={onboardingSteps} previewStep={onboardingPreviewStep} collapsed={onboardingCollapsed} dismissed={onboardingDismissed} useActualState={onboardingUseActualState} showPreviewControls={!api.isDesktop} onPreviewStepChange={setOnboardingPreviewStep} onCollapsedChange={setOnboardingCollapsed} onDismiss={() => { localStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true'); setOnboardingDismissed(true); setToast('已隐藏新手引导，可在“设置 → 通用”中重新显示') }} onUseActualStateChange={setOnboardingUseActualState} />} servers={servers} snapshots={snapshots} settings={settings} totals={totals} sort={fleetSort} descending={fleetDescending} onSort={setFleetSort} onToggleOrder={() => setFleetDescending((value) => !value)} onSelect={(serverId, tab, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid ?? null); setSelectedTab(tab); setMainView('server') }} />
           ) : selectedServer && selectedSnapshot && canDisplayServerDetails(selectedServer.status) ? (
             <ServerDetail
               server={selectedServer}
@@ -1380,7 +1415,7 @@ function App() {
       {projectEditor && <ProjectForm initial={projectEditor === 'new' ? null : projectEditor} projects={projects} servers={servers} onClose={() => setProjectEditor(null)} onSave={saveProject} />}
       {projectPendingDelete && <ProjectDeleteDialog project={projectPendingDelete} onClose={() => setProjectPendingDelete(null)} onDelete={async () => { await api.deleteProject(projectPendingDelete.id); setProjects((current) => current.filter((item) => item.id !== projectPendingDelete.id)); setProjectPendingDelete(null); setToast(`已移除“${projectPendingDelete.name}”的同步配置，服务器文件未删除`) }} />}
       {projectConflictTarget && <ProjectConflictDialog project={projectConflictTarget.project} server={servers.find((item) => item.id === projectConflictTarget.targetServerId)} onClose={() => setProjectConflictTarget(null)} onConfirm={() => { const pending = projectConflictTarget; setProjectConflictTarget(null); void syncProjectTarget(pending.project, pending.targetServerId, true, true) }} />}
-      {showSettings && settings && <SettingsSheet settings={settings} onClose={() => setShowSettings(false)} onSave={async (value) => { setSettings(await api.saveSettings(value)); setShowSettings(false); setToast('设置已保存') }} />}
+      {showSettings && settings && <SettingsSheet settings={settings} onboardingVisible={!onboardingDismissed} onClose={() => setShowSettings(false)} onSave={async (value, showOnboarding) => { setSettings(await api.saveSettings(value)); if (showOnboarding) { localStorage.removeItem(ONBOARDING_DISMISSED_KEY); setOnboardingDismissed(false); setOnboardingUseActualState(true); setOnboardingCollapsed(false); if (onboardingDismissed) setMainView('fleet') } else { localStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true'); setOnboardingDismissed(true) } setShowSettings(false); setToast('设置已保存') }} />}
       {showActivityLog && <ActivityLogSheet servers={servers} snapshots={snapshots} onClose={() => setShowActivityLog(false)} />}
       {showAbout && <AboutSheet onClose={() => setShowAbout(false)} onNotice={setToast} />}
       {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setImportDrafts(null); setToast(`已导入 ${selected.length} 台服务器`) }} />}
@@ -1787,7 +1822,7 @@ function MasonryItem({ children }: { children: React.ReactNode }) {
   return <div className="masonry-item" ref={ref}>{children}</div>
 }
 
-function FleetOverview({ servers, snapshots, settings, totals, sort, descending, onSort, onToggleOrder, onSelect }: { servers: Server[]; snapshots: Record<string, Snapshot>; settings: AppSettings | null; totals: FleetTotals; sort: 'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount'; descending: boolean; onSort: (sort: 'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount') => void; onToggleOrder: () => void; onSelect: (serverId: string, tab: DetailTab, gpuUuid?: string) => void }) {
+function FleetOverview({ onboarding, servers, snapshots, settings, totals, sort, descending, onSort, onToggleOrder, onSelect }: { onboarding?: React.ReactNode; servers: Server[]; snapshots: Record<string, Snapshot>; settings: AppSettings | null; totals: FleetTotals; sort: 'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount'; descending: boolean; onSort: (sort: 'name' | 'status' | 'gpuCount' | 'utilization' | 'idleCount') => void; onToggleOrder: () => void; onSelect: (serverId: string, tab: DetailTab, gpuUuid?: string) => void }) {
   const metric = (server: Server) => {
     const snapshot = snapshots[server.id]
     const readableGpus = snapshot?.gpus.filter(isGpuAvailable) ?? []
@@ -1802,6 +1837,7 @@ function FleetOverview({ servers, snapshots, settings, totals, sort, descending,
     return descending ? -comparison : comparison
   })
   return <div className="detail-page fleet-page">
+    {onboarding}
     <div className="fleet-toolbar">
       <section className="fleet-summary" aria-label="全局资源摘要">
         <span><ServerIcon size={16} /><strong>{totals.online}</strong><small>在线服务器</small></span>
@@ -1872,7 +1908,7 @@ function MineProcessView({ servers, snapshots, warnings, terminatingProcess, onD
   return <div className="detail-page mine-process-page">{successNotices.length > 0 && <section className="mine-process-successes" aria-live="polite" aria-label="进程状态">{successNotices.map((notice) => <div className="mine-process-success" role="status" key={notice.id}><CheckCircle2 size={16} /><span>{notice.message}</span></div>)}</section>}{mineServers.length > 0 && <section className="mine-process-summary" aria-label="我的进程摘要"><span>{mineServers.length} 台服务器</span><strong>{mineCount} 个进程</strong></section>}{persistentWarnings.length > 0 && <section className="mine-process-warnings" aria-live="polite">{persistentWarnings.map((warning) => <div className="mine-process-warning mine-process-warning--warning" key={warning.id}><AlertCircle size={17} /><span>{warning.message}</span><button type="button" className="mine-process-warning__dismiss" onClick={() => onDismissWarning(warning.id)} aria-label="忽略这条提示" title="忽略"><X size={13} /></button></div>)}</section>}{mineServers.length > 0 ? <div className="mine-process-list">{mineServers.map(({ server, snapshot }) => <section className="mine-process-server" key={server.id}><PanelHeader icon={<ServerIcon />} title={server.name} subtitle={`${server.host} · 最近采集 ${relativeTime(snapshot.timestamp)}`} action={<button className="icon-button" aria-label={`打开 ${server.name} 终端`} title="打开终端" onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={16} /></button>} /><ProcessBlocks snapshot={snapshot} hideEmptyBlocks terminatingPid={terminatingProcess?.serverId === server.id ? terminatingProcess.pid : undefined} onRequestTerminate={(target) => onRequestTerminate(server.id, target)} /></section>)}</div> : <div className="mine-process-empty" role="status"><UserRound size={28} /><strong>没有我的进程</strong><p>当前已连接的服务器上没有检测到你的 GPU 或 CPU 进程。</p></div>}</div>
 }
 
-function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentReservation, onFiltersChange, onReserve, sortRevision, onSelect, onQuickTerminal, onReserveGpu }: { servers: Server[]; snapshots: Record<string, Snapshot>; items: IdleGpuItem[]; filters: IdleFilters; currentReservation?: IdleReservation; onFiltersChange: (filters: IdleFilters) => void; onReserve: () => void; sortRevision: number; onSelect: (serverId: string, gpuUuid: string) => void; onQuickTerminal: (server: Server, gpu: Snapshot['gpus'][number]) => void; onReserveGpu: (server: Server, gpu: Snapshot['gpus'][number]) => void }) {
+function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentReservation, onFiltersChange, onReserve, sortRevision, onLaunch, onQuickTerminal, onSelect, onReserveGpu }: { servers: Server[]; snapshots: Record<string, Snapshot>; items: IdleGpuItem[]; filters: IdleFilters; currentReservation?: IdleReservation; onFiltersChange: (filters: IdleFilters) => void; onReserve: () => void; sortRevision: number; onLaunch: (server: Server, gpu: Snapshot['gpus'][number]) => void; onQuickTerminal: (server: Server, gpu: Snapshot['gpus'][number]) => void; onSelect: (serverId: string, gpuUuid: string) => void; onReserveGpu: (server: Server, gpu: Snapshot['gpus'][number]) => void }) {
   const [gpuMemoryInput, setGpuMemoryInput] = useState(String(filters.gpuMemoryGb))
   const [cpuMemoryInput, setCpuMemoryInput] = useState(String(filters.cpuMemoryGb))
   const { gpuMemoryGb, cpuMemoryGb, otherUserProcess, duration, gpuModel, cpuModel, tag } = filters
@@ -1921,12 +1957,12 @@ function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentR
       const freeCpuGb = displayedFreeMemoryGb(((snapshot?.system.memoryTotalBytes ?? 0) - (snapshot?.system.memoryUsedBytes ?? 0)) / 1024 ** 2)
       const occupiedProcessCount = countOtherUserGpuWorkloads(gpu, snapshot?.processes ?? [])
       return <article className={`panel idle-card ${available ? '' : 'idle-card--unavailable'}`} key={`${server.id}-${gpu.uuid}`}>
-        <button className="idle-card__target" onClick={() => available ? onQuickTerminal(server, gpu) : onReserveGpu(server, gpu)} aria-label={`${available ? '打开终端' : '预约'} ${server.name} GPU ${gpu.index}`} title={available ? '打开终端' : '预约此卡'} />
+        <button className="idle-card__target" onClick={() => available ? onLaunch(server, gpu) : onReserveGpu(server, gpu)} aria-label={`${available ? '使用算力启动任务' : '预约'} ${server.name} GPU ${gpu.index}`} title={available ? '使用此 GPU 启动任务' : '预约此卡'} />
         <div className="idle-card__body">
-          <div className="idle-card__top"><span className={`idle-badge ${available ? '' : 'idle-badge--unavailable'}`}>{available ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}{available ? '可用' : '不可用'}</span><span className="idle-card__primary-action" aria-hidden="true">{available ? <TerminalSquare size={15} /> : <BellPlus size={15} />}</span></div>
+          <div className="idle-card__top"><span className={`idle-badge ${available ? '' : 'idle-badge--unavailable'}`}>{available ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}{available ? '可用' : '不可用'}</span>{!available && <span className="idle-card__primary-action" aria-hidden="true"><BellPlus size={15} /></span>}</div>
           <h3>{server.name} · GPU {gpu.index}</h3><p>{gpu.name} · {snapshot?.system.cpuModel || '未知 CPU'}</p><div className="idle-card__stats"><span><strong>{freeGpuGb.toFixed(1)} GB</strong><small>GPU MEM</small></span><span><strong>{freeCpuGb.toFixed(1)} GB</strong><small>CPU MEM</small></span><span><strong>{occupiedProcessCount > 0 ? `有 ${occupiedProcessCount} 个` : '无'}</strong><small>进程占用</small></span></div><div className="tag-row">{server.tags.map((item) => <span key={item}>{item}</span>)}</div>
         </div>
-        <button className="icon-button idle-card__detail" onClick={() => onSelect(server.id, gpu.uuid)} aria-label={`打开 ${server.name} GPU ${gpu.index} 详情`} title="查看详情"><ChevronRight size={16} /></button>
+        <div className="idle-card__actions">{available && <><button className="icon-button idle-card__launch" onClick={() => onLaunch(server, gpu)} aria-label={`使用 ${server.name} GPU ${gpu.index} 启动任务`} title="启动任务"><Play size={15} /></button><button className="icon-button idle-card__terminal" onClick={() => onQuickTerminal(server, gpu)} aria-label={`打开 ${server.name} GPU ${gpu.index} 终端`} title="打开终端"><TerminalSquare size={15} /></button></>}<button className="icon-button idle-card__detail" onClick={() => onSelect(server.id, gpu.uuid)} aria-label={`打开 ${server.name} GPU ${gpu.index} 详情`} title="查看详情"><ChevronRight size={15} /></button></div>
       </article>
     })}{items.length === 0 && <div className="inline-empty inline-empty--wide"><WifiOff size={28} /><strong>没有对应范围的 GPU</strong><p>当前没有符合所选 GPU 型号、CPU 型号或服务器标签的设备。</p></div>}</section>
   </div>
@@ -2047,8 +2083,9 @@ function IdleReservationCenter({ reservations, warnings, onClose, onEdit, onStat
   </div>
 }
 
-function SettingsSheet({ settings, onClose, onSave }: { settings: AppSettings; onClose: () => void; onSave: (settings: AppSettings) => Promise<void> }) {
+export function SettingsSheet({ settings, onboardingVisible, onClose, onSave }: { settings: AppSettings; onboardingVisible: boolean; onClose: () => void; onSave: (settings: AppSettings, showOnboarding: boolean) => Promise<void> }) {
   const [value, setValue] = useState(settings)
+  const [showOnboarding, setShowOnboarding] = useState(onboardingVisible)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const set = <K extends keyof AppSettings>(key: K, next: AppSettings[K]) => setValue((current) => ({ ...current, [key]: next }))
@@ -2056,12 +2093,15 @@ function SettingsSheet({ settings, onClose, onSave }: { settings: AppSettings; o
     <section className="sheet settings-sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <header className="sheet__header"><div><p className="eyebrow">偏好设置</p><h2 id="settings-title">外观、采样与历史</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
       <div className="settings-body">
+        <SettingsGroup icon={<CheckCircle2 />} title="通用">
+          <label className="switch-row"><span><strong>显示新手引导</strong><small>在算力总览顶部显示五步清单，引导完成服务器接入、添加数据集或模型、项目关联、启动配置和首次任务。</small></span><input type="checkbox" checked={showOnboarding} onChange={(event) => setShowOnboarding(event.target.checked)} /></label>
+          <label className="switch-row"><span><strong>显示添加服务器引导</strong><small>新增服务器时先显示 SSH 安全连接说明，包括认证方式、Host Key 核验和远端历史设置。</small></span><input type="checkbox" checked={value.showAddServerGuide} onChange={(event) => set('showAddServerGuide', event.target.checked)} /></label>
+        </SettingsGroup>
         <SettingsGroup icon={<SlidersHorizontal />} title="外观">
           <label>主题<select value={value.theme} onChange={(event) => set('theme', event.target.value as AppSettings['theme'])}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
           <div className="settings-choice-row"><span><strong>菜单栏状态</strong><small>扩展模式固定显示待处理预约和异常进程数量</small></span><div className="segmented settings-mode" role="group" aria-label="菜单栏状态模式"><button type="button" className={value.menuBarMode === 'compact' ? 'is-selected' : ''} aria-pressed={value.menuBarMode === 'compact'} onClick={() => set('menuBarMode', 'compact')}>紧凑</button><button type="button" className={value.menuBarMode === 'expanded' ? 'is-selected' : ''} aria-pressed={value.menuBarMode === 'expanded'} onClick={() => set('menuBarMode', 'expanded')}>扩展</button></div></div>
           <label className="switch-row"><span><strong>我的任务标记色</strong><small>用于显存光标、你的任务标签与侧栏提示</small></span><input type="color" value={value.currentUserAccent} onChange={(event) => set('currentUserAccent', event.target.value)} /></label>
           <label className="switch-row"><span><strong>减少非必要动效</strong><small>也会自动尊重系统“减少动态效果”设置</small></span><input type="checkbox" checked={value.reduceMotion} onChange={(event) => set('reduceMotion', event.target.checked)} /></label>
-          <label className="switch-row"><span><strong>显示添加服务器引导</strong><small>重新开启地址、认证、Host Key 与远端历史提示</small></span><input type="checkbox" checked={value.showAddServerGuide} onChange={(event) => set('showAddServerGuide', event.target.checked)} /></label>
         </SettingsGroup>
         <SettingsGroup icon={<RefreshCw />} title="采样">
           <label>后台最低采样间隔 <span>{value.backgroundSamplingIntervalSeconds} 秒</span><input type="range" min="5" max="120" value={value.backgroundSamplingIntervalSeconds} onChange={(event) => set('backgroundSamplingIntervalSeconds', Number(event.target.value))} /></label>
@@ -2079,7 +2119,7 @@ function SettingsSheet({ settings, onClose, onSave }: { settings: AppSettings; o
         </SettingsGroup>
         {error && <p className="form-error" role="alert">{error}</p>}
       </div>
-      <footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>取消</button><button className="button button--primary" disabled={saving} onClick={async () => { setSaving(true); setError(null); try { await onSave(value) } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '保存中…' : '保存设置'}</button></footer>
+      <footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>取消</button><button className="button button--primary" disabled={saving} onClick={async () => { setSaving(true); setError(null); try { await onSave(value, showOnboarding) } catch (reason) { setError(String(reason)) } finally { setSaving(false) } }}>{saving ? '保存中…' : '保存设置'}</button></footer>
     </section>
   </div>
 }

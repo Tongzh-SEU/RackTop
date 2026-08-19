@@ -41,7 +41,7 @@ const project: Project = {
   sourceIsDirectory: true,
   sourceSizeBytes: 10,
   sourceFileCount: 1,
-  datasetIds: [],
+  datasetIds: [], modelIds: [],
   targets: [],
   createdAt: 1,
   updatedAt: 1,

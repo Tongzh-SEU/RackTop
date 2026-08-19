@@ -292,7 +292,7 @@ export interface InteractionLogSummary {
   servers: InteractionServerSummary[]
 }
 
-export type ProjectKind = 'project' | 'dataset'
+export type ProjectKind = 'project' | 'dataset' | 'model'
 export type ProjectTargetStatus = 'unknown' | 'found' | 'missing' | 'offline' | 'syncing' | 'paused' | 'synced' | 'conflict' | 'error'
 
 export interface ProjectTarget {
@@ -327,6 +327,7 @@ export interface Project {
   sourceFileCount: number
   sourceModifiedAt?: number | null
   datasetIds: string[]
+  modelIds: string[]
   targets: ProjectTarget[]
   createdAt: number
   updatedAt: number
@@ -342,11 +343,13 @@ export interface ProjectDraft {
   sourceServerId: string
   sourcePath: string
   datasetIds: string[]
+  modelIds: string[]
   targets: Array<{ serverId: string; path: string }>
 }
 
-export interface LinkedDatasetPlan {
-  datasetId: string
+export interface LinkedProjectResourcePlan {
+  resourceId: string
+  kind: 'dataset' | 'model'
   syncOnSave: boolean
   targets: Array<{ serverId: string; path: string }>
 }
@@ -379,4 +382,49 @@ export interface ProjectSyncProgress {
   totalBytes: number
   startedAt: number
   state: 'preparing' | 'transferring' | 'publishing'
+}
+
+export interface LaunchProfile {
+  id: string
+  name: string
+  projectId?: string | null
+  workingDirectory: string
+  command: string
+  projectLogPath?: string | null
+  gpuCount: number
+  gpuModel?: string | null
+  minimumGpuMemoryGb: number
+  datasetIds: string[]
+  createdAt: number
+  updatedAt: number
+}
+
+export type ManagedRunStatus = 'starting' | 'running' | 'completed' | 'failed' | 'stopped' | 'unknown'
+
+export interface ManagedRun {
+  id: string
+  profileId?: string | null
+  name: string
+  projectId?: string | null
+  serverId: string
+  gpuUuids: string[]
+  gpuIndices: number[]
+  workingDirectory: string
+  command: string
+  pid: number
+  logPath: string
+  startedAt: number
+  endedAt?: number | null
+  status: ManagedRunStatus
+  exitCode?: number | null
+}
+
+export interface ManagedRunLaunchResult {
+  pid: number
+  logPath: string
+}
+
+export interface ManagedRunRemoteStatus {
+  status: 'running' | 'exited' | 'unknown'
+  exitCode?: number | null
 }

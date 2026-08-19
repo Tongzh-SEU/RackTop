@@ -14,9 +14,17 @@ const target: Server = { ...source, id: 'target', name: 'Target', host: '10.0.0.
 const alternateTarget: Server = { ...source, id: 'alternate-target', name: 'Alternate', host: '10.0.0.3' }
 const dataset: Project = {
   id: 'dataset', name: 'Dataset', kind: 'dataset', sourceServerId: source.id, sourcePath: '~/datasets/source', sourceExists: true,
-  sourceIsDirectory: true, sourceSizeBytes: 10, sourceFileCount: 1, datasetIds: [],
+  sourceIsDirectory: true, sourceSizeBytes: 10, sourceFileCount: 1, datasetIds: [], modelIds: [],
   targets: [{ serverId: target.id, path: '~/datasets/target', status: 'synced', exists: true, isDirectory: true, sizeBytes: 10, fileCount: 1 }],
   createdAt: 1, updatedAt: 1, status: 'synced',
+}
+const model: Project = {
+  ...dataset,
+  id: 'model',
+  name: 'Model',
+  kind: 'model',
+  sourcePath: '~/models/source',
+  targets: [{ ...dataset.targets[0], path: '~/models/target' }],
 }
 
 let container: HTMLDivElement | null = null
@@ -31,6 +39,21 @@ afterEach(() => {
 })
 
 describe('ProjectForm focus management', () => {
+  it('creates models with the same server and directory workflow without dataset linking', () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    act(() => root?.render(<ProjectForm projects={[dataset]} servers={[source, target]} onClose={vi.fn()} onSave={vi.fn()} />))
+    const modelButton = [...document.querySelectorAll<HTMLButtonElement>('.project-kind-segmented button')].find((button) => button.textContent === '模型')
+    act(() => modelButton?.click())
+
+    expect(modelButton?.classList.contains('is-selected')).toBe(true)
+    expect(document.querySelector<HTMLInputElement>('input[placeholder="例如：Llama-3-8B"]')).not.toBeNull()
+    expect(document.body.textContent).toContain('目标服务器')
+    expect(document.body.textContent).not.toContain('关联数据集')
+  })
+
   it('does not steal focus from an address when parent callbacks change', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -98,9 +121,45 @@ describe('ProjectForm focus management', () => {
     expect(onSave).toHaveBeenCalledTimes(1)
     expect(onSave.mock.calls[0][1]).toBe(true)
     expect(onSave.mock.calls[0][2][0]).toMatchObject({
-      datasetId: dataset.id,
+      resourceId: dataset.id,
+      kind: 'dataset',
       syncOnSave: true,
       targets: [{ serverId: target.id, path: '~/datasets/target' }],
+    })
+  })
+
+  it('persists linked models and adds only missing model replicas to save and sync', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    const project: Project = {
+      ...dataset,
+      id: 'project-model',
+      kind: 'project',
+      datasetIds: [],
+      modelIds: [model.id],
+    }
+    vi.spyOn(api, 'probeProjectPaths').mockResolvedValue([
+      { serverId: target.id, requestedPath: '~/models/target', suggestedPath: '~/models/target', exists: false, isDirectory: false, sizeBytes: 0, fileCount: 0, matches: [] },
+    ])
+    const onSave = vi.fn().mockResolvedValue(undefined)
+
+    act(() => root?.render(<ProjectForm initial={project} projects={[project, model]} servers={[source, target]} onClose={vi.fn()} onSave={onSave} />))
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 550)) })
+
+    const modelSection = document.querySelector<HTMLElement>('[aria-label="关联模型"]')
+    expect(modelSection?.textContent).toContain('Model')
+    act(() => modelSection?.querySelector<HTMLInputElement>('.project-dataset-row__sync input')?.click())
+    expect(document.querySelector('.sheet__footer')?.textContent).toContain('保存并同步（含 1 个模型）')
+
+    const syncButton = [...document.querySelectorAll<HTMLButtonElement>('.sheet__footer button')].find((button) => button.textContent?.includes('保存并同步'))
+    await act(async () => { syncButton?.click(); await Promise.resolve() })
+    expect(onSave.mock.calls[0][0].modelIds).toEqual([model.id])
+    expect(onSave.mock.calls[0][2][0]).toMatchObject({
+      resourceId: model.id,
+      kind: 'model',
+      syncOnSave: true,
+      targets: [{ serverId: target.id, path: '~/models/target' }],
     })
   })
 
