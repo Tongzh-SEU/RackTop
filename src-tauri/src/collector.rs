@@ -180,7 +180,7 @@ pub(crate) fn configured_ssh_command_without_control(server: &Server, password: 
     configured_ssh_command_with_control(server, password, false)
 }
 
-fn configured_ssh_command_with_control(server: &Server, password: Option<&str>, use_control_master: bool) -> Result<(Command, String), String> {
+fn configured_ssh_command_with_control(server: &Server, password: Option<&str>, _use_control_master: bool) -> Result<(Command, String), String> {
     let mut command = Command::new("ssh");
     command.args(["-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=yes"]);
     if server.auth_method == "password" {
@@ -197,7 +197,7 @@ fn configured_ssh_command_with_control(server: &Server, password: Option<&str>, 
         command.args(["-o", "BatchMode=yes"]);
     }
     #[cfg(unix)]
-    if use_control_master {
+    if _use_control_master {
         command.args(["-o", "ControlMaster=auto", "-o", "ControlPersist=600", "-o", "ControlPath=/tmp/racktop-%C"]);
     } else {
         command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
