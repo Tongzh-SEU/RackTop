@@ -1553,10 +1553,7 @@ function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCp
         <section className="panel panel--mini-chart"><PanelHeader title="GPU UTL" /><TrendChart points={points} snapshot={snapshot} mode="gpu" height={170} animate={animateCharts} seriesOpacity={0.9} /></section>
       </div>
     </section>,
-    processes: <section className="overview-section" aria-labelledby="overview-process-title">
-      <div className="overview-section__header"><TerminalSquare size={17} /><div><h2 id="overview-process-title">当前进程</h2><p>GPU 与 CPU 进程按任务颜色分组</p></div></div>
-      <ProcessBlocks snapshot={snapshot} compact terminatingPid={terminatingPid} onRequestTerminate={onRequestTerminate} />
-    </section>,
+    processes: <ProcessBlocks snapshot={snapshot} compact currentLabels terminatingPid={terminatingPid} onRequestTerminate={onRequestTerminate} />,
   }
 
   return <div className="overview-stack">{modules.metrics}{modules.resources}{modules.processes}{modules.trends}</div>

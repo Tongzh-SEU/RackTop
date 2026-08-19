@@ -19,7 +19,9 @@ const snapshot: Snapshot = {
 
 describe('ProcessBlocks', () => {
   it('renders the CPU block below the GPU block with matching task markers', () => {
-    const markup = renderToStaticMarkup(<ProcessBlocks snapshot={snapshot} compact onRequestTerminate={() => {}} />)
+    const markup = renderToStaticMarkup(<ProcessBlocks snapshot={snapshot} compact currentLabels onRequestTerminate={() => {}} />)
+    expect(markup).toContain('当前 GPU 进程')
+    expect(markup).toContain('当前 CPU 进程')
     expect(markup.indexOf('GPU 进程')).toBeLessThan(markup.indexOf('CPU 进程'))
     expect(markup).toContain('<th>GPU</th><th>PID</th>')
     expect(markup).not.toContain('<th>GPU · PID</th>')
