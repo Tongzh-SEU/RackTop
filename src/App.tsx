@@ -996,37 +996,35 @@ function App() {
   async function saveServer(draft: ServerDraft) {
     const previous = draft.id ? servers.find((item) => item.id === draft.id) : undefined
     const saved = await api.saveServer(draft)
-    let sync: RemoteHistorySyncResult | null = null
-    if (saved.remoteHistoryEnabled) {
-      let configurationError: unknown = null
-      for (const delay of [0, 900, 1800]) {
-        if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay))
-        try {
-          await api.configureRemoteHistory(saved.id)
-          configurationError = null
-          break
-        } catch (reason) {
-          configurationError = reason
-        }
-      }
-      if (configurationError) {
-        setToast(`服务器已保存；远端历史将在连接稳定后重试：${String(configurationError)}`)
-      } else {
-        try {
-          sync = await api.syncRemoteHistory(saved.id)
-        } catch (reason) {
-          setToast(`服务器已保存，远端历史首次同步失败：${String(reason)}`)
-        }
-      }
-    } else if (previous?.remoteHistoryEnabled) {
-      await api.configureRemoteHistory(saved.id)
-    }
-    const server = sync?.latestTimestamp ? { ...saved, remoteHistoryLastSyncAt: sync.latestTimestamp } : saved
+    const server = saved
     deletedServerIds.current.delete(saved.id)
     setServers((current) => previous ? current.map((item) => item.id === saved.id ? server : item) : [...current, server])
     setSelectedServerId(saved.id)
     setShowServerForm(false)
     setEditingServer(null)
+    setToast('服务器已保存，正在连接…')
+    void (async () => {
+      let sync: RemoteHistorySyncResult | null = null
+      if (saved.remoteHistoryEnabled) {
+        let configurationError: unknown = null
+        for (const delay of [0, 900, 1800]) {
+          if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay))
+          try {
+            await api.configureRemoteHistory(saved.id)
+            configurationError = null
+            break
+          } catch (reason) { configurationError = reason }
+        }
+        if (configurationError) setToast(`服务器已保存；远端历史将在连接稳定后重试：${String(configurationError)}`)
+        else {
+          try { sync = await api.syncRemoteHistory(saved.id) }
+          catch (reason) { setToast(`服务器已保存，远端历史首次同步失败：${String(reason)}`) }
+        }
+      } else if (previous?.remoteHistoryEnabled) {
+        try { await api.configureRemoteHistory(saved.id) } catch (reason) { setToast(`服务器已保存；停止远端历史失败：${String(reason)}`) }
+      }
+      if (sync?.latestTimestamp) setServers((current) => current.map((item) => item.id === saved.id ? { ...item, remoteHistoryLastSyncAt: sync?.latestTimestamp ?? item.remoteHistoryLastSyncAt } : item))
+    })()
     await refreshServer(saved.id)
   }
 
