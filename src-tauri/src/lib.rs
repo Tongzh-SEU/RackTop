@@ -9,8 +9,11 @@ pub mod storage;
 mod terminal;
 
 use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
+use std::fs::OpenOptions;
+#[cfg(target_os = "macos")]
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -251,9 +254,26 @@ fn open_setup_terminal(script: String) -> Result<(), String> {
     if script.trim().is_empty() { return Err("启动配置命令为空".into()); }
     #[cfg(target_os = "macos")]
     {
-        let encoded = STANDARD.encode(script.as_bytes());
-        let command = format!("printf '%s' '{encoded}' | base64 -D | /bin/sh");
-        Command::new("osascript").args(["-e", &format!("tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{command}\"")]).spawn().map_err(|error| format!("无法打开 macOS Terminal：{error}"))?;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let script_path = std::env::temp_dir().join(format!(
+            "racktop-ssh-setup-{}-{}.sh",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_nanos(),
+        ));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&script_path)
+            .map_err(|error| format!("无法创建 macOS SSH 配置脚本：{error}"))?;
+        file.write_all(script.as_bytes()).map_err(|error| format!("无法写入 macOS SSH 配置脚本：{error}"))?;
+        file.sync_all().map_err(|error| format!("无法保存 macOS SSH 配置脚本：{error}"))?;
+
+        let path = shell_quote(script_path.to_string_lossy().as_ref());
+        let command = format!("clear; printf '%s\\n\\n' 'RackTop SSH 密钥快速配置'; cat {path}; printf '%s\\n\\n' '正在执行…'; /bin/sh {path}; status=$?; rm -f {path}; printf '\\n%s\\n' 'RackTop SSH 配置已结束。'; exit $status");
+        let apple_script_command = command.replace('\\', "\\\\").replace('"', "\\\"");
+        Command::new("osascript").args(["-e", &format!("tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{apple_script_command}\"")]).spawn().map_err(|error| format!("无法打开 macOS Terminal：{error}"))?;
     }
     #[cfg(target_os = "windows")]
     {
@@ -266,6 +286,10 @@ fn open_setup_terminal(script: String) -> Result<(), String> {
         Command::new("x-terminal-emulator").args(["-e", "sh", "-lc", &format!("{}; exec \"${{SHELL:-/bin/sh}}\"", script)]).spawn().map_err(|error| format!("无法打开系统终端：{error}"))?;
     }
     Ok(())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\\"'\\\"'"))
 }
 
 #[cfg(target_os = "windows")]
