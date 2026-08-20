@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/readme/racktop-logo.svg" alt="RackTop Logo" width="96" />
+  <img src="docs/assets/readme/racktop-macos-icon.png" alt="RackTop macOS Logo" width="96" />
 </p>
 
 <h1 align="center">RackTop</h1>
@@ -22,12 +22,12 @@ RackTop 通过本机 OpenSSH 连接服务器，不要求在远程机器安装常
 
 ## 下载
 
-当前稳定版：**v1.24.4**
+当前稳定版：**v1.24.5**
 
 | 平台 | 安装包 | 下载 |
 | --- | --- | --- |
-| macOS Apple Silicon | `RackTop_1.24.4_aarch64.dmg` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.24.4/RackTop_1.24.4_aarch64.dmg) |
-| Windows x64 | `RackTop_1.24.4_x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.24.4/RackTop_1.24.4_x64-setup.exe) |
+| macOS Apple Silicon | `RackTop_1.24.5_macos-arm64.zip` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.24.5/RackTop_1.24.5_macos-arm64.zip) |
+| Windows x64 | `RackTop_1.24.5_x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.24.5/RackTop_1.24.5_x64-setup.exe) |
 
 更多版本和校验信息见 [GitHub Releases](https://github.com/Tongzh-SEU/RackTop/releases)。macOS 首次打开若提示来源限制，请在“系统设置 → 隐私与安全性”中确认打开。
 
