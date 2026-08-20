@@ -249,7 +249,8 @@ mod tests {
         assert!(REMOTE_DAEMON_SCRIPT.contains(".client-heartbeat"));
         assert!(REMOTE_DAEMON_SCRIPT.contains("-gt 90"));
         assert!(REMOTE_DAEMON_SCRIPT.contains("sleep 60"));
-        assert!(REMOTE_DAEMON_SCRIPT.contains("set -e\nset -u"));
+        let daemon_script = REMOTE_DAEMON_SCRIPT.replace("\r\n", "\n");
+        assert!(daemon_script.contains("set -e\nset -u"));
         assert!(REMOTE_DAEMON_SCRIPT.contains("sh \"$collector\""));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("#!/bin/sh"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used,memory.total"));
