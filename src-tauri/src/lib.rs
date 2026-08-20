@@ -10,6 +10,8 @@ mod terminal;
 
 use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
 use std::collections::HashMap;
+#[cfg(target_os = "windows")]
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 #[cfg(target_os = "macos")]
 use std::fs::OpenOptions;
 #[cfg(target_os = "macos")]
