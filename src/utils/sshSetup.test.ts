@@ -6,8 +6,11 @@ describe('SSH setup scripts', () => {
     const script = unixSshSetupScript({ username: 'tongzh', host: '10.0.0.1', port: 2222 })
     expect(script).toContain('ssh-copy-id -o PreferredAuthentications=password -o PubkeyAuthentication=no -i "$KEY_PATH.pub" -p 2222 \'tongzh@10.0.0.1\'')
     expect(script).toContain('KEY_PATH="$HOME/.ssh/racktop_ed25519"')
+    expect(script).toContain('mkdir -p "$HOME/.ssh"')
+    expect(script).toContain('set -eu')
     expect(script).toContain('racktop-managed:$KEY_ID')
-    expect(script).toContain('ssh -o IdentitiesOnly=yes -i "$KEY_PATH" -p 2222 \'tongzh@10.0.0.1\'')
+    expect(script).toContain("ssh -o BatchMode=yes -o IdentitiesOnly=yes -i \"$KEY_PATH\" -p 2222 'tongzh@10.0.0.1'")
+    expect(script).toContain('__RACKTOP_SSH_READY__')
     expect(script).toContain('# 本机：')
     expect(script).toContain('# 远程：')
   })
@@ -15,6 +18,7 @@ describe('SSH setup scripts', () => {
   it('renders a PowerShell script that performs the remote append through ssh', () => {
     const script = windowsSshSetupScript({ username: 'researcher', host: 'gpu.example.com', port: 22 })
     expect(script).toContain('$env:USERPROFILE')
+    expect(script).toContain('$ErrorActionPreference = "Stop"')
     expect(script).toContain('$sshDirectory = Join-Path $env:USERPROFILE ".ssh"')
     expect(script).toContain('$keyPath = Join-Path $sshDirectory "racktop_ed25519"')
     expect(script).toContain('racktop-managed:$keyId')
@@ -23,8 +27,10 @@ describe('SSH setup scripts', () => {
     expect(script).toContain('if ($LASTEXITCODE -ne 0) { throw')
     expect(script).toContain('if (-not (Test-Path $publicKeyPath)) { throw')
     expect(script).toContain('Get-Content $publicKeyPath | ssh')
+    expect(script).toContain('RackTop 公钥写入服务器失败')
     expect(script).toContain("ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no -p 22 'researcher@gpu.example.com' 'umask 077;")
-    expect(script).toContain('ssh -o IdentitiesOnly=yes -i $keyPath')
+    expect(script).toContain('ssh -o BatchMode=yes -o IdentitiesOnly=yes -i $keyPath')
+    expect(script).toContain('__RACKTOP_SSH_READY__')
   })
 
   it('identifies only the dedicated RackTop identity path', () => {
