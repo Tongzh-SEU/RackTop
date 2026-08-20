@@ -100,10 +100,11 @@ if [ -r "$state/.daemon.pid" ]; then
 fi
 if [ "$running" -ne 1 ]; then
   rm -f "$state/.daemon.pid"
+  : > "$state/.daemon.log"
   if command -v setsid >/dev/null 2>&1; then
-    nohup setsid "$state/.daemon.sh" </dev/null >/dev/null 2>&1 &
+    nohup setsid sh "$state/.daemon.sh" </dev/null >"$state/.daemon.log" 2>&1 &
   else
-    nohup "$state/.daemon.sh" </dev/null >/dev/null 2>&1 &
+    nohup sh "$state/.daemon.sh" </dev/null >"$state/.daemon.log" 2>&1 &
   fi
   ready=0
   for attempt in 1 2 3; do
@@ -113,6 +114,7 @@ if [ "$running" -ne 1 ]; then
   done
   if [ "$ready" -ne 1 ]; then
     printf '远端历史常驻进程启动失败' >&2
+    if [ -s "$state/.daemon.log" ]; then printf '：' >&2; tail -n 8 "$state/.daemon.log" >&2; fi
     exit 43
   fi
 fi
@@ -246,12 +248,22 @@ mod tests {
         assert!(REMOTE_DAEMON_SCRIPT.contains(".client-heartbeat"));
         assert!(REMOTE_DAEMON_SCRIPT.contains("-gt 90"));
         assert!(REMOTE_DAEMON_SCRIPT.contains("sleep 60"));
+        assert!(REMOTE_DAEMON_SCRIPT.contains("sh \"$collector\""));
+        assert!(REMOTE_COLLECTOR_SCRIPT.contains("#!/bin/sh"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used,memory.total"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("--query-compute-apps=gpu_uuid,pid,used_memory"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains(".usage-v1.tsv"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("__racktop_coverage__"));
         assert!(!REMOTE_COLLECTOR_SCRIPT.contains("command="));
         assert!(!REMOTE_COLLECTOR_SCRIPT.contains("args="));
+    }
+
+    #[test]
+    fn remote_daemon_install_keeps_actionable_startup_diagnostics() {
+        let source = include_str!("remote_history.rs");
+        assert!(source.contains("nohup setsid sh \"$state/.daemon.sh\""));
+        assert!(source.contains("$state/.daemon.log"));
+        assert!(source.contains("tail -n 8 \"$state/.daemon.log\""));
     }
 
     #[test]

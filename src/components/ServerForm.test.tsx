@@ -21,6 +21,7 @@ describe('ServerForm onboarding', () => {
     expect(markup).toContain('key-guide__chevron')
     expect(markup.indexOf('SSH 密钥快速配置')).toBeLessThan(markup.indexOf('跳板机 ProxyJump'))
     expect(markup).not.toContain('第一次连接')
+    expect(markup).toContain('type="submit" class="button button--primary" disabled=""')
   })
 
   it('hides fixed per-server collection defaults from the form', () => {

@@ -1009,11 +1009,14 @@ function App() {
           configurationError = reason
         }
       }
-      if (configurationError) throw configurationError
-      try {
-        sync = await api.syncRemoteHistory(saved.id)
-      } catch (reason) {
-        setToast(`服务器已保存，远端历史首次同步失败：${String(reason)}`)
+      if (configurationError) {
+        setToast(`服务器已保存；远端历史将在连接稳定后重试：${String(configurationError)}`)
+      } else {
+        try {
+          sync = await api.syncRemoteHistory(saved.id)
+        } catch (reason) {
+          setToast(`服务器已保存，远端历史首次同步失败：${String(reason)}`)
+        }
       }
     } else if (previous?.remoteHistoryEnabled) {
       await api.configureRemoteHistory(saved.id)

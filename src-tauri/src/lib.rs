@@ -9,6 +9,7 @@ pub mod storage;
 mod terminal;
 
 use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
@@ -250,12 +251,15 @@ fn open_setup_terminal(script: String) -> Result<(), String> {
     if script.trim().is_empty() { return Err("启动配置命令为空".into()); }
     #[cfg(target_os = "macos")]
     {
-        let escaped = script.replace("\\", "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-        Command::new("osascript").args(["-e", &format!("tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{escaped}\"")]).spawn().map_err(|error| format!("无法打开 macOS Terminal：{error}"))?;
+        let encoded = STANDARD.encode(script.as_bytes());
+        let command = format!("printf '%s' '{encoded}' | base64 -D | /bin/sh");
+        Command::new("osascript").args(["-e", &format!("tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{command}\"")]).spawn().map_err(|error| format!("无法打开 macOS Terminal：{error}"))?;
     }
     #[cfg(target_os = "windows")]
     {
-        Command::new("powershell.exe").args(["-NoProfile", "-Command", &format!("$p = Start-Process powershell.exe -ArgumentList '-NoExit','-Command',{} -PassThru; $p.WaitForInputIdle()", powershell_quote(&script))]).spawn().map_err(|error| format!("无法打开 Windows PowerShell：{error}"))?;
+        let encoded = powershell_encoded_command(&script);
+        let launcher = format!("Start-Process powershell.exe -ArgumentList @('-NoExit','-NoProfile','-EncodedCommand','{encoded}')");
+        Command::new("powershell.exe").args(["-NoProfile", "-Command", &launcher]).spawn().map_err(|error| format!("无法打开 Windows PowerShell：{error}"))?;
     }
     #[cfg(target_os = "linux")]
     {
@@ -265,8 +269,49 @@ fn open_setup_terminal(script: String) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn powershell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+fn powershell_encoded_command(value: &str) -> String {
+    let utf16_le = value.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+    STANDARD.encode(utf16_le)
+}
+
+#[tauri::command]
+async fn verify_ssh_setup(draft: ServerDraft) -> Result<(), String> {
+    if draft.host.trim().is_empty() || draft.username.trim().is_empty() {
+        return Err("请先填写主机地址和用户名".into());
+    }
+    let server = Server {
+        id: "ssh-setup-verification".into(),
+        name: draft.name,
+        location: draft.location,
+        host: draft.host,
+        port: draft.port,
+        username: draft.username,
+        ssh_alias: None,
+        identity_file: Some("~/.ssh/racktop_ed25519".into()),
+        proxy_jump: draft.proxy_jump,
+        tags: Vec::new(),
+        sampling_interval_seconds: 2,
+        history_retention_days: 90,
+        remote_history_enabled: false,
+        remote_history_last_sync_at: None,
+        sort_order: 0,
+        auth_method: "privateKey".into(),
+        status: "unknown".into(),
+        last_error: None,
+        last_seen_at: None,
+    };
+    let (mut command, target) = collector::configured_ssh_command(&server, None)?;
+    command.arg(target).arg("printf '__RACKTOP_SSH_READY__\\n'").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let output = tokio::time::timeout(std::time::Duration::from_secs(12), command.output()).await
+        .map_err(|_| "等待 RackTop 专用密钥验证超时".to_string())?
+        .map_err(|error| format!("无法启动系统 ssh：{error}"))?;
+    if !output.status.success() {
+        return Err(collector::classify_ssh_error(String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    if !String::from_utf8_lossy(&output.stdout).lines().any(|line| line.trim() == "__RACKTOP_SSH_READY__") {
+        return Err("专用密钥登录后未返回验证标记".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -790,7 +835,7 @@ pub fn run() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, open_setup_terminal, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, list_projects, save_project, delete_project, probe_project_paths, suggest_project_paths, inspect_project, inspect_project_source, sync_project, list_project_sync_progress, cancel_project_sync, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, launch_managed_run, read_managed_run_log, get_managed_run_status, update_tray_summary, window_minimize, window_toggle_maximize, window_close])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, open_setup_terminal, verify_ssh_setup, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, list_projects, save_project, delete_project, probe_project_paths, suggest_project_paths, inspect_project, inspect_project_source, sync_project, list_project_sync_progress, cancel_project_sync, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, launch_managed_run, read_managed_run_log, get_managed_run_status, update_tray_summary, window_minimize, window_toggle_maximize, window_close])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }
