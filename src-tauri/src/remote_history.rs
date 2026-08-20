@@ -83,8 +83,12 @@ pub async fn fetch_usage(server: &Server, password: Option<&str>, since_timestam
 }
 
 async fn install(server: &Server, password: Option<&str>) -> Result<(), String> {
-    let encoded = STANDARD.encode(REMOTE_COLLECTOR_SCRIPT);
-    let daemon_encoded = STANDARD.encode(REMOTE_DAEMON_SCRIPT);
+    // Windows checkouts may expose bundled shell assets as CRLF. Normalize before
+    // sending them to Linux, where a trailing CR changes `set -e` into an invalid option.
+    let collector_script = REMOTE_COLLECTOR_SCRIPT.replace("\r\n", "\n");
+    let daemon_script = REMOTE_DAEMON_SCRIPT.replace("\r\n", "\n");
+    let encoded = STANDARD.encode(collector_script);
+    let daemon_encoded = STANDARD.encode(daemon_script);
     let script = format!(r#"set -e
 set -u
 state={REMOTE_DIRECTORY}
@@ -265,6 +269,7 @@ mod tests {
     fn remote_daemon_install_keeps_actionable_startup_diagnostics() {
         let source = include_str!("remote_history.rs");
         assert!(source.contains("nohup setsid sh \"$state/.daemon.sh\""));
+        assert!(source.contains("replace(\"\\r\\n\", \"\\n\")"));
         assert!(source.contains("$state/.daemon.log"));
         assert!(source.contains("tail -n 8 \"$state/.daemon.log\""));
     }
