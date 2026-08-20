@@ -250,6 +250,9 @@ export const api = {
     browserServers = [...browserServers.filter((item) => item.id !== server.id), server]
     return server
   },
+  async verifySshSetup(draft: ServerDraft): Promise<void> {
+    if (isTauri) return invoke('verify_ssh_setup', { draft })
+  },
   async deleteServer(serverId: string, revokeSshAccess = false): Promise<RemoteCleanupResult> {
     if (isTauri) return invoke('delete_server', { serverId, revokeSshAccess })
     browserServers = browserServers.filter((server) => server.id !== serverId)

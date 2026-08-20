@@ -49,5 +49,5 @@ export function RemoteSyncStatus({ status, onOpenFailure }: { status: RemoteSync
   if (status.phase === 'success') {
     return <span className="remote-sync-status remote-sync-status--success" role="status" aria-live="polite"><CheckCircle2 size={13} />历史已同步 · 新增 {status.importedCount.toLocaleString('zh-CN')} 条</span>
   }
-  return <button type="button" className="remote-sync-status remote-sync-status--error" onClick={onOpenFailure}><AlertCircle size={13} />{status.failedServerIds.length} 台同步失败 · 5 分钟后重试</button>
+  return <button type="button" className="remote-sync-status remote-sync-status--error" onClick={onOpenFailure}><AlertCircle size={13} />{status.failedServerIds.length} 台历史同步失败 · 5 分钟后重试</button>
 }
