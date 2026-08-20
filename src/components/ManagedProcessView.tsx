@@ -337,6 +337,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
     setLaunchProfile(profile)
     setSaveProfile(true)
     setLaunchError(null)
+    setLaunchOpen(false)
     onNotice(exists ? `已保存“${profile.name}”` : `已添加“${profile.name}”到启动配置`)
   }
 

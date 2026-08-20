@@ -19,7 +19,7 @@ describe('RemoteSyncStatus', () => {
     expect(renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'success', importedCount: 1_240 }} onOpenFailure={() => {}} />)).toContain('历史已同步 · 新增 1,240 条')
     const failure = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'error', failedServerIds: ['a', 'b'] }} onOpenFailure={() => {}} />)
     expect(failure).toContain('<button')
-    expect(failure).toContain('2 台同步失败 · 5 分钟后重试')
+    expect(failure).toContain('2 台历史同步失败 · 5 分钟后重试')
   })
 
   it('retries a failed remote sync once when that server recovers', () => {

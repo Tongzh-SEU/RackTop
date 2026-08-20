@@ -630,8 +630,20 @@ function App() {
         if (remoteSyncInFlight.current.has(server.id)) return
         remoteSyncInFlight.current.add(server.id)
         try {
-          await api.configureRemoteHistory(server.id)
-          const result = await api.syncRemoteHistory(server.id)
+          let result: RemoteHistorySyncResult | null = null
+          let lastError: unknown = null
+          for (const delay of [0, 1_000, 2_000]) {
+            if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay))
+            try {
+              await api.configureRemoteHistory(server.id)
+              result = await api.syncRemoteHistory(server.id)
+              lastError = null
+              break
+            } catch (reason) {
+              lastError = reason
+            }
+          }
+          if (lastError || !result) throw lastError ?? new Error('历史同步未返回结果')
           remoteSyncRecoveryQueued.current.delete(server.id)
           importedCount += result.importedCount
           if (!cancelled && result.latestTimestamp) {
@@ -986,7 +998,18 @@ function App() {
     const saved = await api.saveServer(draft)
     let sync: RemoteHistorySyncResult | null = null
     if (saved.remoteHistoryEnabled) {
-      await api.configureRemoteHistory(saved.id)
+      let configurationError: unknown = null
+      for (const delay of [0, 900, 1800]) {
+        if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay))
+        try {
+          await api.configureRemoteHistory(saved.id)
+          configurationError = null
+          break
+        } catch (reason) {
+          configurationError = reason
+        }
+      }
+      if (configurationError) throw configurationError
       try {
         sync = await api.syncRemoteHistory(saved.id)
       } catch (reason) {
