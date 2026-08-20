@@ -254,6 +254,8 @@ pub(crate) fn classify_ssh_error(stderr: &str) -> String {
         format!("SSH 认证失败：{stderr}")
     } else if lower.contains("connection refused") {
         format!("SSH 连接被拒绝：{stderr}")
+    } else if lower.contains("connection closed by 127.0.0.1") || lower.contains("connect to host 127.0.0.1") {
+        format!("本机 SSH 代理拒绝了连接：{stderr}。请确认代理正在运行；若此服务器不需要代理，请检查 ~/.ssh/config 中的 ProxyCommand / ProxyJump。")
     } else if lower.contains("no route to host") || lower.contains("operation timed out") {
         format!("服务器不可达：{stderr}")
     } else if stderr.is_empty() {
@@ -699,6 +701,11 @@ mod tests {
     #[test]
     fn classifies_changed_host_key() {
         assert!(classify_ssh_error("Host key verification failed").contains("中间人攻击"));
+    }
+
+    #[test]
+    fn classifies_a_local_ssh_proxy_closing_the_connection() {
+        assert!(classify_ssh_error("Connection closed by 127.0.0.1 port 7897").contains("本机 SSH 代理"));
     }
 
     #[test]

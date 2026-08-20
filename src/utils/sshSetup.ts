@@ -34,7 +34,7 @@ export function unixSshSetupScript({ username, host, port }: SshSetupTarget) {
 set -eu
 
 # 在本机终端执行（macOS / Linux）。整段复制粘贴即可。
-# ssh-copy-id 和 ssh 会自动连接远程 Linux 服务器，无需先登录。
+# ssh 会自动连接远程 Linux 服务器，无需先登录。
 KEY_PATH="$HOME/.ssh/racktop_ed25519"
 
 # 本机：生成 RackTop 专用密钥，已有密钥不会覆盖。
@@ -45,8 +45,12 @@ if [ ! -f "$KEY_PATH" ]; then
   ssh-keygen -q -t ed25519 -N "" -C "racktop-managed:$KEY_ID" -f "$KEY_PATH"
 fi
 
-# 远程：将公钥追加到服务器的 authorized_keys。
-ssh-copy-id -o PreferredAuthentications=password -o PubkeyAuthentication=no -i "$KEY_PATH.pub" -p ${sshPort} ${target}
+# 远程：通过一次密码 SSH 连接将公钥追加到 authorized_keys。
+# 不使用 ssh-copy-id，避免它先探测密钥、再写入而产生两次连接。
+if ! cat "$KEY_PATH.pub" | ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no -o IdentitiesOnly=yes -p ${sshPort} ${target} 'umask 077; mkdir -p ~/.ssh; chmod 700 ~/.ssh; cat >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys'; then
+  printf '%s\\n' 'RackTop 公钥写入服务器失败。若提示 Connection closed by 127.0.0.1:端口，请检查本机 SSH 代理是否正在运行，或检查 ~/.ssh/config 中的 ProxyCommand / ProxyJump。' >&2
+  exit 1
+fi
 
 # 本机：只使用 RackTop 专用私钥测试免密登录，成功后自动退出。
 ssh -o BatchMode=yes -o IdentitiesOnly=yes -i "$KEY_PATH" -p ${sshPort} ${target} 'printf "__RACKTOP_SSH_READY__\\n"'`
