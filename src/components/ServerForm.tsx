@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { AlertTriangle, ArrowRight, Check, ChevronRight, Copy, Database, KeyRound, Terminal, X } from 'lucide-react'
 import type { ServerDraft } from '../types/models'
 import { RACKTOP_MANAGED_IDENTITY_PATH, sshSetupTargetValidationMessage, unixSshSetupScript, windowsSshSetupScript } from '../utils/sshSetup'
@@ -36,17 +37,22 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
   const [error, setError] = useState<string | null>(null)
   const [passwordAcknowledged, setPasswordAcknowledged] = useState(false)
   const [setupCopied, setSetupCopied] = useState(false)
+  const [sshSetupConfirmed, setSshSetupConfirmed] = useState(false)
+  const [setupTerminalOpening, setSetupTerminalOpening] = useState(false)
   const [setupCopyAttempted, setSetupCopyAttempted] = useState(false)
   const [dismissGuide, setDismissGuide] = useState(false)
   const [guideOpen, setGuideOpen] = useState(!initial?.id && showGuide)
 
   const set = <K extends keyof ServerDraft>(key: K, value: ServerDraft[K]) => setDraft((current) => ({ ...current, [key]: value }))
-  const selectAuthMethod = (authMethod: ServerDraft['authMethod']) => setDraft((current) => ({
-    ...current,
-    authMethod,
-    identityFile: authMethod === 'sshAgent' || authMethod === 'password' ? '' : current.identityFile,
-    sshAlias: authMethod === 'sshConfig' ? current.sshAlias : '',
-  }))
+  const selectAuthMethod = (authMethod: ServerDraft['authMethod']) => {
+    setDraft((current) => ({
+      ...current,
+      authMethod,
+      identityFile: authMethod === 'sshAgent' || authMethod === 'password' ? '' : current.identityFile,
+      sshAlias: authMethod === 'sshConfig' ? current.sshAlias : '',
+    }))
+    if (authMethod === 'sshAgent') setSshSetupConfirmed(false)
+  }
   const setupPlatform = /Windows/i.test(navigator.userAgent) ? 'windows' : 'unix'
   const setupTarget = { username: draft.username, host: draft.host, port: draft.port }
   const setupScript = setupPlatform === 'unix' ? unixSshSetupScript(setupTarget) : windowsSshSetupScript(setupTarget)
@@ -62,6 +68,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
     try {
       await navigator.clipboard.writeText(setupScript)
       setDraft((current) => ({ ...current, authMethod: 'privateKey', identityFile: RACKTOP_MANAGED_IDENTITY_PATH }))
+      setSshSetupConfirmed(true)
       setSetupCopyAttempted(false)
       setSetupCopied(true)
       window.setTimeout(() => setSetupCopied(false), 1600)
@@ -70,8 +77,41 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
     }
   }
 
+  async function openSetupTerminal() {
+    const validationMessage = sshSetupTargetValidationMessage(setupTarget)
+    if (validationMessage) {
+      setSetupCopyAttempted(true)
+      setSetupCopied(false)
+      return
+    }
+    setSetupTerminalOpening(true)
+    try {
+      await navigator.clipboard.writeText(setupScript)
+      if ('__TAURI_INTERNALS__' in window) {
+        await invoke('open_setup_terminal', { script: setupScript })
+      } else {
+        setError('网页预览已复制命令；请在本机打开 Terminal 或 PowerShell 后粘贴。')
+      }
+      setSetupCopied(true)
+      setSshSetupConfirmed(true)
+      window.setTimeout(() => setSetupCopied(false), 1600)
+    } catch (reason) {
+      setError(`无法打开终端：${String(reason)}`)
+    } finally {
+      setSetupTerminalOpening(false)
+    }
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (!draft.name.trim()) {
+      setError('请填写服务器名称后再连接。')
+      return
+    }
+    if (!initial?.id && draft.authMethod === 'sshAgent' && !sshSetupConfirmed) {
+      setError('请先复制并执行 SSH 密钥快速配置，完成后再连接。')
+      return
+    }
     if (draft.authMethod === 'password' && !passwordAcknowledged) return
     if (draft.authMethod === 'password' && !initial?.id && !draft.password?.trim()) {
       setError('请输入 SSH 密码后再保存服务器。')
@@ -125,7 +165,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
         <form onSubmit={submit} className="server-form">
           <div className="server-form__body">
             <div className="form-grid form-grid--2">
-              <label>显示名称<input value={draft.name} maxLength={MAX_SERVER_NAME_LENGTH} onChange={(event) => set('name', event.target.value)} placeholder="训练服务器 A" /></label>
+              <label className={!draft.name.trim() && error ? 'field-error' : undefined}>显示名称<input aria-invalid={!draft.name.trim() && Boolean(error)} value={draft.name} maxLength={MAX_SERVER_NAME_LENGTH} onChange={(event) => { set('name', event.target.value); if (error) setError(null) }} placeholder="训练服务器 A" />{!draft.name.trim() && error && <small className="field-error__message">服务器名称不能为空</small>}</label>
               <label>服务器位置<input value={draft.location ?? ''} onChange={(event) => set('location', event.target.value)} placeholder="例如：实验室 301 / R2 机架 / U18" /></label>
             </div>
             <div className="form-grid form-grid--host">
@@ -133,7 +173,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
               <label>端口<input required type="number" min="1" max="65535" value={draft.port} onChange={(event) => set('port', Number(event.target.value))} /></label>
               <label>用户名<input required aria-invalid={setupCopyAttempted && !draft.username.trim()} value={draft.username} onChange={(event) => set('username', event.target.value)} placeholder="researcher" /></label>
             </div>
-            <fieldset>
+              <fieldset className={!initial?.id && draft.authMethod === 'sshAgent' && error && !sshSetupConfirmed ? 'field-error' : undefined}>
               <legend>认证方式</legend>
               <div className="segmented segmented--auth">
                 {([
@@ -145,7 +185,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
                   <button key={value} type="button" className={draft.authMethod === value ? 'is-selected' : ''} onClick={() => selectAuthMethod(value)}>{label}</button>
                 ))}
               </div>
-            </fieldset>
+              </fieldset>
             {draft.authMethod === 'sshConfig' && (
               <label>SSH Config 别名<input value={draft.sshAlias ?? ''} onChange={(event) => set('sshAlias', event.target.value)} placeholder="~/.ssh/config 中的 Host，例如 gpu-a" /></label>
             )}
@@ -181,7 +221,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
                 </summary>
                 <div className="key-guide__toolbar">
                   <span className="key-guide__platform-label">已检测：{setupPlatform === 'windows' ? '本机 Windows PowerShell → 远程 Linux' : '本机 macOS Terminal → 远程 Linux'}</span>
-                  <button type="button" className="button button--secondary button--small" onClick={() => void copySetupScript()}>{setupCopied ? <Check size={13} /> : <Copy size={13} />}{setupCopied ? '已复制' : '复制整段'}</button>
+                  <div className="key-guide__actions"><button type="button" className="button button--secondary button--small" onClick={() => void copySetupScript()}>{setupCopied ? <Check size={13} /> : <Copy size={13} />}{setupCopied ? '已复制' : '复制整段'}</button><button type="button" className="button button--primary button--small" disabled={setupTerminalOpening} onClick={() => void openSetupTerminal()}><Terminal size={13} />{setupTerminalOpening ? '正在打开…' : '打开终端并粘贴'}</button></div>
                 </div>
                 {setupValidationMessage && <p className="key-guide__validation" role="alert"><AlertTriangle size={14} />{setupValidationMessage}</p>}
                 <pre><code>{setupScript}</code></pre>

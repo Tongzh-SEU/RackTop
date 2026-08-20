@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::Command;
 use storage::Database;
 use terminal::TerminalManager;
 use tauri::{image::Image, menu::{Menu, MenuBuilder, MenuItemBuilder}, tray::TrayIconBuilder, AppHandle, Emitter, Manager, State};
@@ -242,6 +243,30 @@ fn resize_terminal(terminals: State<'_, TerminalManager>, session_id: String, co
 #[tauri::command]
 fn close_terminal(terminals: State<'_, TerminalManager>, session_id: String) -> Result<(), String> {
     terminals.close(&session_id)
+}
+
+#[tauri::command]
+fn open_setup_terminal(script: String) -> Result<(), String> {
+    if script.trim().is_empty() { return Err("启动配置命令为空".into()); }
+    #[cfg(target_os = "macos")]
+    {
+        let escaped = script.replace("\\", "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+        Command::new("osascript").args(["-e", &format!("tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{escaped}\"")]).spawn().map_err(|error| format!("无法打开 macOS Terminal：{error}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("powershell.exe").args(["-NoProfile", "-Command", &format!("$p = Start-Process powershell.exe -ArgumentList '-NoExit','-Command',{} -PassThru; $p.WaitForInputIdle()", powershell_quote(&script))]).spawn().map_err(|error| format!("无法打开 Windows PowerShell：{error}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("x-terminal-emulator").args(["-e", "sh", "-lc", &format!("{}; exec \"${{SHELL:-/bin/sh}}\"", script)]).spawn().map_err(|error| format!("无法打开系统终端：{error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[tauri::command]
@@ -765,7 +790,7 @@ pub fn run() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, list_projects, save_project, delete_project, probe_project_paths, suggest_project_paths, inspect_project, inspect_project_source, sync_project, list_project_sync_progress, cancel_project_sync, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, launch_managed_run, read_managed_run_log, get_managed_run_status, update_tray_summary, window_minimize, window_toggle_maximize, window_close])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, open_setup_terminal, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, list_projects, save_project, delete_project, probe_project_paths, suggest_project_paths, inspect_project, inspect_project_source, sync_project, list_project_sync_progress, cancel_project_sync, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, launch_managed_run, read_managed_run_log, get_managed_run_status, update_tray_summary, window_minimize, window_toggle_maximize, window_close])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }
