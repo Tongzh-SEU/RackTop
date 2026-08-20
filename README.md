@@ -4,7 +4,11 @@
 
 ## 
 RackTop 是面向个人研究者和小型团队的 GPU 服务器工作台。它把多台 Linux 服务器的算力状态、远程终端、项目资料和训练任务集中到一个桌面应用中，让你可以在启动任务前看清资源，在运行过程中持续掌握状态，在不同服务器之间保持项目资料一致。通过本机 OpenSSH 连接服务器，不要求在远程机器安装常驻 Agent。服务器、项目、数据集、模型和启动配置都保存在本地，连接信息和密钥由用户掌控。
-
+<p align="center">
+  <img src="docs/assets/readme/fleet-overview.png" alt="全局算力总览" width="33%">
+  <img src="docs/assets/readme/history-heatmap.png" alt="资源历史热力图" width="33%">
+  <img src="docs/assets/readme/idle-compute.png" alt="空闲算力筛选" width="33%">
+</p>
 
 ## 下载
 
