@@ -5,6 +5,7 @@ import { LineChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, MarkAreaComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { HistoryPoint, Snapshot } from '../types/models'
+import { acceleratorLabel } from '../utils/accelerator'
 import { clampPercent } from '../utils/gpu'
 import { formatFiveMinuteTimeLabel, MINUTE_MS, minuteTickSplitNumber } from '../utils/timeAxis'
 
@@ -98,6 +99,7 @@ interface TrendChartProps {
 }
 
 function TrendChartComponent({ points, snapshot, mode = 'all', height = 260, animate = false, gpuUuid, seriesOpacity = 1 }: TrendChartProps) {
+  const accelerator = snapshot ? acceleratorLabel(snapshot) : 'GPU'
   const series = []
   const opacity = Math.min(1, Math.max(0, seriesOpacity))
   const timestamps = points.map((point) => point.timestamp * 1000)
@@ -171,7 +173,7 @@ function TrendChartComponent({ points, snapshot, mode = 'all', height = 260, ani
       series.push(...peakRangeSeries(id, points, valueOf, minOf, maxOf, color, thresholds))
       series.push({
         id,
-        name: `GPU ${gpu.index}`,
+        name: `${accelerator} ${gpu.index}`,
         type: 'line',
         showSymbol: false,
         smooth: false,

@@ -9,7 +9,7 @@ import { analyzeCudaCommand } from '../utils/cudaCommand'
 
 interface TerminalEvent { sessionId: string; data?: string }
 
-export function SshTerminal({ serverId, serverName, gpuIndex, onNotice }: { serverId: string; serverName: string; gpuIndex?: number; onNotice?: (message: string) => void }) {
+export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor = 'nvidia', onNotice }: { serverId: string; serverName: string; gpuIndex?: number; acceleratorVendor?: 'nvidia' | 'ascend'; onNotice?: (message: string) => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<string | null>(null)
   const lineRef = useRef('')
@@ -65,7 +65,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, onNotice }: { serv
 
     const resize = new ResizeObserver(fitAndResize)
     resize.observe(containerRef.current)
-    void api.startTerminal(serverId, terminal.cols, terminal.rows, gpuIndex).then((id) => {
+    void api.startTerminal(serverId, terminal.cols, terminal.rows, gpuIndex, acceleratorVendor).then((id) => {
       if (disposed) { void api.closeTerminal(id); return }
       sessionRef.current = id
       setStatus('connected')
@@ -87,7 +87,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, onNotice }: { serv
       if (id) void api.closeTerminal(id)
       terminal.dispose()
     }
-  }, [gpuIndex, onNotice, restart, serverId])
+  }, [acceleratorVendor, gpuIndex, onNotice, restart, serverId])
 
   const confirmPending = (sendEnter: boolean) => {
     pendingEnterRef.current = false

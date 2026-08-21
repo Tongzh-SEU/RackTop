@@ -23,6 +23,7 @@ const settings: AppSettings = {
   temperatureThresholdCelsius: 85,
   currentUserAccent: '#0a84ff',
   theme: 'system',
+  fontSize: 'standard',
   menuBarMode: 'compact',
   reduceMotion: false,
   showAddServerGuide: true,

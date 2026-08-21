@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Cpu, HardDrive, MemoryStick } from 'lucide-react'
 import type { DiskMetric, HistoryHeatmapPoint, Snapshot } from '../types/models'
+import { acceleratorLabel } from '../utils/accelerator'
 import { buildHeatmapDays, HEATMAP_BUCKET_HOURS, HEATMAP_LABEL_STEP_DAYS, HEATMAP_ROWS_PER_DAY, heatmapLevel, historyHeatmapValue, indexHeatmapPoints } from '../utils/historyHeatmap'
 
 type HeatmapMetric = 'utilization' | 'memory'
@@ -73,10 +74,11 @@ function ResourceHeatmap({ title, subtitle, resource, points, days, defaultMetri
 
 export function HistoryHeatmaps({ snapshot, points, retentionDays }: { snapshot: Snapshot; points: HistoryHeatmapPoint[]; retentionDays: number }) {
   const days = useMemo(() => buildHeatmapDays(snapshot.timestamp, retentionDays), [retentionDays, snapshot.timestamp])
+  const accelerator = acceleratorLabel(snapshot)
   return (
     <div className="history-heatmap-list">
       <ResourceHeatmap title="CPU" subtitle={snapshot.system.cpuModel || '系统 CPU'} resource="cpu" points={points} days={days} defaultMetric="memory" memoryTone="blue" icon={<Cpu size={16} />} />
-      {snapshot.gpus.map((gpu) => <ResourceHeatmap key={gpu.uuid} title={`GPU ${gpu.index}`} subtitle={gpu.name.replace('NVIDIA ', '')} resource={gpu.uuid} points={points} days={days} defaultMetric="memory" memoryTone="green" icon={<MemoryStick size={16} />} />)}
+      {snapshot.gpus.map((gpu) => <ResourceHeatmap key={gpu.uuid} title={`${accelerator} ${gpu.index}`} subtitle={gpu.name.replace('NVIDIA ', '')} resource={gpu.uuid} points={points} days={days} defaultMetric="memory" memoryTone="green" icon={<MemoryStick size={16} />} />)}
     </div>
   )
 }

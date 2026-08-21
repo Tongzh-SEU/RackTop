@@ -1,5 +1,6 @@
 import { Clock3, Database, MemoryStick } from 'lucide-react'
 import type { Snapshot, UsageDistribution as UsageDistributionData } from '../types/models'
+import { acceleratorLabel } from '../utils/accelerator'
 
 const colors = ['#4f8ee8', '#5aa779', '#d08b42', '#a06bc4', '#cf6268', '#36a0a0', '#8e8650', '#7b8496']
 
@@ -50,8 +51,9 @@ function Waffle({ title, subtitle, icon, data }: { title: string; subtitle: stri
 }
 
 export function UsageDistribution({ snapshot, data }: { snapshot: Snapshot; data: UsageDistributionData }) {
+  const accelerator = acceleratorLabel(snapshot)
   const averageGpuMemoryMb = snapshot.gpus.length ? snapshot.gpus.reduce((sum, gpu) => sum + gpu.memoryTotalMb, 0) / snapshot.gpus.length : 0
-  if (!snapshot.gpus.length) return <div className="usage-empty"><Database size={24} /><strong>当前服务器没有可用 GPU</strong></div>
+  if (!snapshot.gpus.length) return <div className="usage-empty"><Database size={24} /><strong>当前服务器没有可用 {accelerator}</strong></div>
   const requestedGpuSeconds = data.requestedDays * 86_400 * snapshot.gpus.length
   const coveredMemoryCapacity = data.coverageGpuSeconds * averageGpuMemoryMb
   const requestedMemoryCapacity = requestedGpuSeconds * averageGpuMemoryMb

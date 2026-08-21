@@ -370,7 +370,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
       }
       const runId = crypto.randomUUID()
       const projectLogPath = profile.projectLogPath ? resolveProjectLogPath(profile.projectLogPath, profile.command) : null
-      const result = await api.launchManagedRun(server.id, runId, workingDirectory, preparedProfile.command, gpus.map((gpu) => gpu.index), projectLogPath)
+      const result = await api.launchManagedRun(server.id, runId, workingDirectory, preparedProfile.command, gpus.map((gpu) => gpu.index), projectLogPath, selectedSnapshot.acceleratorVendor)
       const run: ManagedRun = { id: runId, profileId: saveProfile ? profile.id : null, name: profile.name.trim() || '临时任务', projectId: profile.projectId, serverId: server.id, gpuUuids, gpuIndices: gpus.map((gpu) => gpu.index), workingDirectory, command: preparedProfile.command, pid: result.pid, logPath: result.logPath, startedAt: Math.floor(Date.now() / 1_000), status: 'starting' }
       setRuns((current) => [run, ...current])
       if (saveProfile) setProfiles((current) => [{ ...profile, updatedAt: Math.floor(Date.now() / 1_000) }, ...current.filter((item) => item.id !== profile.id)])

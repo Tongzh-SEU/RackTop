@@ -303,6 +303,8 @@ pub struct Snapshot {
     pub os_name: String,
     pub timestamp: i64,
     pub status: String,
+    #[serde(default = "default_accelerator_vendor")]
+    pub accelerator_vendor: String,
     pub system: SystemMetric,
     pub gpus: Vec<GpuMetric>,
     #[serde(default)]
@@ -315,6 +317,8 @@ pub struct Snapshot {
     pub nvidia_smi: String,
     pub nvidia_message: Option<String>,
 }
+
+fn default_accelerator_vendor() -> String { "nvidia".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -443,6 +447,8 @@ pub struct AppSettings {
     pub temperature_threshold_celsius: f64,
     pub current_user_accent: String,
     pub theme: String,
+    #[serde(default = "default_font_size")]
+    pub font_size: String,
     #[serde(default = "default_menu_bar_mode")]
     pub menu_bar_mode: String,
     pub reduce_motion: bool,
@@ -452,6 +458,7 @@ pub struct AppSettings {
 
 fn default_true() -> bool { true }
 fn default_menu_bar_mode() -> String { "compact".into() }
+fn default_font_size() -> String { "standard".into() }
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -468,6 +475,7 @@ impl Default for AppSettings {
             temperature_threshold_celsius: 85.0,
             current_user_accent: "#0a84ff".into(),
             theme: "system".into(),
+            font_size: default_font_size(),
             menu_bar_mode: default_menu_bar_mode(),
             reduce_motion: false,
             show_add_server_guide: true,
@@ -493,5 +501,13 @@ mod tests {
         value.as_object_mut().unwrap().remove("menuBarMode");
         let settings: AppSettings = serde_json::from_value(value).unwrap();
         assert_eq!(settings.menu_bar_mode, "compact");
+    }
+
+    #[test]
+    fn existing_settings_default_to_standard_font_size() {
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("fontSize");
+        let settings: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings.font_size, "standard");
     }
 }

@@ -18,6 +18,14 @@ const snapshot: Snapshot = {
 }
 
 describe('ProcessBlocks', () => {
+  it('uses NPU labels without changing the shared process rendering', () => {
+    const markup = renderToStaticMarkup(<ProcessBlocks snapshot={{ ...snapshot, acceleratorVendor: 'ascend' }} compact currentLabels />)
+    expect(markup).toContain('当前 NPU 进程')
+    expect(markup).toContain('<th>NPU</th><th>PID</th>')
+    expect(markup).toContain('NPU 0')
+    expect(markup).not.toContain('当前 GPU 进程')
+  })
+
   it('renders the CPU block below the GPU block with matching task markers', () => {
     const markup = renderToStaticMarkup(<ProcessBlocks snapshot={snapshot} compact currentLabels onRequestTerminate={() => {}} />)
     expect(markup).toContain('当前 GPU 进程')

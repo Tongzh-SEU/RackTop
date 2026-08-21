@@ -102,6 +102,7 @@ export interface Snapshot {
   osName: string
   timestamp: number
   status: ServerStatus
+  acceleratorVendor?: 'nvidia' | 'ascend'
   system: SystemMetric
   gpus: GpuMetric[]
   disks?: DiskMetric[]
@@ -190,6 +191,7 @@ export interface AppSettings {
   temperatureThresholdCelsius: number
   currentUserAccent: string
   theme: 'system' | 'light' | 'dark'
+  fontSize: 'standard' | 'large'
   menuBarMode: 'compact' | 'expanded'
   reduceMotion: boolean
   showAddServerGuide: boolean

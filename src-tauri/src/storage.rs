@@ -1480,6 +1480,7 @@ mod tests {
             os_name: "Ubuntu".into(),
             timestamp,
             status: "online".into(),
+            accelerator_vendor: "nvidia".into(),
             system: SystemMetric { cpu_model: "Test CPU".into(), memory_total_bytes: 1024, ..Default::default() },
             gpus: Vec::new(),
             disks: Vec::new(),
