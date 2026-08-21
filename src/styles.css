@@ -61,7 +61,7 @@
 html, body, #root { min-width: 900px; min-height: 620px; height: 100%; margin: 0; }
 body { overflow: hidden; background: var(--bg); color: var(--text); font-size: var(--app-font-size, 14px); -webkit-user-select: none; user-select: none; }
 :root[data-font-size="standard"] { --app-font-size: 14px; --font-adjust: 0px; }
-:root[data-font-size="large"] { --app-font-size: 16px; --font-adjust: 2px; }
+:root[data-font-size="large"] { --app-font-size: 15px; --font-adjust: 1px; }
 input, textarea, [contenteditable="true"], .mono, code, .log-row p { -webkit-user-select: text; user-select: text; }
 button, input, select { font: inherit; }
 button { color: inherit; }
@@ -319,6 +319,11 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .terminal-status { width: 7px; height: 7px; border-radius: 50%; background: #777b84; }
 .terminal-status--connected { background: #4fb477; }.terminal-status--connecting { background: #6b9fea; }.terminal-status--error { background: #e26767; }
 .terminal-canvas { min-width: 0; min-height: 0; overflow: hidden; padding: 0 8px; }
+.terminal-paste-preview { position: absolute; right: 12px; bottom: 12px; left: 12px; z-index: 2; max-height: min(52%, 300px); overflow: hidden; border: 1px solid #3b3e45; border-radius: 7px; color: #e7e8ea; background: #17191e; box-shadow: 0 8px 24px #0008; }
+.terminal-paste-preview > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 10px; border-bottom: 1px solid #303238; }
+.terminal-paste-preview strong, .terminal-paste-preview small { font-size: 11px; }
+.terminal-paste-preview small { color: #9a9da5; }
+.terminal-paste-preview pre { max-height: 230px; margin: 0; padding: 10px; overflow: auto; font: 12px/1.45 SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre; }
 .terminal-canvas .xterm { width: 100%; height: 100%; }
 .terminal-canvas .xterm-viewport { overflow-y: auto !important; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.2) transparent; }
 .terminal-canvas .xterm-viewport::-webkit-scrollbar { width: 7px; }.terminal-canvas .xterm-viewport::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 5px; background: rgba(255,255,255,.2); background-clip: padding-box; }

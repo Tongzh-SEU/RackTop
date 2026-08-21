@@ -23,8 +23,8 @@ export function ResourceTrend({ snapshot, kind, gpuUuid, title, animate }: { sna
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
-    const bucketSeconds = range > 3 ? 10 * 60 : undefined
-    const cacheKey = `${snapshot.serverId}:${range}:${bucketSeconds ?? 0}`
+    const bucketSeconds = range > 3 ? 10 * 60 : 60
+    const cacheKey = `${snapshot.serverId}:${range}:${bucketSeconds}`
     const cached = getCachedTrendHistory(cacheKey)
     setPoints(cached ?? [])
     setLoading(!cached)

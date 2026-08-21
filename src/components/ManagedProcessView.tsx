@@ -110,7 +110,7 @@ function currentUserSnapshot(snapshot: Snapshot, runs: ManagedRun[]) {
   }
 }
 
-export function ManagedProcessView({ servers, snapshots, projects, warnings, launchIntent, initialTab = 'running', onLaunchIntentConsumed, onDismissWarning, onOpenTerminal, onNotice, onRefreshServer }: {
+export function ManagedProcessView({ servers, snapshots, projects, warnings, launchIntent, initialTab = 'running', onLaunchIntentConsumed, onDismissWarning, onOpenTerminal, onNotice, onRefreshServer, onExpectedProcessExit }: {
   servers: Server[]
   snapshots: Record<string, Snapshot>
   projects: Project[]
@@ -122,6 +122,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
   onOpenTerminal: (serverId: string) => void
   onNotice: (message: string) => void
   onRefreshServer: (serverId: string) => Promise<void>
+  onExpectedProcessExit?: (serverId: string, pid: number, expected: boolean) => void
 }) {
   const [tab, setTab] = useState<ViewTab>(initialTab)
   const [profiles, setProfiles] = useState<LaunchProfile[]>(() => loadLaunchProfiles())
@@ -406,12 +407,14 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
     const target = pendingStop
     setPendingStop(null)
     setStoppingRunIds((current) => new Set(current).add(target.id))
+    onExpectedProcessExit?.(target.serverId, target.pid, true)
     try {
       await api.terminateProcess(target.serverId, target.pid)
       setRuns((current) => current.map((run) => run.id === target.id ? { ...run, status: 'stopped', endedAt: Math.floor(Date.now() / 1_000) } : run))
       onNotice(`已结束“${target.name}”`)
       await onRefreshServer(target.serverId)
     } catch (reason) {
+      onExpectedProcessExit?.(target.serverId, target.pid, false)
       onNotice(`结束任务失败：${String(reason).replace(/^Error:\s*/, '')}`)
     } finally {
       setStoppingRunIds((current) => { const next = new Set(current); next.delete(target.id); return next })
@@ -475,11 +478,13 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
     const key = `${server.id}:${group.rootPid}`
     setPendingUnmanagedStop(null)
     setStoppingUnmanagedKeys((current) => new Set(current).add(key))
+    onExpectedProcessExit?.(server.id, group.rootPid, true)
     try {
       await api.terminateProcess(server.id, group.rootPid)
       onNotice(`已结束未关联进程 PID ${group.rootPid}`)
       await onRefreshServer(server.id)
     } catch (reason) {
+      onExpectedProcessExit?.(server.id, group.rootPid, false)
       onNotice(`结束进程失败：${String(reason).replace(/^Error:\s*/, '')}`)
     } finally {
       setStoppingUnmanagedKeys((current) => { const next = new Set(current); next.delete(key); return next })
