@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { HistoryPoint, Snapshot } from '../types/models'
 
-const captured = vi.hoisted(() => ({ option: null as { series: Array<{ id?: string; data?: Array<[number, number | null]>; lineStyle?: { opacity?: number } }> } | null }))
+const captured = vi.hoisted(() => ({ option: null as { series: Array<{ id?: string; name?: string; data?: Array<[number, number | null]>; lineStyle?: { opacity?: number } }> } | null }))
 
 vi.mock('echarts-for-react/lib/core', () => ({
   default: (props: { option: { series: Array<{ id?: string; data?: Array<[number, number | null]>; lineStyle?: { opacity?: number } }> } }) => {
@@ -47,6 +47,12 @@ describe('TrendChart series identity', () => {
   it('uses separate stable identities for GPU utilization and memory', () => {
     expect(renderSeriesIds('gpu')).toEqual(['gpu-utilization:GPU-a'])
     expect(renderSeriesIds('gpuMemory')).toEqual(['gpu-memory:GPU-a'])
+  })
+
+  it('labels Ascend series as NPU while retaining internal series identities', () => {
+    renderToStaticMarkup(<TrendChart points={points} snapshot={{ ...snapshot, acceleratorVendor: 'ascend' }} mode="gpu" />)
+    const series = captured.option?.series.find((item) => item.id === 'gpu-utilization:GPU-a')
+    expect(series?.name).toBe('NPU 0')
   })
 
   it('supports ten percent transparency for overview GPU lines', () => {

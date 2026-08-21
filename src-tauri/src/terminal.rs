@@ -45,6 +45,7 @@ impl TerminalManager {
         columns: u16,
         rows: u16,
         gpu_index: Option<u32>,
+        accelerator_vendor: &str,
     ) -> Result<String, String> {
         let pty = native_pty_system();
         let pair = pty.openpty(PtySize {
@@ -56,7 +57,8 @@ impl TerminalManager {
 
         let mut command = configured_ssh_command(server, password)?;
         if let Some(index) = gpu_index {
-            command.arg(format!("export CUDA_VISIBLE_DEVICES={index}; exec \"${{SHELL:-/bin/sh}}\" -l"));
+            let variable = if accelerator_vendor == "ascend" { "ASCEND_RT_VISIBLE_DEVICES" } else { "CUDA_VISIBLE_DEVICES" };
+            command.arg(format!("export {variable}={index}; exec \"${{SHELL:-/bin/sh}}\" -l"));
         }
         let child = pair.slave.spawn_command(command).map_err(|error| format!("无法启动 SSH 终端：{error}"))?;
         drop(pair.slave);

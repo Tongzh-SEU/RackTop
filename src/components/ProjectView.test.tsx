@@ -155,8 +155,19 @@ describe('Project source removal', () => {
 
     expect(markup).toContain('is-syncing')
     expect(markup).toContain('准备同步')
-    expect(markup).toContain('正在检测路径，随后开始同步')
+    expect(markup).toContain('等待同步队列')
+    expect(markup).toContain('is-queued')
+    expect(markup).toContain('role="progressbar"')
     expect(markup).toMatch(/class="[^"]*\bspin\b[^"]*"/)
+  })
+
+  it('keeps long linked-resource names on one line while preserving the missing count', () => {
+    const resource: Project = { ...dataset, id: 'long-model', kind: 'model', name: 'Qwen2.5-Coder-32B-Instruct' }
+    const linked: Project = { ...detachedProject, sourceServerId: sourceServer.id, sourceExists: true, modelIds: [resource.id] }
+    const markup = renderToStaticMarkup(<ProjectView projects={[linked, resource]} servers={[sourceServer, targetServer]} busyTargets={new Set()} syncProgress={[]} preparingProjectIds={new Set()} onAdd={vi.fn()} onEdit={vi.fn()} onDelete={vi.fn()} onInspect={vi.fn()} onSync={vi.fn()} onCancel={vi.fn()} onSyncAll={vi.fn()} />)
+
+    expect(markup).toContain('<span title="Qwen2.5-Coder-32B-Instruct">Qwen2.5-Coder-32B-Instruct</span>')
+    expect(markup).toContain('<small>缺 1</small>')
   })
 
   it('keeps source metadata in three columns and exposes transfer progress', () => {
@@ -177,6 +188,18 @@ describe('Project source removal', () => {
     expect(markup).toContain('<small>最近内容修改</small>')
     expect(markup).toContain('role="progressbar"')
     expect(markup).toContain('31 KB / 48 KB')
+    expect(markup).toContain('正在同步中')
     expect(markup).toContain('暂停同步到 Target')
+  })
+
+  it('counts every live target instead of relying on stale persisted statuses', () => {
+    const project: Project = {
+      ...detachedProject,
+      targets: [
+        { ...detachedProject.targets[0], status: 'syncing' },
+        { ...detachedProject.targets[0], serverId: 'target-2', status: 'unknown' },
+      ],
+    }
+    expect(projectCardState(project, true, 2)).toEqual({ kind: 'syncing', label: '2 个同步中' })
   })
 })

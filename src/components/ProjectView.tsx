@@ -38,13 +38,13 @@ export function syncableProjectTargets(project: Project) {
   return project.targets.filter((target) => ['unknown', 'found', 'missing', 'paused', 'error'].includes(target.status))
 }
 
-export function projectCardState(project: Project, busy: boolean) {
+export function projectCardState(project: Project, busy: boolean, activeSyncCount = 0) {
   const count = (statuses: string[]) => project.targets.filter((target) => statuses.includes(target.status)).length
   const syncing = count(['syncing'])
   const conflicts = count(['conflict'])
   const errors = count(['error', 'offline'])
   const pending = syncableProjectTargets(project).length
-  if (busy || syncing > 0) return { kind: 'syncing', label: `${Math.max(1, syncing)} 个同步中` }
+  if (busy || syncing > 0 || activeSyncCount > 0) return { kind: 'syncing', label: `${Math.max(1, syncing, activeSyncCount)} 个同步中` }
   if (conflicts > 0) return { kind: 'conflict', label: `${conflicts} 个冲突` }
   if (errors > 0) return { kind: 'error', label: `${errors} 个异常` }
   if (pending > 0) return { kind: 'pending', label: `${pending} 个待更新` }
@@ -105,8 +105,13 @@ function ProjectGrid({ items, allProjects, servers, busyTargets, syncProgress, p
     const preparing = preparingProjectIds.has(project.id)
     const inspecting = inspectingProjectIds.has(project.id)
     const projectBusy = preparing || [...busyTargets].some((key) => key.startsWith(`${project.id}:`))
+    const activeSyncTargetIds = new Set([
+      ...project.targets.filter((target) => target.status === 'syncing').map((target) => target.serverId),
+      ...[...busyTargets].filter((key) => key.startsWith(`${project.id}:`)).map((key) => key.slice(project.id.length + 1)),
+      ...syncProgress.filter((progress) => progress.projectId === project.id).map((progress) => progress.targetServerId),
+    ])
     const syncableTargets = syncableProjectTargets(project)
-    const cardState = source ? projectCardState(project, projectBusy) : { kind: 'error', label: '主服务器已移除' }
+    const cardState = source ? projectCardState(project, projectBusy, activeSyncTargetIds.size) : { kind: 'error', label: '主服务器已移除' }
     const related = project.kind === 'project'
       ? [...project.datasetIds, ...project.modelIds].map((id) => allProjects.find((item) => item.id === id)).filter((item): item is Project => Boolean(item))
       : allProjects.filter((item) => item.kind === 'project' && (project.kind === 'dataset' ? item.datasetIds : item.modelIds).includes(project.id))
@@ -131,7 +136,7 @@ function ProjectGrid({ items, allProjects, servers, busyTargets, syncProgress, p
           {related.length > 0 && <div className="project-card__relations">{related.map((item) => {
             const presence = relatedPresence[item.id]
             const relationState = presence?.missing ? `缺 ${presence.missing}` : presence?.unknown ? '待检测' : ''
-            return <em key={item.id} className={presence?.missing ? 'is-missing' : presence?.unknown ? 'is-unknown' : ''}>{project.kind === 'project' ? <ProjectKindIcon kind={item.kind} size={11} /> : <FolderGit2 size={11} />}{item.name}{relationState && <small>{relationState}</small>}</em>
+            return <em key={item.id} className={presence?.missing ? 'is-missing' : presence?.unknown ? 'is-unknown' : ''}>{project.kind === 'project' ? <ProjectKindIcon kind={item.kind} size={11} /> : <FolderGit2 size={11} />}<span title={item.name}>{item.name}</span>{relationState && <small>{relationState}</small>}</em>
           })}</div>}
         </div>
         <div className="project-card__tools">{project.kind === 'project' && onLaunch && <button className="icon-button project-launch" disabled={projectBusy || !source} onClick={() => onLaunch(project)} aria-label={`启动 ${project.name}`} title="启动任务"><Play size={14} /></button>}<button className="icon-button" disabled={projectBusy} onClick={() => onEdit(project)} aria-label={`编辑 ${project.name}`} title="编辑"><Pencil size={14} /></button><button className="icon-button project-delete" disabled={projectBusy} onClick={() => onDelete(project)} aria-label={`删除 ${project.name}`} title="移除配置"><Trash2 size={14} /></button></div>
@@ -164,9 +169,9 @@ function ProjectGrid({ items, allProjects, servers, busyTargets, syncProgress, p
         const progressPercent = progress ? progress.state === 'publishing' ? 100 : progress.totalBytes > 0 ? Math.min(98, Math.max(2, (progress.transferredBytes / progress.totalBytes) * 100)) : 12 : 0
         return <div className="project-target" key={target.serverId}>
           <span className={`project-target__state is-${target.status}`}>{target.status === 'offline' || target.status === 'error' ? <AlertCircle size={13} /> : target.status === 'conflict' ? <TriangleAlert size={13} /> : target.status === 'synced' ? <CheckCircle2 size={13} /> : <ArrowRight size={13} />}</span>
-          <div className="project-target__content"><strong>{server?.name ?? '服务器已移除'}</strong><small>{target.path}</small><em>{preparing ? '正在检测路径，随后开始同步' : timestamps || '尚未同步'}</em></div>
+          <div className="project-target__content"><strong>{server?.name ?? '服务器已移除'}</strong><small>{target.path}</small><em>{preparing ? '等待同步队列' : progress || busy ? '正在同步中' : timestamps || '尚未同步'}</em></div>
           <div className="project-target__action"><span className={`project-target__status is-${target.status}`} title={progressText || status}>{progressText || status}</span>{busy ? <button className="icon-button project-target__sync is-active" onClick={() => onCancel(project.id, target.serverId)} aria-label={`暂停同步到 ${server?.name ?? target.serverId}`} title="暂停"><Pause size={14} /></button> : target.status === 'synced' ? null : <button className="project-target__action-button" disabled={preparing || !server || !source || !project.sourceExists} onClick={() => onSync(project, target.serverId)} aria-label={`${target.status === 'paused' ? '继续' : target.status === 'error' ? '重试' : '同步'}到 ${server?.name ?? target.serverId}`}>{target.status === 'paused' ? <><Play size={12} />继续</> : target.status === 'error' ? <><RotateCcw size={12} />重试</> : target.status === 'conflict' ? <><TriangleAlert size={12} />处理</> : <><ArrowRight size={12} />同步</>}</button>}</div>
-          {progress && <span className={`project-target__progress is-${progress.state}`} role="progressbar" aria-label={`${server?.name ?? target.serverId} 同步进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progressPercent)} aria-valuetext={progressText}><i style={{ transform: `scaleX(${progressPercent / 100})` }} /></span>}
+          {(progress || preparing) && <span className={`project-target__progress${progress ? ` is-${progress.state}` : ' is-queued'}`} role="progressbar" aria-label={`${server?.name ?? target.serverId} 同步进度`} aria-valuemin={progress ? 0 : undefined} aria-valuemax={progress ? 100 : undefined} aria-valuenow={progress ? Math.round(progressPercent) : undefined} aria-valuetext={progressText || '等待同步队列'}><i style={progress ? { transform: `scaleX(${progressPercent / 100})` } : undefined} /></span>}
         </div>
       })}</div>
     </article>

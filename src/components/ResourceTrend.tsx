@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
 import { api } from '../services/api'
 import type { HistoryPoint, Snapshot } from '../types/models'
+import { getCachedTrendHistory, loadCachedTrendHistory } from '../utils/trendHistoryCache'
 import { TrendChart } from './TrendChart'
 
 type Range = 1 | 3 | 24 | 72
@@ -22,9 +23,13 @@ export function ResourceTrend({ snapshot, kind, gpuUuid, title, animate }: { sna
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
+    const bucketSeconds = range > 3 ? 10 * 60 : 60
+    const cacheKey = `${snapshot.serverId}:${range}:${bucketSeconds}`
+    const cached = getCachedTrendHistory(cacheKey)
+    setPoints(cached ?? [])
+    setLoading(!cached)
     setError(null)
-    const load = () => api.getHistory(snapshot.serverId, Math.floor(Date.now() / 1000) - range * 3600, range > 3 ? 10 * 60 : undefined).then((value) => { if (!cancelled) setPoints(value) }).catch((reason) => { if (!cancelled) setError(String(reason)) }).finally(() => { if (!cancelled) setLoading(false) })
+    const load = () => loadCachedTrendHistory(cacheKey, () => api.getHistory(snapshot.serverId, Math.floor(Date.now() / 1000) - range * 3600, bucketSeconds)).then((value) => { if (!cancelled) setPoints(value) }).catch((reason) => { if (!cancelled) setError(String(reason)) }).finally(() => { if (!cancelled) setLoading(false) })
     void load()
     const interval = window.setInterval(() => void load(), 30_000)
     return () => { cancelled = true; window.clearInterval(interval) }

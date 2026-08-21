@@ -230,10 +230,10 @@ fn reorder_servers(database: State<'_, Database>, server_ids: Vec<String>) -> Re
 }
 
 #[tauri::command]
-fn start_terminal(app: tauri::AppHandle, database: State<'_, Database>, terminals: State<'_, TerminalManager>, server_id: String, columns: u16, rows: u16, gpu_index: Option<u32>) -> Result<String, String> {
+fn start_terminal(app: tauri::AppHandle, database: State<'_, Database>, terminals: State<'_, TerminalManager>, server_id: String, columns: u16, rows: u16, gpu_index: Option<u32>, accelerator_vendor: Option<String>) -> Result<String, String> {
     let server = database.get_server(&server_id)?;
     let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
-    terminals.start(app, &server, password.as_deref(), columns, rows, gpu_index)
+    terminals.start(app, &server, password.as_deref(), columns, rows, gpu_index, accelerator_vendor.as_deref().unwrap_or("nvidia"))
 }
 
 #[tauri::command]
@@ -392,7 +392,7 @@ async fn get_history(app: AppHandle, server_id: String, from_timestamp: i64, buc
         let database = app.state::<Database>();
         match bucket_seconds.filter(|seconds| *seconds > 0) {
             Some(seconds) => database.get_compacted_history(&server_id, from_timestamp, seconds),
-            None => database.get_history(&server_id, from_timestamp),
+            None => database.get_recent_history(&server_id, from_timestamp),
         }
     }).await.map_err(|error| error.to_string())?
 }
@@ -588,10 +588,10 @@ async fn terminate_process(database: State<'_, Database>, server_id: String, pid
 }
 
 #[tauri::command]
-async fn launch_managed_run(database: State<'_, Database>, server_id: String, run_id: String, working_directory: String, command: String, gpu_indices: Vec<u32>, project_log_path: Option<String>) -> Result<ManagedRunLaunchResult, String> {
+async fn launch_managed_run(database: State<'_, Database>, server_id: String, run_id: String, working_directory: String, command: String, gpu_indices: Vec<u32>, project_log_path: Option<String>, accelerator_vendor: Option<String>) -> Result<ManagedRunLaunchResult, String> {
     let server = database.get_server(&server_id)?;
     let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
-    collector::launch_managed_run(&server, password.as_deref(), &run_id, &working_directory, &command, &gpu_indices, project_log_path.as_deref()).await
+    collector::launch_managed_run(&server, password.as_deref(), &run_id, &working_directory, &command, &gpu_indices, project_log_path.as_deref(), accelerator_vendor.as_deref().unwrap_or("nvidia")).await
 }
 
 #[tauri::command]
