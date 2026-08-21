@@ -75,7 +75,7 @@ import { StatusPill } from './components/StatusPill'
 import { TrendChart } from './components/TrendChart'
 import { UsageDistribution } from './components/UsageDistribution'
 import { aggregateGpuMemoryPercent, aggregateGpuSmUtilization, clampPercent, countOtherUserGpuWorkloads, displayedGpuMemoryPercent, gpuLoadAccent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, isGpuAvailable, isGpuIdle } from './utils/gpu'
-import { canDisplayServerDetails, serverStatusAfterFailure, shouldShowConnectingOnAttempt } from './utils/connectionStatus'
+import { canDisplayServerDetails, offlineFailureThreshold, serverStatusAfterSyncAwareFailure, shouldShowConnectingOnAttempt } from './utils/connectionStatus'
 import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, idleFilterSummaryParts, loadIdleFilters, rankIdleGpuItems, saveIdleFilters, type IdleFilters, type IdleGpuItem } from './utils/idleFilters'
 import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservationFiltersEqual, idleReservationGpuKey, idleReservationSummary } from './utils/idleReservations'
 import { canOfferNvidiaDriverInstall, clearResolvedNvidiaWarningId, displayedNvidiaServerStatus, loadIgnoredNvidiaWarningIds, nvidiaIssueGuidance, nvidiaIssueTitle, saveIgnoredNvidiaWarningIds } from './utils/nvidiaStatus'
@@ -286,6 +286,9 @@ function App() {
   const [projectConflictTarget, setProjectConflictTarget] = useState<{ project: Project; targetServerId: string } | null>(null)
   const [busyProjectTargets, setBusyProjectTargets] = useState<Set<string>>(new Set())
   const [projectSyncProgress, setProjectSyncProgress] = useState<ProjectSyncProgress[]>([])
+  const projectsRef = useRef<Project[]>([])
+  const busyProjectTargetsRef = useRef<Set<string>>(new Set())
+  const projectSyncProgressRef = useRef<ProjectSyncProgress[]>([])
   const [preparingProjectIds, setPreparingProjectIds] = useState<Set<string>>(new Set())
   const [mineProcessWarnings, setMineProcessWarnings] = useState<MineProcessWarning[]>([])
   const [managedLaunchIntent, setManagedLaunchIntent] = useState<ManagedLaunchIntent | null>(null)
@@ -368,6 +371,9 @@ function App() {
 
   useEffect(() => { remoteHistoryServersRef.current = servers }, [servers])
   useEffect(() => { remoteSyncStatusRef.current = remoteSyncStatus }, [remoteSyncStatus])
+  useEffect(() => { projectsRef.current = projects }, [projects])
+  useEffect(() => { busyProjectTargetsRef.current = busyProjectTargets }, [busyProjectTargets])
+  useEffect(() => { projectSyncProgressRef.current = projectSyncProgress }, [projectSyncProgress])
 
   const refreshServer = useCallback(async (serverId: string, quiet = false) => {
     if (inFlightServers.current.has(serverId)) return
@@ -382,7 +388,17 @@ function App() {
     if (!quiet) delete nextRetryAt.current[serverId]
     inFlightServers.current.add(serverId)
     setBusy((current) => new Set(current).add(serverId))
-    if (shouldShowConnectingOnAttempt(quiet, Boolean(snapshotsRef.current[serverId]), failureCounts.current[serverId] ?? 0)) {
+    const activeProjectSync = projectSyncProgressRef.current.some((progress) => {
+      const project = projectsRef.current.find((item) => item.id === progress.projectId)
+      return progress.targetServerId === serverId || project?.sourceServerId === serverId
+    }) || [...busyProjectTargetsRef.current].some((key) => {
+      const separator = key.lastIndexOf(':')
+      const projectId = separator >= 0 ? key.slice(0, separator) : key
+      const targetServerId = separator >= 0 ? key.slice(separator + 1) : ''
+      const project = projectsRef.current.find((item) => item.id === projectId)
+      return targetServerId === serverId || project?.sourceServerId === serverId
+    })
+    if (!activeProjectSync && shouldShowConnectingOnAttempt(quiet, Boolean(snapshotsRef.current[serverId]), failureCounts.current[serverId] ?? 0)) {
       setServers((current) => current.map((server) => server.id === serverId ? { ...server, status: 'connecting', lastError: null } : server))
     }
     try {
@@ -459,7 +475,7 @@ function App() {
       const failureCount = failureCounts.current[serverId]
       const retryDelays = [1, 2, 5, 10, 30]
       nextRetryAt.current[serverId] = Date.now() + retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)] * 1000
-      if (failureCount >= 3) {
+      if (failureCount >= offlineFailureThreshold(activeProjectSync)) {
         const key = `offline:${serverId}`
         if (!notifiedConditions.current.has(key)) {
           notifiedConditions.current.add(key)
@@ -467,7 +483,13 @@ function App() {
           void api.notify(`${name} 已离线`, `连续 ${failureCounts.current[serverId]} 次采集失败：${message}`)
         }
       }
-      setServers((current) => current.map((server) => server.id === serverId ? { ...server, status: serverStatusAfterFailure(failureCount), lastError: `${message} · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试` } : server))
+      setServers((current) => current.map((server) => server.id === serverId ? {
+        ...server,
+        status: serverStatusAfterSyncAwareFailure(server.status, failureCount, activeProjectSync, Boolean(snapshotsRef.current[serverId])),
+        lastError: activeProjectSync && failureCount < offlineFailureThreshold(true)
+          ? `大文件同步期间采集暂时延迟 · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试`
+          : `${message} · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试`,
+      } : server))
       if (message.includes('主机指纹')) {
         try {
           setPendingHostKey(await api.scanHostKey(serverId))
@@ -1137,8 +1159,10 @@ function App() {
 
   async function syncProjectTarget(project: Project, targetServerId: string, showToast = true, force = false) {
     const key = `${project.id}:${targetServerId}`
-    if (busyProjectTargets.has(key)) return false
-    setBusyProjectTargets((current) => new Set(current).add(key))
+    if (busyProjectTargetsRef.current.has(key)) return false
+    const nextBusyTargets = new Set(busyProjectTargetsRef.current).add(key)
+    busyProjectTargetsRef.current = nextBusyTargets
+    setBusyProjectTargets(nextBusyTargets)
     try {
       const result = await api.syncProject(project.id, targetServerId, force)
       setProjects(await api.listProjects())
@@ -1152,7 +1176,10 @@ function App() {
       if (showToast) setToast(`同步失败：${String(reason)}`)
       return false
     } finally {
-      setBusyProjectTargets((current) => { const next = new Set(current); next.delete(key); return next })
+      const next = new Set(busyProjectTargetsRef.current)
+      next.delete(key)
+      busyProjectTargetsRef.current = next
+      setBusyProjectTargets(next)
     }
   }
 
@@ -1499,7 +1526,7 @@ function App() {
       </main>
 
       {showServerForm && <ServerForm initial={editingServer ? serverToDraft(editingServer) : undefined} defaultRemoteHistoryEnabled showGuide={settings?.showAddServerGuide ?? true} onGuideDismiss={() => { if (settings) void api.saveSettings({ ...settings, showAddServerGuide: false }).then(setSettings) }} onClose={() => { setShowServerForm(false); setEditingServer(null) }} onSave={saveServer} />}
-      {projectEditor && <ProjectForm initial={projectEditor === 'new' ? null : projectEditor} projects={projects} servers={servers} onClose={() => setProjectEditor(null)} onSave={saveProject} />}
+      {projectEditor && <ProjectForm initial={projectEditor === 'new' ? null : projectEditor} projects={projects} servers={servers} activeSyncTargets={new Set([...busyProjectTargets, ...projectSyncProgress.map((progress) => `${progress.projectId}:${progress.targetServerId}`)])} onClose={() => setProjectEditor(null)} onSave={saveProject} />}
       {projectPendingDelete && <ProjectDeleteDialog project={projectPendingDelete} onClose={() => setProjectPendingDelete(null)} onDelete={async () => { await api.deleteProject(projectPendingDelete.id); setProjects((current) => current.filter((item) => item.id !== projectPendingDelete.id)); setProjectPendingDelete(null); setToast(`已移除“${projectPendingDelete.name}”的同步配置，服务器文件未删除`) }} />}
       {projectConflictTarget && <ProjectConflictDialog project={projectConflictTarget.project} server={servers.find((item) => item.id === projectConflictTarget.targetServerId)} onClose={() => setProjectConflictTarget(null)} onConfirm={() => { const pending = projectConflictTarget; setProjectConflictTarget(null); void syncProjectTarget(pending.project, pending.targetServerId, true, true) }} />}
       {showSettings && settings && <SettingsSheet settings={settings} onboardingVisible={!onboardingDismissed} onClose={() => setShowSettings(false)} onSave={async (value, showOnboarding) => { setSettings(await api.saveSettings(value)); if (showOnboarding) { localStorage.removeItem(ONBOARDING_DISMISSED_KEY); setOnboardingDismissed(false); setOnboardingUseActualState(true); setOnboardingCollapsed(false); if (onboardingDismissed) setMainView('fleet') } else { localStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true'); setOnboardingDismissed(true) } setShowSettings(false); setToast('设置已保存') }} />}

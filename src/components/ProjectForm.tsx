@@ -4,10 +4,11 @@ import type { LinkedProjectResourcePlan, Project, ProjectDraft, ProjectKind, Pro
 import { api } from '../services/api'
 import { defaultProjectTargetPath, isLegacyProjectNameTargetPath } from '../utils/projectPaths'
 
-export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
+export function ProjectForm({ initial, projects, servers, activeSyncTargets, onClose, onSave }: {
   initial?: Project | null
   projects: Project[]
   servers: Server[]
+  activeSyncTargets?: ReadonlySet<string>
   onClose: () => void
   onSave: (draft: ProjectDraft, syncAfterSave: boolean, linkedResources: LinkedProjectResourcePlan[]) => Promise<void>
 }) {
@@ -120,7 +121,9 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
     const checks = resourceChecks[resource.id] ?? {}
     return resourceProbeDraft(resource).targets.filter((target) => {
       const check = checks[target.serverId]
-      return check && !check.exists && !check.error && check.matches.length === 0
+      const active = activeSyncTargets?.has(`${resource.id}:${target.serverId}`)
+        || resource.targets.some((item) => item.serverId === target.serverId && item.status === 'syncing')
+      return !active && check && !check.exists && !check.error && check.matches.length === 0
     }).map((target) => ({ ...target, path: checks[target.serverId]?.suggestedPath ?? target.path }))
   }
 
@@ -273,14 +276,17 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
         const targetChecks = draft.targets.map((target) => target.serverId === resource.sourceServerId
           ? { serverId: target.serverId, exists: true, matches: [], error: undefined } as Pick<ProjectPathCheck, 'serverId' | 'exists' | 'matches' | 'error'>
           : checks[target.serverId]).filter(Boolean)
-        const found = targetChecks.filter((check) => check?.exists).length
-        const candidates = targetChecks.filter((check) => !check?.exists && !check?.error && check?.matches.length === 1).length
-        const ambiguous = targetChecks.filter((check) => !check?.exists && !check?.error && (check?.matches.length ?? 0) > 1).length
-        const failed = targetChecks.filter((check) => Boolean(check?.error)).length
+        const targetIsSyncing = (serverId: string | undefined) => Boolean(serverId) && (activeSyncTargets?.has(`${resource.id}:${serverId}`)
+          || resource.targets.some((item) => item.serverId === serverId && item.status === 'syncing'))
+        const syncing = targetChecks.filter((check) => targetIsSyncing(check?.serverId)).length
+        const found = targetChecks.filter((check) => !targetIsSyncing(check?.serverId) && check?.exists).length
+        const candidates = targetChecks.filter((check) => !targetIsSyncing(check?.serverId) && !check?.exists && !check?.error && check?.matches.length === 1).length
+        const ambiguous = targetChecks.filter((check) => !targetIsSyncing(check?.serverId) && !check?.exists && !check?.error && (check?.matches.length ?? 0) > 1).length
+        const failed = targetChecks.filter((check) => !targetIsSyncing(check?.serverId) && Boolean(check?.error)).length
         const checked = targetChecks.length === draft.targets.length && !checkingResources
-        const missingCount = checked ? Math.max(0, draft.targets.length - found - candidates - ambiguous - failed) : 0
+        const missingCount = checked ? Math.max(0, draft.targets.length - syncing - found - candidates - ambiguous - failed) : 0
         const willSync = resourceSyncIds.has(resource.id) && missingCount > 0
-        const parts = [[found, '已存在'], [missingCount, '缺失'], [candidates, '候选待确认'], [ambiguous, '同名冲突'], [failed, '连接失败']].filter(([count]) => Number(count) > 0).map(([count, partLabel]) => `${count} 台${partLabel}`)
+        const parts = [[syncing, '正在同步'], [found, '已存在'], [missingCount, '缺失'], [candidates, '候选待确认'], [ambiguous, '同名冲突'], [failed, '连接失败']].filter(([count]) => Number(count) > 0).map(([count, partLabel]) => `${count} 台${partLabel}`)
         const status = !linked ? '未关联' : draft.targets.length === 0 ? '请先选择目标服务器' : checkingResources ? '正在检查…' : !checked ? '等待检查' : parts.join(' · ') || '等待检查'
         const problem = checked && (missingCount > 0 || candidates > 0 || ambiguous > 0 || failed > 0)
         return <div key={resource.id} className={`project-dataset-row${initial ? ' project-dataset-row--editing' : ''}${linked ? ' is-selected' : ''}`}>

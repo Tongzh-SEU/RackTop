@@ -177,6 +177,18 @@ describe('Project source removal', () => {
     expect(markup).toContain('<small>最近内容修改</small>')
     expect(markup).toContain('role="progressbar"')
     expect(markup).toContain('31 KB / 48 KB')
+    expect(markup).toContain('正在同步中')
     expect(markup).toContain('暂停同步到 Target')
+  })
+
+  it('counts every live target instead of relying on stale persisted statuses', () => {
+    const project: Project = {
+      ...detachedProject,
+      targets: [
+        { ...detachedProject.targets[0], status: 'syncing' },
+        { ...detachedProject.targets[0], serverId: 'target-2', status: 'unknown' },
+      ],
+    }
+    expect(projectCardState(project, true, 2)).toEqual({ kind: 'syncing', label: '2 个同步中' })
   })
 })

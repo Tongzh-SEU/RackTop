@@ -156,6 +156,28 @@ describe('ProjectForm focus management', () => {
     })
   })
 
+  it('links a dataset that is still syncing without scheduling a duplicate transfer', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    const project: Project = { ...dataset, id: 'project-active-dataset', kind: 'project', datasetIds: [dataset.id] }
+    vi.spyOn(api, 'probeProjectPaths').mockResolvedValue([
+      { serverId: target.id, requestedPath: '~/datasets/target', suggestedPath: '~/datasets/target', exists: false, isDirectory: false, sizeBytes: 0, fileCount: 0, matches: [] },
+    ])
+    const onSave = vi.fn().mockResolvedValue(undefined)
+
+    act(() => root?.render(<ProjectForm initial={project} projects={[project, dataset]} servers={[source, target]} activeSyncTargets={new Set([`${dataset.id}:${target.id}`])} onClose={vi.fn()} onSave={onSave} />))
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 550)) })
+
+    expect(document.querySelector('.project-dataset-row__status')?.textContent).toContain('1 台正在同步')
+    expect(document.querySelector('.project-dataset-row__sync')).toBeNull()
+    const syncButton = [...document.querySelectorAll<HTMLButtonElement>('.sheet__footer button')].find((button) => button.textContent?.includes('保存并同步'))
+    await act(async () => { syncButton?.click(); await Promise.resolve() })
+    expect(onSave).toHaveBeenCalledTimes(1)
+    expect(onSave.mock.calls[0][0].datasetIds).toEqual([dataset.id])
+    expect(onSave.mock.calls[0][2][0]).toMatchObject({ resourceId: dataset.id, syncOnSave: false, targets: [] })
+  })
+
   it('persists linked models and adds only missing model replicas to save and sync', async () => {
     container = document.createElement('div')
     document.body.appendChild(container)
