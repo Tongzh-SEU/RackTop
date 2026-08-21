@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldCollectDetailData, shouldRecordHistory, statusRefreshIntervalMs } from './refreshCadence'
+import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldCollectDetailData, shouldIncludeProcesses, shouldRecordHistory, statusRefreshIntervalMs } from './refreshCadence'
 
 describe('refresh cadence', () => {
   it('refreshes the two fast status views every half second without changing the history cadence', () => {
@@ -29,5 +29,11 @@ describe('refresh cadence', () => {
     expect(shouldCollectDetailData(true, false)).toBe(false)
     expect(shouldCollectDetailData(true, true)).toBe(true)
     expect(shouldCollectDetailData(false, false)).toBe(true)
+  })
+
+  it('collects processes on the first startup sample even when the refresh is quiet', () => {
+    expect(shouldIncludeProcesses(false, false, true, false, undefined, 10_000, 5)).toBe(true)
+    expect(shouldIncludeProcesses(true, true, true, false, 9_000, 10_000, 5)).toBe(false)
+    expect(shouldIncludeProcesses(true, true, true, false, 5_000, 10_000, 5)).toBe(true)
   })
 })

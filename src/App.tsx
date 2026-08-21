@@ -79,7 +79,7 @@ import { canDisplayServerDetails, offlineFailureThreshold, serverStatusAfterSync
 import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, idleFilterSummaryParts, loadIdleFilters, rankIdleGpuItems, saveIdleFilters, type IdleFilters, type IdleGpuItem } from './utils/idleFilters'
 import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservationFiltersEqual, idleReservationGpuKey, idleReservationSummary } from './utils/idleReservations'
 import { canOfferNvidiaDriverInstall, clearResolvedNvidiaWarningId, displayedNvidiaServerStatus, loadIgnoredNvidiaWarningIds, nvidiaIssueGuidance, nvidiaIssueTitle, saveIgnoredNvidiaWarningIds } from './utils/nvidiaStatus'
-import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldCollectDetailData, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
+import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldCollectDetailData, shouldIncludeProcesses, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
 import { deriveGpuMemoryStallWarnings, ignoredGpuMemoryStallGpus } from './utils/gpuMemoryWarnings'
 import { acquiredDataItems, interactionDurationSeconds, interactionVisualStatus } from './utils/activityLog'
 import { duplicateImportIndexes } from './utils/serverIdentity'
@@ -405,7 +405,7 @@ function App() {
       const previous = snapshotsRef.current[serverId]
       const fastStatusView = !document.hidden && (mainView === 'fleet' || (mainView === 'server' && selectedTab === 'overview' && selectedServerId === serverId))
       const collectDetailData = shouldCollectDetailData(quiet, Boolean(previous))
-      const includeProcesses = collectDetailData && (!quiet || fastStatusView || nowMs - (lastProcessAttemptAt.current[serverId] ?? 0) >= (settings?.processIntervalSeconds ?? 5) * 1000)
+      const includeProcesses = shouldIncludeProcesses(Boolean(previous), collectDetailData, quiet, fastStatusView, lastProcessAttemptAt.current[serverId], nowMs, settings?.processIntervalSeconds ?? 5)
       const includeDisks = collectDetailData && (!quiet || nowMs - (lastDiskAttemptAt.current[serverId] ?? 0) >= DISK_STATUS_INTERVAL_MS)
       const recordHistory = !serverConfig || shouldRecordHistory(lastHistoryRecordedAt.current[serverId], nowMs, serverConfig.samplingIntervalSeconds)
       const collected = await api.collectServer(serverId, includeProcesses, includeDisks, recordHistory, !quiet)
@@ -1455,8 +1455,10 @@ function App() {
                   <span className="server-row__title">{server.name || server.host}</span>
                   <span className="server-row__meta">{snapshot ? `${snapshot.gpus.length} ${acceleratorLabel(snapshot)} ${Math.round(aggregateGpuMemoryPercent(snapshot.gpus))}% · CPU ${Math.round(clampPercent(snapshot.system.memoryTotalBytes ? snapshot.system.memoryUsedBytes / snapshot.system.memoryTotalBytes * 100 : 0))}%` : server.name.trim() === server.host.trim() ? (server.status === 'offline' ? '暂时离线 · 可重新连接' : '等待首次采样') : server.host}</span>
                 </span>
-                {snapshot && currentUserProcessCount(snapshot) > 0 && <span className="own-task-dot" title="有你的任务"><UserRound size={11} /></span>}
-                <ChevronRight size={14} className="server-row__chevron" />
+                <span className="server-row__trailing">
+                  <ChevronRight size={14} className="server-row__chevron" />
+                  {snapshot && currentUserProcessCount(snapshot) > 0 && <span className="own-task-dot" title="有你的任务"><UserRound size={11} /></span>}
+                </span>
               </button>
             )
           })}
