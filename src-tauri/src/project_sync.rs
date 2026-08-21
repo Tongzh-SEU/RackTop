@@ -161,6 +161,7 @@ struct ManifestEntry {
     size: u64,
     modified_at: String,
     link_target: String,
+    mode: String,
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -174,8 +175,8 @@ struct DirectoryDelta {
 fn parse_directory_manifest(output: &str) -> Result<BTreeMap<String, ManifestEntry>, String> {
     let fields: Vec<&str> = output.split('\0').collect();
     let mut entries = BTreeMap::new();
-    for record in fields.chunks(5) {
-        if record.len() < 5 || record[0].is_empty() { continue; }
+    for record in fields.chunks(6) {
+        if record.len() < 6 || record[0].is_empty() { continue; }
         let path = record[0];
         if path.starts_with('/') || path.split('/').any(|part| part == "..") {
             return Err("远端目录包含不安全的相对路径".into());
@@ -183,8 +184,9 @@ fn parse_directory_manifest(output: &str) -> Result<BTreeMap<String, ManifestEnt
         entries.insert(path.to_string(), ManifestEntry {
             kind: record[1].to_string(),
             size: record[2].parse().unwrap_or(0),
-            modified_at: record[3].to_string(),
+            modified_at: record[3].split('.').next().unwrap_or(record[3]).to_string(),
             link_target: record[4].to_string(),
+            mode: record[5].to_string(),
         });
     }
     Ok(entries)
@@ -228,6 +230,8 @@ fn directory_delta_signature(delta: &DirectoryDelta, source: &BTreeMap<String, M
             digest.update(entry.modified_at.as_bytes());
             digest.update([0]);
             digest.update(entry.link_target.as_bytes());
+            digest.update([0]);
+            digest.update(entry.mode.as_bytes());
         }
     }
     for path in &delta.remove_paths {
@@ -239,7 +243,7 @@ fn directory_delta_signature(delta: &DirectoryDelta, source: &BTreeMap<String, M
 
 fn directory_manifest_script(path: &str) -> String {
     let expand_root = remote_home_expansion("root");
-    format!(r#"root={}; {}; [ -d "$root" ] || exit 0; find "$root" -mindepth 1 -printf '%P\0%y\0%s\0%T@\0%l\0'"#, shell_quote(path), expand_root)
+    format!(r#"root={}; {}; [ -d "$root" ] || exit 0; find "$root" -mindepth 1 -printf '%P\0%y\0%s\0%T@\0%l\0%m\0'"#, shell_quote(path), expand_root)
 }
 
 async fn remote_input(server: &crate::models::Server, password: Option<&str>, script: String, input: Vec<u8>, timeout_seconds: u64) -> Result<(), String> {
@@ -697,8 +701,8 @@ mod tests {
 
     #[test]
     fn directory_delta_transfers_only_changes_and_tracks_deletions() {
-        let source = parse_directory_manifest("keep.txt\0f\03\0100.0\0\0changed.txt\0f\05\0200.0\0\0folder\0d\00\0300.0\0\0folder/new.txt\0f\07\0300.0\0\0").unwrap();
-        let target = parse_directory_manifest("keep.txt\0f\03\0100.0\0\0changed.txt\0f\04\0100.0\0\0folder\0d\00\0100.0\0\0old.txt\0f\09\0100.0\0\0").unwrap();
+        let source = parse_directory_manifest("keep.txt\0f\03\0100.123\0\0644\0changed.txt\0f\05\0200.0\0\0644\0folder\0d\00\0300.0\0\0755\0folder/new.txt\0f\07\0300.0\0\0644\0").unwrap();
+        let target = parse_directory_manifest("keep.txt\0f\03\0100.999\0\0644\0changed.txt\0f\04\0100.0\0\0644\0folder\0d\00\0100.0\0\0755\0old.txt\0f\09\0100.0\0\0644\0").unwrap();
         let delta = directory_delta(&source, &target);
         assert_eq!(delta.archive_paths, vec!["changed.txt", "folder", "folder/new.txt"]);
         assert_eq!(delta.replace_paths, vec!["changed.txt"]);
@@ -708,7 +712,7 @@ mod tests {
 
     #[test]
     fn directory_delta_rejects_parent_paths() {
-        assert!(parse_directory_manifest("../escape\0f\01\0100.0\0\0").is_err());
+        assert!(parse_directory_manifest("../escape\0f\01\0100.0\0\0644\0").is_err());
     }
 
     #[test]
