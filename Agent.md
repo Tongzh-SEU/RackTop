@@ -303,6 +303,24 @@ v0.2.0 feat: 增加 GPU 告警规则管理
 
 Release 发布不得夹带或修改工作区中的无关内容。创建标签和 Release 不要求将本地工作区切换到默认分支，但必须通过远程提交或 GitHub 页面确认标签的目标确实位于默认分支。
 
+#### macOS App、DMG 与 Actions 签名验证
+
+macOS Release 不得只依赖 Rust 链接器或 Tauri 构建过程自动产生的 ad-hoc 签名。仅显示 `adhoc,linker-signed` 的可执行文件可能没有封印 `Info.plist` 和 App 资源，DMG 校验和即使完整，macOS 仍会把其中的 App 判定为“已损坏”。本地构建和 GitHub Actions 必须执行相同的完整验证流程：
+
+1. Tauri 生成 `.app` 后，先清除扩展属性，再对完整 App Bundle 重新签名：
+
+   ```bash
+   xattr -cr "RackTop.app"
+   codesign --force --deep --sign - "RackTop.app"
+   codesign --verify --deep --strict --verbose=2 "RackTop.app"
+   ```
+
+2. `codesign --verify` 必须真实返回成功。出现 `code has no resources but signature indicates they must be present`、`resource envelope is obsolete`、资源缺失或任何非零退出码时，该 App 和由它生成的 DMG 均禁止上传。
+3. 必须先完成完整 App 签名，再从该 App 生成 DMG。生成后执行 `hdiutil verify`，随后只读挂载 DMG，并对镜像内的 `RackTop.app` 再执行一次 `codesign --verify --deep --strict --verbose=2`；验证完成后卸载镜像。
+4. GitHub Actions 必须在上传 workflow artifact 之前完成上述重新签名和严格验证。不得把只通过 Tauri 打包、但没有通过 App Bundle 严格签名验证的 Actions DMG 当作发布产物。
+5. 本地已验证的 DMG 与 Actions 产物必须分别记录来源和 SHA-256。不得用尚未验证的 Actions 文件覆盖已经验证的本地文件；只有完成同等验证后，才能替换 `output` 或 GitHub Release 中的同名附件。
+6. ad-hoc 深度签名只能保证 Bundle 完整并避免“App 已损坏”类签名错误，不能替代 Apple Developer ID 签名和公证。没有 Developer ID 与 notarization 时，必须如实提示用户首次打开可能需要在“系统设置 → 隐私与安全性”中确认，不得声称已经通过 Apple 公证。
+
 #### Release 正文格式
 
 稳定版 Release 的“主要更新”默认只描述当前版本实际交付的用户可见变化，最多使用 5 条，每条只表达一项变化；不得因为标题包含“稳定版”就重复罗列历史版本能力。只有首次稳定版，或用户明确要求发布累计能力概览时，才可以概括从初始版本到当前版本的核心能力。小功能、排版调整和零碎 Bug 修复可以合并为一条简洁的修复说明，但不得编造或遗漏本版本的重要用户可见变化。
