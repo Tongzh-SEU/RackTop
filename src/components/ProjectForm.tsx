@@ -34,8 +34,11 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
   const [resourceSyncIds, setResourceSyncIds] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState<'save' | 'sync' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [nameInvalid, setNameInvalid] = useState(false)
+  const pathCheckGeneration = useRef(0)
   const resourceCheckGeneration = useRef(0)
   const sheetRef = useRef<HTMLElement>(null)
+  const nameInputRef = useRef<HTMLInputElement>(null)
   const manuallyEditedTargets = useRef(new Set(initial?.targets.filter((target) => !isLegacyProjectNameTargetPath(target.path, initial.sourcePath, initial.name)).map((target) => target.serverId) ?? []))
   const eligibleTargets = useMemo(() => servers.filter((server) => server.id !== draft.sourceServerId), [draft.sourceServerId, servers])
   const sourceServerMissing = Boolean(initial && !servers.some((server) => server.id === draft.sourceServerId))
@@ -161,7 +164,7 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
     let cancelled = false
     const timer = window.setTimeout(() => {
       if (!cancelled) void detectLinkedResources().catch(() => {})
-    }, 500)
+    }, 250)
     return () => { cancelled = true; window.clearTimeout(timer) }
     // Dependency checks intentionally follow relationship and target selection changes only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -178,15 +181,17 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
     }))
   }
 
-  async function detectPaths() {
-    if (!draft.name.trim() || !draft.sourceServerId || !draft.sourcePath.trim()) {
-      setError('请先填写名称、主服务器和主目录。')
+  async function detectPaths(silent = false) {
+    if (!draft.sourceServerId || !draft.sourcePath.trim()) {
+      if (!silent) setError('请先选择主服务器并填写主目录。')
       return
     }
+    const generation = ++pathCheckGeneration.current
     setChecking(true)
-    setError(null)
+    if (!silent) setError(null)
     try {
       const results = await api.probeProjectPaths(draft)
+      if (generation !== pathCheckGeneration.current) return
       setChecks(Object.fromEntries(results.map((result) => [result.serverId, result])))
       setDraft((current) => ({
         ...current,
@@ -196,8 +201,24 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
           return result?.exists ? { ...target, path: result.suggestedPath } : target
         }),
       }))
-    } catch (reason) { setError(String(reason)) } finally { setChecking(false) }
+    } catch (reason) {
+      if (generation === pathCheckGeneration.current && !silent) setError(String(reason))
+    } finally {
+      if (generation === pathCheckGeneration.current) setChecking(false)
+    }
   }
+
+  useEffect(() => {
+    if (!draft.sourceServerId || !draft.sourcePath.trim() || draft.targets.length === 0) {
+      pathCheckGeneration.current += 1
+      setChecking(false)
+      return
+    }
+    const timer = window.setTimeout(() => void detectPaths(true), 250)
+    return () => window.clearTimeout(timer)
+    // Path checks follow server, directory, and target selection changes only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.sourceServerId, draft.sourcePath, draft.targets.map((target) => `${target.serverId}:${target.path}`).join('|')])
 
   async function detectConfiguration() {
     await Promise.all([
@@ -208,6 +229,12 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
 
   async function submit(syncAfterSave: boolean, event?: FormEvent) {
     event?.preventDefault()
+    if (!draft.name.trim()) {
+      setNameInvalid(true)
+      setError(`请填写${draft.kind === 'project' ? '项目' : draft.kind === 'dataset' ? '数据集' : '模型'}名称。`)
+      nameInputRef.current?.focus()
+      return
+    }
     if (draft.targets.length === 0) { setError('至少选择一台目标服务器。'); return }
     const unsafe = [draft.sourcePath, ...draft.targets.map((target) => target.path)].find((path) => { const normalized = path.trim().replace(/\/+$/, ''); return !normalized || ['/', '~', '$HOME', '${HOME}', '.', '..'].includes(normalized) || normalized.split('/').includes('..') })
     if (unsafe) { setError('主目录和目标目录不能是根目录、Home 根目录或包含 ..'); return }
@@ -271,7 +298,7 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
         <form className="project-form" onSubmit={(event) => void submit(false, event)}>
           <div className="project-form__body">
             <div className="project-identity-fields">
-              <label>名称<input required value={draft.name} placeholder={draft.kind === 'project' ? '例如：Llama 微调项目' : draft.kind === 'dataset' ? '例如：ImageNet-1K' : '例如：Llama-3-8B'} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} /></label>
+              <label className={nameInvalid ? 'field-error' : undefined}>名称<input ref={nameInputRef} aria-invalid={nameInvalid} value={draft.name} placeholder={draft.kind === 'project' ? '例如：Llama 微调项目' : draft.kind === 'dataset' ? '例如：ImageNet-1K' : '例如：Llama-3-8B'} onChange={(event) => { const name = event.target.value; setDraft((current) => ({ ...current, name })); if (name.trim()) { setNameInvalid(false); if (error?.includes('名称')) setError(null) } }} />{nameInvalid && <small className="field-error__message">{draft.kind === 'project' ? '项目' : draft.kind === 'dataset' ? '数据集' : '模型'}名称不能为空</small>}</label>
               <fieldset className="project-kind-field"><legend>类型</legend><div className="segmented project-kind-segmented"><button type="button" disabled={Boolean(initial)} className={draft.kind === 'project' ? 'is-selected' : ''} onClick={() => setKind('project')}><FolderGit2 size={13} />项目</button><button type="button" disabled={Boolean(initial)} className={draft.kind === 'dataset' ? 'is-selected' : ''} onClick={() => setKind('dataset')}><Database size={13} />数据集</button><button type="button" disabled={Boolean(initial)} className={draft.kind === 'model' ? 'is-selected' : ''} onClick={() => setKind('model')}><Box size={13} />模型</button></div></fieldset>
             </div>
             <section className="project-source-section" aria-label="同步来源">

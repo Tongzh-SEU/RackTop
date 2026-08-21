@@ -102,6 +102,23 @@ fn path_check_signature(check: &ProjectPathCheck) -> String {
     format!("{}:{}:{}:{}:{}", check.exists as u8, check.is_directory as u8, check.size_bytes, check.file_count, check.modified_at.unwrap_or_default())
 }
 
+fn sync_checkpoint_signature(source_signature: &str, target_signature: &str) -> String {
+    format!("v2:{source_signature}:{target_signature}")
+}
+
+fn resume_checkpoint_offset(output: &str, expected_signature: &str) -> Option<u64> {
+    output.lines().find_map(|line| {
+        let fields = line.strip_prefix("__RACKTOP_CHECKPOINT__\t")?.split_once('\t')?;
+        (fields.0 == expected_signature).then(|| fields.1.parse::<u64>().ok()).flatten()
+    })
+}
+
+fn resume_checkpoint_script(target_path: &str, artifact_id: &str) -> String {
+    let target_path = shell_quote(target_path);
+    let expand_target = remote_home_expansion("target");
+    format!(r#"target={target_path}; {expand_target}; parent="${{target%/*}}"; [ "$parent" = "$target" ] && parent="$HOME"; part="$parent/.racktop-sync-{artifact_id}.part"; meta="$parent/.racktop-sync-{artifact_id}.meta"; stored="$(cat "$meta" 2>/dev/null)"; offset="$(stat -c '%s' "$part" 2>/dev/null)"; printf '__RACKTOP_CHECKPOINT__\t%s\t%s\n' "$stored" "${{offset:-0}}""#)
+}
+
 fn target_changed_since_sync(target: &crate::models::ProjectTarget, check: &ProjectPathCheck) -> bool {
     if !check.exists {
         return target.last_synced_at.is_some();
@@ -286,17 +303,20 @@ pub async fn inspect(database: &Database, project: &Project) -> Result<Project, 
         let source_unchanged_since_sync = target.synced_source_size_bytes == Some(source_check.size_bytes)
             && target.synced_source_file_count == Some(source_check.file_count)
             && target.synced_source_modified_at == source_check.modified_at;
-        let target_changed_since_sync = check.error.is_none() && check.exists && target_changed_since_sync(target, &check);
+        let paused = target.status == "paused";
+        let target_changed_since_sync = !paused && check.error.is_none() && check.exists && target_changed_since_sync(target, &check);
         let target_unchanged_since_sync = target.last_synced_at.is_some() && !target_changed_since_sync;
         targets.push(crate::models::ProjectTarget {
             server_id: target.server_id.clone(), path: check.suggested_path.clone(),
-            status: if check.error.is_some() { "offline".into() } else if !check.exists { "missing".into() } else if target_changed_since_sync { "conflict".into() } else if source_unchanged_since_sync && target_unchanged_since_sync { "synced".into() } else { "found".into() },
+            status: if paused { "paused".into() } else if check.error.is_some() { "offline".into() } else if !check.exists { "missing".into() } else if target_changed_since_sync { "conflict".into() } else if source_unchanged_since_sync && target_unchanged_since_sync { "synced".into() } else { "found".into() },
             exists: check.exists, is_directory: check.is_directory, size_bytes: check.size_bytes, file_count: check.file_count,
             modified_at: check.modified_at,
             last_checked_at: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64),
             last_synced_at: target.last_synced_at, synced_source_size_bytes: target.synced_source_size_bytes, synced_source_file_count: target.synced_source_file_count, synced_source_modified_at: target.synced_source_modified_at,
             synced_target_size_bytes: target.synced_target_size_bytes, synced_target_file_count: target.synced_target_file_count, synced_target_modified_at: target.synced_target_modified_at,
-            error: if target_changed_since_sync {
+            error: if paused {
+                target.error.clone()
+            } else if target_changed_since_sync {
                 Some(if target.last_synced_at.is_some() { "目标内容已在上次同步后修改".into() } else { "目标目录已有内容，首次同步需要确认".into() })
             } else { check.error },
         });
@@ -308,7 +328,7 @@ pub async fn inspect(database: &Database, project: &Project) -> Result<Project, 
 
 fn targets_after_source_check(project: &Project, source_check: &ProjectPathCheck) -> Vec<crate::models::ProjectTarget> {
     project.targets.iter().cloned().map(|mut target| {
-        if matches!(target.status.as_str(), "missing" | "offline" | "error" | "conflict") {
+        if matches!(target.status.as_str(), "syncing" | "paused" | "missing" | "offline" | "error" | "conflict") {
             return target;
         }
         let source_unchanged_since_sync = target.last_synced_at.is_some()
@@ -350,9 +370,6 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
         if !source_check.exists { return Err(source_check.error.unwrap_or_else(|| "主目录不存在".into())); }
         let target_check_before = check_path(&target_server, target_password.as_deref(), &target.path, &basename).await;
         if let Some(error) = target_check_before.error.clone() { return Err(error); }
-        if target_check_before.exists && target_changed_since_sync(target, &target_check_before) && !force {
-            return Err("__RACKTOP_CONFLICT__:目标目录已有内容或已在上次同步后修改".into());
-        }
         if source.host.eq_ignore_ascii_case(&target_server.host) && source.port == target_server.port && source.username == target_server.username {
             validate_same_server_paths(&source, source_password.as_deref(), &source_check.suggested_path, &target.path).await?;
         }
@@ -365,7 +382,13 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
         let artifact_id = sync_artifact_id(project, &target_server, &target.path);
         let source_signature = format!("{}:{}:{}:{}", source_check.size_bytes, source_check.file_count, source_check.modified_at.unwrap_or_default(), source_check.is_directory as u8);
         let expected_target_signature = path_check_signature(&target_check_before);
-        let prepare_script = format!(r#"target={target_path}; {expand_target}; parent="${{target%/*}}"; [ "$parent" = "$target" ] && parent="$HOME"; [ "$target" != / ] && [ "$target" != "$HOME" ] || {{ printf 'RackTop: 不允许使用根目录或 Home 根目录\n' >&2; exit 64; }}; mkdir -p "$parent"; part="$parent/.racktop-sync-{artifact_id}.part"; meta="$parent/.racktop-sync-{artifact_id}.meta"; backup="$parent/.racktop-sync-{artifact_id}.backup"; [ -e "$target" ] || [ ! -e "$backup" ] || mv -- "$backup" "$target"; signature={signature}; stored="$(cat "$meta" 2>/dev/null)"; if [ "$stored" != "$signature" ]; then rm -f -- "$part"; printf '%s' "$signature" > "$meta"; fi; offset="$(stat -c '%s' "$part" 2>/dev/null)"; offset="${{offset:-0}}"; if [ {source_is_directory} -eq 0 ] && [ "$offset" -gt {source_size} ]; then rm -f -- "$part"; offset=0; fi; available_kb="$(df -Pk "$parent" | awk 'NR==2 {{print $4}}')"; existing_kb=0; [ -e "$target" ] && existing_kb="$(du -sk "$target" 2>/dev/null | awk '{{print $1}}')"; required_kb=$((({source_size} * 2 + 1023) / 1024 + existing_kb + 65536 - offset / 1024)); [ "$required_kb" -lt 65536 ] && required_kb=65536; if [ "${{available_kb:-0}}" -lt "$required_kb" ]; then printf 'RackTop: 目标磁盘空间不足，需要约 %s KB，可用 %s KB\n' "$required_kb" "${{available_kb:-0}}" >&2; exit 73; fi; printf '__RACKTOP_OFFSET__\t%s\n' "$offset""#, artifact_id = artifact_id, signature = shell_quote(&source_signature), source_size = source_check.size_bytes, source_is_directory = source_check.is_directory as u8);
+        let checkpoint_signature = sync_checkpoint_signature(&source_signature, &expected_target_signature);
+        let checkpoint = remote_output(&target_server, target_password.as_deref(), resume_checkpoint_script(&target.path, &artifact_id), 20).await?;
+        let resumable = target.status == "paused" && resume_checkpoint_offset(&checkpoint, &checkpoint_signature).is_some();
+        if target_check_before.exists && target_changed_since_sync(target, &target_check_before) && !force && !resumable {
+            return Err("__RACKTOP_CONFLICT__:目标目录已有内容或已在上次同步后修改".into());
+        }
+        let prepare_script = format!(r#"target={target_path}; {expand_target}; parent="${{target%/*}}"; [ "$parent" = "$target" ] && parent="$HOME"; [ "$target" != / ] && [ "$target" != "$HOME" ] || {{ printf 'RackTop: 不允许使用根目录或 Home 根目录\n' >&2; exit 64; }}; mkdir -p "$parent"; part="$parent/.racktop-sync-{artifact_id}.part"; meta="$parent/.racktop-sync-{artifact_id}.meta"; backup="$parent/.racktop-sync-{artifact_id}.backup"; [ -e "$target" ] || [ ! -e "$backup" ] || mv -- "$backup" "$target"; signature={signature}; stored="$(cat "$meta" 2>/dev/null)"; if [ "$stored" != "$signature" ]; then rm -f -- "$part"; printf '%s' "$signature" > "$meta"; fi; offset="$(stat -c '%s' "$part" 2>/dev/null)"; offset="${{offset:-0}}"; if [ {source_is_directory} -eq 0 ] && [ "$offset" -gt {source_size} ]; then rm -f -- "$part"; offset=0; fi; available_kb="$(df -Pk "$parent" | awk 'NR==2 {{print $4}}')"; existing_kb=0; [ -e "$target" ] && existing_kb="$(du -sk "$target" 2>/dev/null | awk '{{print $1}}')"; required_kb=$((({source_size} * 2 + 1023) / 1024 + existing_kb + 65536 - offset / 1024)); [ "$required_kb" -lt 65536 ] && required_kb=65536; if [ "${{available_kb:-0}}" -lt "$required_kb" ]; then printf 'RackTop: 目标磁盘空间不足，需要约 %s KB，可用 %s KB\n' "$required_kb" "${{available_kb:-0}}" >&2; exit 73; fi; printf '__RACKTOP_OFFSET__\t%s\n' "$offset""#, artifact_id = artifact_id, signature = shell_quote(&checkpoint_signature), source_size = source_check.size_bytes, source_is_directory = source_check.is_directory as u8);
         let prepared = remote_output(&target_server, target_password.as_deref(), prepare_script, 20).await?;
         let resume_offset = prepared.lines().find_map(|line| line.strip_prefix("__RACKTOP_OFFSET__\t")).and_then(|value| value.parse::<u64>().ok()).unwrap_or(0);
         set_sync_resume_offset(&target_key, resume_offset);
@@ -466,7 +489,7 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{acquire_sync_target, path_check_signature, remote_home_expansion, shell_quote, suggestion_script, target_changed_since_sync, target_publish_script, targets_after_source_check};
+    use super::{acquire_sync_target, path_check_signature, remote_home_expansion, resume_checkpoint_offset, shell_quote, suggestion_script, sync_checkpoint_signature, target_changed_since_sync, target_publish_script, targets_after_source_check};
     use crate::{models::{Project, ProjectDraft, ProjectPathCheck, ProjectTarget, ProjectTargetDraft, ServerDraft}, storage::Database};
     use std::{fs, process::Command, time::{Duration, SystemTime, UNIX_EPOCH}};
 
@@ -539,6 +562,37 @@ mod tests {
             size_bytes: 12, file_count: 2, modified_at: Some(120), matches: vec![], error: None,
         };
         assert_eq!(targets_after_source_check(&project, &changed)[0].status, "found");
+    }
+
+    #[test]
+    fn source_only_check_preserves_paused_target_for_resume() {
+        let target = ProjectTarget {
+            server_id: "target".into(), path: "~/demo".into(), status: "paused".into(), exists: true, is_directory: true,
+            size_bytes: 10, file_count: 1, modified_at: Some(100), last_checked_at: Some(100), last_synced_at: None,
+            synced_source_size_bytes: None, synced_source_file_count: None, synced_source_modified_at: None,
+            synced_target_size_bytes: None, synced_target_file_count: None, synced_target_modified_at: None, error: Some("同步已暂停，可继续同步".into()),
+        };
+        let project = Project {
+            id: "project".into(), name: "demo".into(), kind: "project".into(), source_server_id: "source".into(), source_path: "~/demo".into(),
+            source_exists: true, source_is_directory: true, source_size_bytes: 10, source_file_count: 1, source_modified_at: Some(100),
+            dataset_ids: vec![], model_ids: vec![], targets: vec![target], created_at: 1, updated_at: 1, last_sync_at: None, status: "unknown".into(), last_error: None,
+        };
+        let changed = ProjectPathCheck {
+            server_id: "source".into(), requested_path: "~/demo".into(), suggested_path: "~/demo".into(), exists: true, is_directory: true,
+            size_bytes: 12, file_count: 2, modified_at: Some(120), matches: vec![], error: None,
+        };
+        let preserved = targets_after_source_check(&project, &changed);
+        assert_eq!(preserved[0].status, "paused");
+        assert_eq!(preserved[0].error.as_deref(), Some("同步已暂停，可继续同步"));
+    }
+
+    #[test]
+    fn resume_checkpoint_requires_matching_source_and_target_signatures() {
+        let signature = sync_checkpoint_signature("10:1:100:1", "1:1:10:1:100");
+        let output = format!("__RACKTOP_CHECKPOINT__\t{signature}\t4096\n");
+        assert_eq!(resume_checkpoint_offset(&output, &signature), Some(4096));
+        assert_eq!(resume_checkpoint_offset(&output, &sync_checkpoint_signature("11:1:101:1", "1:1:10:1:100")), None);
+        assert_eq!(resume_checkpoint_offset(&output, &sync_checkpoint_signature("10:1:100:1", "1:1:12:1:101")), None);
     }
 
     #[test]

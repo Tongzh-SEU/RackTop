@@ -88,6 +88,34 @@ describe('ProjectForm focus management', () => {
     expect(alternateRow?.querySelector<HTMLInputElement>('[aria-label="Alternate 目标目录"]')).not.toBeNull()
   })
 
+  it('allows path checks without a name but blocks save and highlights the name field', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    const unnamed = { ...dataset, name: '' }
+    const probe = vi.spyOn(api, 'probeProjectPaths').mockResolvedValue([
+      { serverId: source.id, requestedPath: dataset.sourcePath, suggestedPath: dataset.sourcePath, exists: true, isDirectory: true, sizeBytes: 10, fileCount: 1, matches: [] },
+      { serverId: target.id, requestedPath: dataset.targets[0].path, suggestedPath: dataset.targets[0].path, exists: true, isDirectory: true, sizeBytes: 10, fileCount: 1, matches: [] },
+    ])
+    const onSave = vi.fn().mockResolvedValue(undefined)
+
+    act(() => root?.render(<ProjectForm initial={unnamed} projects={[unnamed]} servers={[source, target]} onClose={vi.fn()} onSave={onSave} />))
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 300)) })
+    probe.mockClear()
+
+    const checkButton = [...document.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.includes('检查配置'))
+    await act(async () => { checkButton?.click(); await Promise.resolve() })
+    expect(probe).toHaveBeenCalled()
+
+    const syncButton = [...document.querySelectorAll<HTMLButtonElement>('.sheet__footer button')].find((button) => button.textContent?.includes('保存并同步'))
+    await act(async () => { syncButton?.click(); await Promise.resolve() })
+    const nameInput = document.querySelector<HTMLInputElement>('.project-identity-fields input')
+    expect(nameInput?.getAttribute('aria-invalid')).toBe('true')
+    expect(nameInput?.closest('label')?.textContent).toContain('数据集名称不能为空')
+    expect(document.activeElement).toBe(nameInput)
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
   it('adds only missing dataset replicas to save and sync', async () => {
     container = document.createElement('div')
     document.body.appendChild(container)
