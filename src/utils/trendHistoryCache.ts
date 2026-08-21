@@ -8,6 +8,10 @@ interface CacheEntry {
 
 const historyCache = new Map<string, CacheEntry>()
 
+export function getCachedTrendHistory(key: string) {
+  return historyCache.get(key)?.points
+}
+
 export function loadCachedTrendHistory(key: string, loader: () => Promise<HistoryPoint[]>, maxAgeMs = 25_000) {
   const cached = historyCache.get(key)
   if (cached?.points && cached.expiresAt > Date.now()) return Promise.resolve(cached.points)

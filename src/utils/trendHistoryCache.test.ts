@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { HistoryPoint } from '../types/models'
-import { clearTrendHistoryCache, loadCachedTrendHistory } from './trendHistoryCache'
+import { clearTrendHistoryCache, getCachedTrendHistory, loadCachedTrendHistory } from './trendHistoryCache'
 
 const points = [{ timestamp: 1 }] as HistoryPoint[]
 
@@ -30,5 +30,14 @@ describe('trend history cache', () => {
     vi.setSystemTime(26_001)
     await loadCachedTrendHistory('server:3:0', loader, 25_000)
     expect(loader).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps an expired result available for immediate stale-while-refresh rendering', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000)
+    await loadCachedTrendHistory('server:3:0', vi.fn().mockResolvedValue(points), 25_000)
+    vi.setSystemTime(90_000)
+
+    expect(getCachedTrendHistory('server:3:0')).toBe(points)
   })
 })

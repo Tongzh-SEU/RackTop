@@ -615,7 +615,7 @@ else
 fi
 pid=$!
 printf '%s' "$pid" > "$run_dir/pid"
-sleep 0.15
+sleep 0.8
 if ! kill -0 "$pid" 2>/dev/null; then printf '__RACKTOP_RUN_FAILED__\n'; tail -n 12 "$run_dir/output.log" 2>/dev/null; exit 43; fi
 printf '__RACKTOP_RUN_OK__%s\n' "$pid"
 "#);

@@ -392,7 +392,7 @@ async fn get_history(app: AppHandle, server_id: String, from_timestamp: i64, buc
         let database = app.state::<Database>();
         match bucket_seconds.filter(|seconds| *seconds > 0) {
             Some(seconds) => database.get_compacted_history(&server_id, from_timestamp, seconds),
-            None => database.get_history(&server_id, from_timestamp),
+            None => database.get_recent_history(&server_id, from_timestamp),
         }
     }).await.map_err(|error| error.to_string())?
 }

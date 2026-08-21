@@ -1104,6 +1104,30 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
 
+    pub fn get_recent_history(&self, server_id: &str, from_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,gpu_other_user_occupancy_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
+        let rows = statement.query_map(params![server_id, from_timestamp], |row| {
+            let cpu_utilization = row.get(1)?;
+            let memory_utilization = row.get(2)?;
+            let swap_utilization = row.get(3)?;
+            let gpu_utilizations: HashMap<String, f64> = serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default();
+            let gpu_memory_utilizations: HashMap<String, f64> = serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default();
+            let gpu_other_user_occupancies: HashMap<String, bool> = serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default();
+            Ok(HistoryPoint {
+                timestamp: row.get(0)?, is_compacted: false,
+                cpu_utilization, memory_utilization, swap_utilization,
+                cpu_min: cpu_utilization, cpu_max: cpu_utilization,
+                memory_min: memory_utilization, memory_max: memory_utilization,
+                swap_min: swap_utilization, swap_max: swap_utilization,
+                gpu_mins: gpu_utilizations.clone(), gpu_maxes: gpu_utilizations.clone(),
+                gpu_memory_mins: gpu_memory_utilizations.clone(), gpu_memory_maxes: gpu_memory_utilizations.clone(),
+                gpu_utilizations, gpu_memory_utilizations, gpu_other_user_occupancies,
+            })
+        }).map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
     pub fn get_compacted_history(&self, server_id: &str, from_timestamp: i64, bucket_seconds: i64) -> Result<Vec<HistoryPoint>, String> {
         let bucket_seconds = bucket_seconds.max(60);
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
@@ -1728,6 +1752,10 @@ mod tests {
         assert!(raw_values.contains(&10.0));
         assert!(raw_values.contains(&90.0));
         assert!(raw_values.contains(&20.0));
+        let recent = reopened.get_recent_history(&server_id, 2_000_000 - 3 * 3_600).unwrap();
+        assert_eq!(recent.len(), 4);
+        assert!(recent.iter().all(|point| !point.is_compacted));
+        assert!(recent.iter().any(|point| point.cpu_utilization == 90.0));
         let long = history.iter().find(|point| point.cpu_max == 75.0).unwrap();
         assert!((long.cpu_utilization - 40.0).abs() < 0.01);
         assert_eq!(long.cpu_min, 5.0);

@@ -6,6 +6,7 @@ import '@xterm/xterm/css/xterm.css'
 import { AlertCircle, RefreshCw, SquareTerminal, X } from 'lucide-react'
 import { api } from '../services/api'
 import { analyzeCudaCommand } from '../utils/cudaCommand'
+import { bracketTerminalPaste, isMultilineTerminalPaste, normalizeTerminalPaste } from '../utils/terminalPaste'
 
 interface TerminalEvent { sessionId: string; data?: string }
 
@@ -50,6 +51,17 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
     })
 
     const send = (data: string) => { const id = sessionRef.current; if (id) void api.writeTerminal(id, data).catch((reason) => setError(String(reason))) }
+    const handlePaste = (event: ClipboardEvent) => {
+      const pasted = event.clipboardData?.getData('text/plain') ?? ''
+      if (!isMultilineTerminalPaste(pasted)) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      const normalized = normalizeTerminalPaste(pasted)
+      lineRef.current += normalized
+      send(bracketTerminalPaste(normalized))
+      onNotice?.(`已整体粘贴 ${normalized.split('\n').filter(Boolean).length} 行，按回车执行`)
+    }
+    containerRef.current.addEventListener('paste', handlePaste, true)
     const dataDisposable = terminal.onData((data) => {
       if (pendingEnterRef.current) return
       if (gpuIndex !== undefined && (data === '\r' || data === '\n')) {
@@ -79,6 +91,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
       disposed = true
       if (fitFrame !== null) cancelAnimationFrame(fitFrame)
       resize.disconnect()
+      containerRef.current?.removeEventListener('paste', handlePaste, true)
       dataDisposable.dispose()
       void outputListener.then((unlisten) => unlisten())
       void exitListener.then((unlisten) => unlisten())

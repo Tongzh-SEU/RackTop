@@ -1112,8 +1112,9 @@ function App() {
           const inspected = await api.inspectProject(configured.id)
           setProjects((current) => current.map((item) => item.id === inspected.id ? inspected : item))
           prepared.push({ project: inspected, syncTargetIds: plan.targets.map((target) => target.serverId) })
-        } finally {
+        } catch (reason) {
           setPreparingProjectIds((current) => { const next = new Set(current); next.delete(resource.id); return next })
+          throw reason
         }
       }
       return prepared
@@ -1133,15 +1134,24 @@ function App() {
         let resourceTotal = 0
         for (const prepared of preparedResources) {
           resourceTotal += prepared.syncTargetIds.length
-          const results = await Promise.all(prepared.syncTargetIds.map((serverId) => syncProjectTarget(prepared.project, serverId, false)))
-          resourceCompleted += results.filter(Boolean).length
+          try {
+            const results = await Promise.all(prepared.syncTargetIds.map((serverId) => syncProjectTarget(prepared.project, serverId, false)))
+            resourceCompleted += results.filter(Boolean).length
+          } finally {
+            setPreparingProjectIds((current) => { const next = new Set(current); next.delete(prepared.project.id); return next })
+          }
         }
         const resourceMessage = resourceTotal > 0 ? `；关联资源 ${resourceCompleted} / ${resourceTotal} 个目标同步成功` : ''
         setToast(completed === projectTargetTotal ? `“${saved.name}”已更新 ${completed} 个目标${resourceMessage}` : `“${saved.name}”已保存；${completed} / ${projectTargetTotal} 个目标同步成功${resourceMessage}`)
       } catch (reason) {
         setToast(`“${saved.name}”已保存，准备同步失败：${String(reason)}`)
       } finally {
-        setPreparingProjectIds((current) => { const next = new Set(current); next.delete(saved.id); return next })
+        setPreparingProjectIds((current) => {
+          const next = new Set(current)
+          next.delete(saved.id)
+          linkedResources.forEach((plan) => next.delete(plan.resourceId))
+          return next
+        })
       }
       return
     }
