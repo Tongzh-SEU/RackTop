@@ -5,7 +5,7 @@
 ## 1.25.0
 
 - 新增昇腾 NPU 卡与进程识别，概览和进程区域会按服务器显示 GPU 或 NPU 标签。
-- 昇腾任务与固定卡终端使用 `ASCEND_RT_VISIBLE_DEVICES`，不改变 NVIDIA 的 `CUDA_VISIBLE_DEVICES` 启动逻辑。
+- 昇腾启动配置支持选择 NPU 并使用 `ASCEND_RT_VISIBLE_DEVICES`，不改变 NVIDIA 的 GPU 选择和 `CUDA_VISIBLE_DEVICES` 启动逻辑。
 - 设置新增默认“标准”和可选“大号”两档字体大小。
 - 每 24 小时检查 GitHub Release，点击品牌区可在原关于弹窗中手动检查和查看更新状态。
 - 支持忽略当前版本的蓝色更新提示；出现更高版本时提示会自动恢复。
