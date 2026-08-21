@@ -61,6 +61,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
       const normalized = normalizeTerminalPaste(pasted)
       pendingPasteRef.current = normalized
       setPendingPaste(normalized)
+      terminal.focus()
       onNotice?.(`已整体粘贴 ${normalized.split('\n').filter(Boolean).length} 行，按回车执行`)
     }
     containerRef.current.addEventListener('paste', handlePaste, true)

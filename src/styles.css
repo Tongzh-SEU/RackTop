@@ -117,6 +117,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .server-row__content { display: flex; min-width: 0; flex: 1; flex-direction: column; }
 .server-row__title { overflow: hidden; color: var(--text); font-size: calc(12px + var(--font-adjust, 0px)); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .server-row__meta { overflow: hidden; margin-top: 2px; color: var(--text-tertiary); font-size: calc(10px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }
+.server-row__trailing { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 5px; margin-left: auto; }
 .server-row__chevron { color: var(--text-tertiary); opacity: 0; transform: translateX(-2px); transition: opacity 140ms ease, transform 140ms var(--ease-out); }
 .server-row.is-selected .server-row__chevron { opacity: 1; transform: translateX(0); }
 .own-task-dot { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 999px; color: white; background: var(--own-accent); }
@@ -242,7 +243,7 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .managed-run-row.is-terminating { background: color-mix(in srgb, var(--red) 3%, var(--surface)); }
 .managed-run-row.is-terminating > :not(.managed-run-actions) { opacity: .72; transition: opacity 160ms var(--ease-out); }
 .managed-run-disclosure { display: grid; width: 25px; height: 25px; place-items: center; padding: 0; border: 0; border-radius: 5px; color: var(--text-tertiary); background: transparent; cursor: default; }
-.managed-run-identity { min-width: 0; padding-right: 12px; }.managed-run-identity > div { display: flex; align-items: center; gap: 6px; min-width: 0; }.managed-run-identity svg { flex: 0 0 auto; color: var(--green); }.managed-run-identity strong { overflow: hidden; font-size: calc(11px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }.managed-run-identity > div > span { padding: 2px 5px; border-radius: 4px; color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); font-size: calc(7px + var(--font-adjust, 0px)); font-weight: 700; }
+.managed-run-identity { min-width: 0; padding-right: 12px; }.managed-run-identity > div { display: flex; align-items: center; gap: 6px; min-width: 0; }.managed-run-identity svg { flex: 0 0 auto; color: var(--green); }.managed-run-identity strong { overflow: hidden; font-size: calc(11px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }.managed-run-identity > div > span { flex: 0 0 auto; padding: 2px 5px; border-radius: 4px; color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); font-size: calc(7px + var(--font-adjust, 0px)); font-weight: 700; white-space: nowrap; }
 .unmanaged-run-row .managed-run-identity svg, .managed-run-identity > div > span.is-unmanaged { color: var(--orange); }.managed-run-identity > div > span.is-unmanaged { flex: 0 0 auto; background: color-mix(in srgb, var(--orange) 10%, transparent); }
 .managed-run-identity p { margin: 5px 0 0 19px; overflow: hidden; color: var(--text-tertiary); font-size: calc(8px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }.managed-run-identity code { color: var(--text-secondary); }
 .managed-run-identity > div > span.managed-run-terminating { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); }
@@ -319,7 +320,7 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .terminal-status { width: 7px; height: 7px; border-radius: 50%; background: #777b84; }
 .terminal-status--connected { background: #4fb477; }.terminal-status--connecting { background: #6b9fea; }.terminal-status--error { background: #e26767; }
 .terminal-canvas { min-width: 0; min-height: 0; overflow: hidden; padding: 0 8px; }
-.terminal-paste-preview { position: absolute; right: 12px; bottom: 12px; left: 12px; z-index: 2; max-height: min(52%, 300px); overflow: hidden; border: 1px solid #3b3e45; border-radius: 7px; color: #e7e8ea; background: #17191e; box-shadow: 0 8px 24px #0008; }
+.terminal-paste-preview { position: absolute; right: 12px; bottom: 12px; left: 12px; z-index: 2; max-height: min(52%, 300px); overflow: hidden; border: 1px solid #3b3e45; border-radius: 7px; color: #e7e8ea; background: #17191e; box-shadow: 0 8px 24px #0008; pointer-events: none; }
 .terminal-paste-preview > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 10px; border-bottom: 1px solid #303238; }
 .terminal-paste-preview strong, .terminal-paste-preview small { font-size: 11px; }
 .terminal-paste-preview small { color: #9a9da5; }
@@ -778,7 +779,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
 .project-card__relations em svg { color: var(--text-tertiary); }
 .project-card__relations em small { color: var(--text-tertiary); font-size: calc(9px + var(--font-adjust, 0px)); }
 .project-card__source { grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; padding-block: 10px; }
-.project-card__source-summary { display: grid; grid-template-columns: minmax(110px, 1fr) minmax(80px, .55fr) minmax(138px, .9fr); align-items: center; gap: 18px; min-width: 0; padding-right: 12px; }
+.project-card__source-summary { display: grid; grid-template-columns: minmax(96px, .9fr) minmax(68px, .48fr) minmax(120px, .78fr); align-items: center; gap: 12px; min-width: 0; padding-right: 10px; }
 .project-card__source-summary > span { display: grid; min-width: 0; gap: 2px; }
 .project-card__source-summary strong { max-width: none; }
 .project-card__source small { font-size: calc(9px + var(--font-adjust, 0px)); }
@@ -1004,6 +1005,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
   .onboarding-step:last-child { border-bottom: 0; }
   .gpu-detail-list { grid-template-columns: minmax(0, 1fr); }
   .trend-grid { grid-template-columns: 1fr; }
+  .project-grid { grid-template-columns: 1fr; }
   .idle-filter-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .refresh-label { display: none; }
 }
