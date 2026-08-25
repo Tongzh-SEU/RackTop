@@ -2,10 +2,18 @@
 
 RackTop 开发 Agent 必须优先使用以下固定路径，不得仅依赖当前 shell 的 `PATH` 或工作目录推断工具是否存在：
 
-- RackTop 仓库根目录：`/Users/tong_zh/Library/Mobile Documents/com~apple~CloudDocs/ZHT桐桐/RackTop`；执行项目命令、读取版本信息、检查 Git 状态和生成安装包时，应显式将该目录作为工作目录。
+- RackTop 仓库根目录：`/Volumes/Lenovo/RackTop`；执行项目命令、读取版本信息、检查 Git 状态和生成安装包时，应显式将该目录作为工作目录。
 - GitHub CLI：`/Users/tong_zh/.local/bin/gh`；该用户级安装会跨终端和 Codex 会话保留。
 - 当前 shell 的 `PATH` 可能不包含 `~/.local/bin`。`command -v gh` 没有输出时，必须继续检查 `/Users/tong_zh/.local/bin/gh` 是否为可执行文件；文件存在时直接使用绝对路径，不得误报未安装或重复安装。
 - GitHub CLI 二进制与登录状态相互独立。使用前通过 `/Users/tong_zh/.local/bin/gh auth status` 检查系统钥匙串中的认证；认证失效时只重新登录，不重复安装二进制。
+
+### `esbuild` 开发进程注意事项
+
+`esbuild` 本应只在启动 RackTop 的开发服务时运行，例如执行 `npm run dev`、`vite` 或通过 IDE 启动调试时。它负责监听源码变化并快速重建；关闭开发服务后通常会一起退出。
+
+如果 `esbuild` 的父进程已经是 `launchd`（PID 1），说明原本启动它的终端、IDE 或开发服务器已经退出，但 `esbuild` 成了孤儿进程并持续存活。若它长期占用 200% 以上 CPU，常见原因是项目位于外接卷 `/Volumes/Lenovo`，文件监听与同步、索引或大量文件变更形成重建循环；也可能是 Vite 或某个 Node 服务崩溃后没有正确回收子进程。
+
+开发 Agent 不得让 `esbuild` 在没有 RackTop 开发服务的情况下常驻；结束该进程不会影响项目文件。完成开发或停止调试时，应先在启动服务的终端按 `Ctrl+C` 停止服务并确认子进程已退出；如果发现它仍在运行且电脑持续发热，应在“活动监视器”中搜索 `esbuild` 并结束该进程。
 
 ## 1 UI、动画与交互设计技能
 
