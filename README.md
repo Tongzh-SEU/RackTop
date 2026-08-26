@@ -2,8 +2,28 @@
   <img src="docs/assets/readme/racktop-icon.png" alt="RackTop macOS Logo" width="300" />
 </p>
 
-## 
-RackTop 是面向个人研究者和小型团队的 GPU 服务器工作台。它把多台 Linux 服务器的算力状态、远程终端、项目资料和训练任务集中到一个桌面应用中，让你可以在启动任务前看清资源，在运行过程中持续掌握状态，在不同服务器之间保持项目资料一致。通过本机 OpenSSH 连接服务器，不要求在远程机器安装常驻 Agent。服务器、项目、数据集、模型和启动配置都保存在本地，连接信息和密钥由用户掌控。
+<h2 align="center">多台服务器，一个训练工作台</h2>
+
+<p align="center">
+  📊 查看算力、🔄 同步项目、🚀 启动任务，📈 并持续掌握运行状态。
+</p>
+
+<p align="center">
+RackTop 是面向个人研究者和小型团队的 GPU 服务器桌面工作台，将分散在多台 Linux 服务器的算力状态、远程终端、项目资料和训练任务集中管理。
+启动前快速找到合适的 GPU，运行中持续掌握资源与进程状态，切换服务器时让项目、数据集和模型保持就绪。
+它直接使用本机 OpenSSH，无需部署远程 Agent。启动前找到合适的 GPU，运行中掌握资源与进程状态，并在不同服务器之间保持项目资料就绪。
+</p>
+
+<p align="center">
+  <a href="https://github.com/Tongzh-SEU/RackTop/releases/latest"><img src="https://img.shields.io/github/v/release/Tongzh-SEU/RackTop?style=flat-square&logo=github&label=release" alt="Release"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-1687b8?style=flat-square" alt="Platform">
+  <a href="https://github.com/Tongzh-SEU/RackTop/releases"><img src="https://img.shields.io/github/downloads/Tongzh-SEU/RackTop/total?style=flat-square&logo=github&label=downloads" alt="Downloads"></a>
+  <a href="https://github.com/Tongzh-SEU/RackTop/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Tongzh-SEU/RackTop?style=flat-square&label=license" alt="License"></a>
+</p>
+
+
+ 
+
 <p align="center">
   <img src="docs/assets/readme/fleet-overview.png" alt="全局算力总览" width="33%">
   <img src="docs/assets/readme/history-heatmap.png" alt="资源历史热力图" width="33%">
