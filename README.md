@@ -38,7 +38,9 @@ RackTop 是面向个人研究者和小型团队的 GPU 服务器桌面工作台�
 | macOS Apple Silicon | `RackTop-1.25.1-macos-arm64.dmg` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.1/RackTop-1.25.1-macos-arm64.dmg) |
 | Windows x64 | `RackTop-1.25.1-windows-x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.1/RackTop-1.25.1-windows-x64-setup.exe) |
 
-更多版本见 [GitHub Releases](https://github.com/Tongzh-SEU/RackTop/releases)。macOS 首次打开若提示来源限制，请在“系统设置 → 隐私与安全性”中确认打开。
+更多版本见 [GitHub Releases](https://github.com/Tongzh-SEU/RackTop/releases)。
+macOS版本若首次打开时提示应用来源受限，请前往“系统设置 → 隐私与安全性”，确认允许打开该应用。
+Windows版本若提示“智能应用控制已阻止可能不安全的应用”，请在“设置”中搜索“智能应用控制”，并将其关闭。
 
 ## 作者的话
 
