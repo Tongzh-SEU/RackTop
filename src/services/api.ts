@@ -444,7 +444,7 @@ export const api = {
     const lastSlash = query.lastIndexOf('/')
     const parent = lastSlash >= 0 ? query.slice(0, lastSlash + 1) : '~/'
     const prefix = lastSlash >= 0 ? query.slice(lastSlash + 1).toLowerCase() : query.toLowerCase()
-    return directoryNames.filter((name) => name.toLowerCase().startsWith(prefix)).map((name) => `${parent}${name}/`).slice(0, 12)
+    return directoryNames.filter((name) => name.toLowerCase().startsWith(prefix)).map((name) => `${parent}${name}`).slice(0, 12)
   },
   async inspectProject(projectId: string): Promise<Project> {
     if (isTauri) return invoke('inspect_project', { projectId })
@@ -484,7 +484,7 @@ export const api = {
     return settings
   },
   async getLatestRelease(): Promise<ReleaseInfo> {
-    if (!isTauri) return { version: '1.26.0', url: 'https://github.com/Tongzh-SEU/RackTop/releases/tag/v1.26.0', publishedAt: new Date().toISOString() }
+    if (!isTauri) return { version: '1.25.2', url: 'https://github.com/Tongzh-SEU/RackTop/releases/tag/v1.25.2', publishedAt: new Date().toISOString() }
     const response = await fetch('https://api.github.com/repos/Tongzh-SEU/RackTop/releases/latest', {
       headers: { Accept: 'application/vnd.github+json' },
     })

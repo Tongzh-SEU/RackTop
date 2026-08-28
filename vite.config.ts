@@ -1,4 +1,4 @@
-import { configDefaults, defineConfig } from 'vitest/config'
+import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 export default defineConfig({
@@ -9,9 +9,6 @@ export default defineConfig({
     strictPort: true,
   },
   envPrefix: ['VITE_', 'TAURI_'],
-  test: {
-    exclude: [...configDefaults.exclude, '**/._*'],
-  },
   build: {
     target: ['es2021', 'safari13'],
     minify: 'esbuild',

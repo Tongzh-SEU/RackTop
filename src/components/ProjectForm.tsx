@@ -127,6 +127,14 @@ export function ProjectForm({ initial, projects, servers, activeSyncTargets, onC
     }).map((target) => ({ ...target, path: checks[target.serverId]?.suggestedPath ?? target.path }))
   }
 
+  function registeredResourceTargets(resource: Project) {
+    const checks = resourceChecks[resource.id] ?? {}
+    return resourceProbeDraft(resource).targets.filter((target) => {
+      const check = checks[target.serverId]
+      return Boolean(check?.exists && !check.error && check.matches.length === 0)
+    }).map((target) => ({ ...target, path: checks[target.serverId]?.suggestedPath ?? target.path }))
+  }
+
   async function detectLinkedResources(resourceIds = [...draft.datasetIds, ...draft.modelIds]) {
     const resources = availableResources.filter((resource) => resourceIds.includes(resource.id))
     if (resources.length === 0 || draft.targets.length === 0) return
@@ -250,6 +258,7 @@ export function ProjectForm({ initial, projects, servers, activeSyncTargets, onC
         kind: resource.kind as 'dataset' | 'model',
         syncOnSave: syncAfterSave && resourceSyncIds.has(resource.id) && targets.length > 0,
         targets,
+        registeredTargets: registeredResourceTargets(resource),
       }
     })
     try { await onSave(draft, syncAfterSave, linkedResources) } catch (reason) { setError(String(reason)); setSaving(null) }
@@ -326,7 +335,7 @@ export function ProjectForm({ initial, projects, servers, activeSyncTargets, onC
             </div>
             {draft.kind === 'project' && renderResourceLinks('dataset')}
             {draft.kind === 'project' && renderResourceLinks('model')}
-            <p className="project-safety-note">主服务器是唯一来源。同步会将目标目录替换为完整副本；已有内容或后续修改必须先确认。</p>
+            <p className="project-safety-note">主服务器是唯一来源。新加入的目标会在“保存并同步”时替换为完整副本；已同步目标后续被修改时仍需确认。</p>
             {error && <p className="form-error" role="alert">{error}</p>}
           </div>
           <footer className="sheet__footer"><button type="button" className="button button--secondary" onClick={onClose} disabled={Boolean(saving)}>取消</button><button className="button button--secondary" type="submit" disabled={Boolean(saving)}><Check size={16} />{saving === 'save' ? '保存中…' : '保存'}</button><button className="button button--primary" type="button" disabled={Boolean(saving)} onClick={() => void submit(true)}><RefreshCw size={16} />{saving === 'sync' ? '正在准备…' : plannedResourceSummary ? `保存并同步（含 ${plannedResourceSummary}）` : '保存并同步'}</button></footer>

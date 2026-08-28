@@ -83,7 +83,7 @@ struct CompactedHistoryRange {
     gpu_memory_maxes: HashMap<String, f64>,
 }
 
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 struct TrendHistoryBucket {
     row_count: i64,
     sample_count: i64,
@@ -191,57 +191,6 @@ fn trend_history_point(timestamp: i64, bucket: TrendHistoryBucket) -> HistoryPoi
         gpu_memory_utilizations,
         gpu_other_user_occupancies: HashMap::new(),
     }
-}
-
-fn write_trend_history_bucket(connection: &Connection, server_id: &str, timestamp: i64, bucket_seconds: i64, bucket: &TrendHistoryBucket) -> Result<(), String> {
-    connection.execute(
-        "INSERT INTO history_trend_buckets(server_id,timestamp,bucket_seconds,payload_json) VALUES(?1,?2,?3,?4)
-         ON CONFLICT(server_id,timestamp,bucket_seconds) DO UPDATE SET payload_json=excluded.payload_json",
-        params![server_id, timestamp, bucket_seconds, serde_json::to_string(bucket).map_err(|error| error.to_string())?],
-    ).map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-fn rebuild_trend_history_bucket(connection: &Connection, server_id: &str, timestamp: i64, bucket_seconds: i64) -> Result<(), String> {
-    let start = bucket_start(timestamp, bucket_seconds);
-    let mut bucket = TrendHistoryBucket::default();
-    let mut statement = connection.prepare(
-        "SELECT cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json
-         FROM snapshots WHERE server_id=?1 AND timestamp>=?2 AND timestamp<?3 ORDER BY timestamp"
-    ).map_err(|error| error.to_string())?;
-    let rows = statement.query_map(params![server_id, start, start + bucket_seconds], |row| {
-        Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?))
-    }).map_err(|error| error.to_string())?;
-    for row in rows {
-        let (cpu, memory, swap, gpu_json, gpu_memory_json, payload_json) = row.map_err(|error| error.to_string())?;
-        add_trend_sample(&mut bucket, cpu, memory, swap, &gpu_json, &gpu_memory_json, &payload_json);
-    }
-    drop(statement);
-    if bucket.row_count == 0 {
-        connection.execute("DELETE FROM history_trend_buckets WHERE server_id=?1 AND timestamp=?2 AND bucket_seconds=?3", params![server_id, start, bucket_seconds]).map_err(|error| error.to_string())?;
-    } else {
-        write_trend_history_bucket(connection, server_id, start, bucket_seconds, &bucket)?;
-    }
-    Ok(())
-}
-
-fn update_trend_history_bucket(connection: &Connection, server_id: &str, timestamp: i64, bucket_seconds: i64, replaced_existing_sample: bool) -> Result<(), String> {
-    if replaced_existing_sample {
-        return rebuild_trend_history_bucket(connection, server_id, timestamp, bucket_seconds);
-    }
-    let start = bucket_start(timestamp, bucket_seconds);
-    let mut bucket = connection.query_row(
-        "SELECT payload_json FROM history_trend_buckets WHERE server_id=?1 AND timestamp=?2 AND bucket_seconds=?3",
-        params![server_id, start, bucket_seconds], |row| row.get::<_, String>(0),
-    ).optional().map_err(|error| error.to_string())?
-        .and_then(|payload| serde_json::from_str(&payload).ok()).unwrap_or_default();
-    let (cpu, memory, swap, gpu_json, gpu_memory_json, payload_json) = connection.query_row(
-        "SELECT cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json FROM snapshots WHERE server_id=?1 AND timestamp=?2",
-        params![server_id, timestamp],
-        |row| Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?)),
-    ).map_err(|error| error.to_string())?;
-    add_trend_sample(&mut bucket, cpu, memory, swap, &gpu_json, &gpu_memory_json, &payload_json);
-    write_trend_history_bucket(connection, server_id, start, bucket_seconds, &bucket)
 }
 
 fn gpu_other_user_occupancies(snapshot: &Snapshot) -> HashMap<String, bool> {
@@ -392,6 +341,36 @@ fn update_hourly_history_bucket(connection: &Connection, server_id: &str, timest
     Ok(())
 }
 
+fn rebuild_hourly_history_buckets(connection: &mut Connection) -> Result<(), String> {
+    let mut buckets: BTreeMap<(String, i64), HourlyHistoryBucket> = BTreeMap::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT server_id,timestamp,cpu_utilization,memory_utilization,gpu_json,gpu_memory_json FROM snapshots ORDER BY server_id,timestamp"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, f64>(2)?, row.get::<_, f64>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?))
+        }).map_err(|error| error.to_string())?;
+        for row in rows {
+            let (server_id, timestamp, cpu, memory, gpu_json, gpu_memory_json) = row.map_err(|error| error.to_string())?;
+            let bucket = buckets.entry((server_id, hour_start(timestamp))).or_default();
+            bucket.sample_count += 1;
+            bucket.cpu_sum += cpu;
+            bucket.memory_sum += memory;
+            adjust_metric_totals(&mut bucket.gpu_utilization_sums, &mut bucket.gpu_utilization_counts, &serde_json::from_str(&gpu_json).unwrap_or_default(), 1);
+            adjust_metric_totals(&mut bucket.gpu_memory_sums, &mut bucket.gpu_memory_counts, &serde_json::from_str(&gpu_memory_json).unwrap_or_default(), 1);
+        }
+    }
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    transaction.execute("DELETE FROM history_hourly_buckets", []).map_err(|error| error.to_string())?;
+    for ((server_id, timestamp), bucket) in buckets {
+        transaction.execute(
+            "INSERT INTO history_hourly_buckets(server_id,timestamp,sample_count,cpu_sum,memory_sum,gpu_utilization_sums_json,gpu_utilization_counts_json,gpu_memory_sums_json,gpu_memory_counts_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![server_id, timestamp, bucket.sample_count, bucket.cpu_sum, bucket.memory_sum, serde_json::to_string(&bucket.gpu_utilization_sums).map_err(|error| error.to_string())?, serde_json::to_string(&bucket.gpu_utilization_counts).map_err(|error| error.to_string())?, serde_json::to_string(&bucket.gpu_memory_sums).map_err(|error| error.to_string())?, serde_json::to_string(&bucket.gpu_memory_counts).map_err(|error| error.to_string())?],
+        ).map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())
+}
+
 fn migrate_projects_to_detached_sources(connection: &mut Connection) -> Result<(), String> {
     let has_source_foreign_key = {
         let mut statement = connection.prepare("PRAGMA foreign_key_list(projects)").map_err(|error| error.to_string())?;
@@ -521,15 +500,6 @@ impl Database {
                     FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
                  );
                  CREATE INDEX IF NOT EXISTS idx_history_hourly_lookup ON history_hourly_buckets(server_id,timestamp);
-                 CREATE TABLE IF NOT EXISTS history_trend_buckets (
-                    server_id TEXT NOT NULL,
-                    timestamp INTEGER NOT NULL,
-                    bucket_seconds INTEGER NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    PRIMARY KEY(server_id,timestamp,bucket_seconds),
-                    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
-                 );
-                 CREATE INDEX IF NOT EXISTS idx_history_trend_lookup ON history_trend_buckets(server_id,timestamp);
                  CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value_json TEXT NOT NULL
@@ -618,25 +588,6 @@ impl Database {
             connection.execute("ALTER TABLE snapshots ADD COLUMN gpu_other_user_occupancy_json TEXT NOT NULL DEFAULT '{}'", []).map_err(|error| error.to_string())?;
             backfill_gpu_occupancy_history(&mut connection)?;
         }
-        let trend_columns = {
-            let mut statement = connection.prepare("PRAGMA table_info(history_trend_buckets)").map_err(|error| error.to_string())?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
-            columns.filter_map(Result::ok).collect::<HashSet<_>>()
-        };
-        if !trend_columns.contains("bucket_seconds") {
-            connection.execute_batch(
-                "DROP TABLE history_trend_buckets;
-                 CREATE TABLE history_trend_buckets (
-                    server_id TEXT NOT NULL,
-                    timestamp INTEGER NOT NULL,
-                    bucket_seconds INTEGER NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    PRIMARY KEY(server_id,timestamp,bucket_seconds),
-                    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
-                 );
-                 CREATE INDEX idx_history_trend_lookup ON history_trend_buckets(server_id,timestamp);"
-            ).map_err(|error| error.to_string())?;
-        }
         let server_columns = {
             let mut statement = connection.prepare("PRAGMA table_info(servers)").map_err(|error| error.to_string())?;
             let columns = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|error| error.to_string())?;
@@ -697,7 +648,11 @@ impl Database {
             [],
         ).map_err(|error| error.to_string())?;
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_unique ON snapshots(server_id,timestamp)", []).map_err(|error| error.to_string())?;
+        let hourly_bucket_count: i64 = connection.query_row("SELECT COUNT(*) FROM history_hourly_buckets", [], |row| row.get(0)).map_err(|error| error.to_string())?;
         let snapshot_count: i64 = connection.query_row("SELECT COUNT(*) FROM snapshots", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+        if hourly_bucket_count == 0 && snapshot_count > 0 {
+            rebuild_hourly_history_buckets(&mut connection)?;
+        }
         let tier_migration_applied: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM storage_migrations WHERE key='snapshot-tier-v2')", [], |row| row.get(0)).map_err(|error| error.to_string())?;
         if !tier_migration_applied && snapshot_count > 0 {
             let removed_snapshots = compact_existing_snapshot_history(&mut connection)?;
@@ -981,15 +936,9 @@ impl Database {
             params![snapshot.server_id, snapshot.timestamp, next_sample.cpu_utilization, next_sample.memory_utilization, swap_utilization, serde_json::to_string(&next_sample.gpu_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(&next_sample.gpu_memory_utilizations).unwrap_or_else(|_| "{}".into()), serde_json::to_string(&gpu_occupancy_map).unwrap_or_else(|_| "{}".into()), serde_json::to_string(snapshot).map_err(|error| error.to_string())?],
         ).map_err(|error| error.to_string())?;
         update_hourly_history_bucket(&transaction, &snapshot.server_id, snapshot.timestamp, previous.as_ref(), &next_sample)?;
-        update_trend_history_bucket(&transaction, &snapshot.server_id, snapshot.timestamp, 60, previous.is_some())?;
-        update_trend_history_bucket(&transaction, &snapshot.server_id, snapshot.timestamp, LONG_HISTORY_BUCKET_SECONDS, previous.is_some())?;
         compact_completed_tiers(&transaction, &snapshot.server_id, snapshot.timestamp)?;
         let cutoff = snapshot.timestamp - i64::from(server.history_retention_days) * 86_400;
         transaction.execute("DELETE FROM history_hourly_buckets WHERE server_id=?1 AND timestamp < ?2", params![snapshot.server_id, hour_start(cutoff)]).map_err(|error| error.to_string())?;
-        transaction.execute(
-            "DELETE FROM history_trend_buckets WHERE server_id=?1 AND ((bucket_seconds=60 AND timestamp<?2) OR (bucket_seconds=?3 AND timestamp<?4))",
-            params![snapshot.server_id, bucket_start(snapshot.timestamp - TREND_HISTORY_SECONDS, 60), LONG_HISTORY_BUCKET_SECONDS, bucket_start(cutoff, LONG_HISTORY_BUCKET_SECONDS)],
-        ).map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())
     }
 
@@ -1037,17 +986,9 @@ impl Database {
                 gpu_memory_utilizations: point.gpu_memory_utilizations.clone(),
             };
             update_hourly_history_bucket(&transaction, server_id, point.timestamp, None, &sample)?;
-            if point.timestamp >= latest - TREND_HISTORY_SECONDS {
-                update_trend_history_bucket(&transaction, server_id, point.timestamp, 60, false)?;
-            }
-            update_trend_history_bucket(&transaction, server_id, point.timestamp, LONG_HISTORY_BUCKET_SECONDS, false)?;
         }
         compact_server_snapshot_history(&transaction, server_id, latest)?;
         transaction.execute("DELETE FROM history_hourly_buckets WHERE server_id=?1 AND timestamp < ?2", params![server_id, hour_start(cutoff)]).map_err(|error| error.to_string())?;
-        transaction.execute(
-            "DELETE FROM history_trend_buckets WHERE server_id=?1 AND ((bucket_seconds=60 AND timestamp<?2) OR (bucket_seconds=?3 AND timestamp<?4))",
-            params![server_id, bucket_start(latest - TREND_HISTORY_SECONDS, 60), LONG_HISTORY_BUCKET_SECONDS, bucket_start(cutoff, LONG_HISTORY_BUCKET_SECONDS)],
-        ).map_err(|error| error.to_string())?;
         transaction.execute(
             "UPDATE servers SET remote_history_last_sync_at=MAX(COALESCE(remote_history_last_sync_at,0),?2) WHERE id=?1",
             params![server_id, latest],
@@ -1190,19 +1131,6 @@ impl Database {
     pub fn get_compacted_history(&self, server_id: &str, from_timestamp: i64, bucket_seconds: i64) -> Result<Vec<HistoryPoint>, String> {
         let bucket_seconds = bucket_seconds.max(60);
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        if bucket_seconds == 60 || bucket_seconds == LONG_HISTORY_BUCKET_SECONDS {
-            let mut statement = connection.prepare(
-                "SELECT timestamp,payload_json FROM history_trend_buckets WHERE server_id=?1 AND bucket_seconds=?2 AND timestamp>=?3 ORDER BY timestamp"
-            ).map_err(|error| error.to_string())?;
-            let rows = statement.query_map(params![server_id, bucket_seconds, bucket_start(from_timestamp, bucket_seconds)], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            }).map_err(|error| error.to_string())?;
-            return rows.map(|row| {
-                let (timestamp, payload) = row.map_err(|error| error.to_string())?;
-                let bucket = serde_json::from_str(&payload).map_err(|error| error.to_string())?;
-                Ok(trend_history_point(timestamp, bucket))
-            }).collect();
-        }
         let mut buckets: BTreeMap<i64, TrendHistoryBucket> = BTreeMap::new();
         let mut statement = connection.prepare(
             "SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp"
@@ -1395,7 +1323,7 @@ impl Database {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let previous_source: Option<(String, String, i64, i64, i64, i64, Option<i64>)> = connection.query_row("SELECT source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,source_modified_at FROM projects WHERE id=?1", [&id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))).optional().map_err(|error| error.to_string())?;
-        let same_source = previous_source.as_ref().is_some_and(|(server_id, path, ..)| server_id == &draft.source_server_id && path == source_path);
+        let same_source = previous_source.as_ref().is_some_and(|(server_id, path, ..)| server_id == &draft.source_server_id && normalized_project_path(path) == normalized_project_path(source_path));
         let source_exists = if same_source { previous_source.as_ref().map(|value| value.2).unwrap_or(0) } else { 0 };
         let source_is_directory = if same_source { previous_source.as_ref().map(|value| value.3).unwrap_or(0) } else { 0 };
         let source_size_bytes = if same_source { previous_source.as_ref().map(|value| value.4).unwrap_or(0) } else { 0 };
@@ -1403,7 +1331,7 @@ impl Database {
         let source_modified_at = if same_source { previous_source.as_ref().and_then(|value| value.6) } else { None };
         let previous_targets: Vec<ProjectTarget> = connection.query_row("SELECT targets_json FROM projects WHERE id=?1", [&id], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())?.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default();
         let targets: Vec<ProjectTarget> = draft.targets.into_iter().map(|target| {
-            let previous = same_source.then(|| previous_targets.iter().find(|item| item.server_id == target.server_id && item.path == target.path.trim())).flatten();
+            let previous = same_source.then(|| previous_targets.iter().find(|item| item.server_id == target.server_id && normalized_project_path(&item.path) == normalized_project_path(target.path.trim()))).flatten();
             ProjectTarget { server_id: target.server_id, path: target.path.trim().to_string(), status: previous.map(|item| item.status.clone()).unwrap_or_else(|| "unknown".into()), exists: previous.map(|item| item.exists).unwrap_or(false), is_directory: previous.map(|item| item.is_directory).unwrap_or(false), size_bytes: previous.map(|item| item.size_bytes).unwrap_or(0), file_count: previous.map(|item| item.file_count).unwrap_or(0), modified_at: previous.and_then(|item| item.modified_at), last_checked_at: previous.and_then(|item| item.last_checked_at), last_synced_at: previous.and_then(|item| item.last_synced_at), synced_source_size_bytes: previous.and_then(|item| item.synced_source_size_bytes), synced_source_file_count: previous.and_then(|item| item.synced_source_file_count), synced_source_modified_at: previous.and_then(|item| item.synced_source_modified_at), synced_target_size_bytes: previous.and_then(|item| item.synced_target_size_bytes), synced_target_file_count: previous.and_then(|item| item.synced_target_file_count), synced_target_modified_at: previous.and_then(|item| item.synced_target_modified_at), error: None }
         }).collect();
         let targets_json = serde_json::to_string(&targets).map_err(|error| error.to_string())?;
@@ -1794,29 +1722,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_long_trends_from_persisted_buckets_without_scanning_snapshots() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
-        let server = db.save_server(draft("Trend cache", 30)).unwrap();
-        let mut first = snapshot(&server.id, 21_610);
-        first.system.cpu_utilization = 20.0;
-        let mut second = snapshot(&server.id, 21_620);
-        second.system.cpu_utilization = 60.0;
-        db.save_snapshot(&first).unwrap();
-        db.save_snapshot(&second).unwrap();
-        db.connection.lock().unwrap().execute("DELETE FROM snapshots WHERE server_id=?1", [&server.id]).unwrap();
-
-        let points = db.get_compacted_history(&server.id, 0, LONG_HISTORY_BUCKET_SECONDS).unwrap();
-        assert_eq!(points.len(), 1);
-        assert_eq!(points[0].cpu_utilization, 40.0);
-        assert_eq!(points[0].cpu_min, 20.0);
-        assert_eq!(points[0].cpu_max, 60.0);
-        let minute_points = db.get_compacted_history(&server.id, 0, 60).unwrap();
-        assert_eq!(minute_points.len(), 1);
-        assert_eq!(minute_points[0].cpu_utilization, 40.0);
-    }
-
-    #[test]
     fn keeps_three_hours_raw_then_compacts_older_trends_and_preserves_peaks() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.sqlite");
@@ -1862,7 +1767,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_an_existing_database_does_not_rebuild_missing_aggregate_tables() {
+    fn backfills_hourly_buckets_when_opening_an_existing_database() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.sqlite");
         let server_id = {
@@ -1872,14 +1777,14 @@ mod tests {
             sample.system.cpu_utilization = 55.0;
             db.save_snapshot(&sample).unwrap();
             db.connection.lock().unwrap().execute("DELETE FROM history_hourly_buckets", []).unwrap();
-            db.connection.lock().unwrap().execute("DELETE FROM history_trend_buckets", []).unwrap();
             server.id
         };
 
         let reopened = Database::open(&path).unwrap();
         let buckets = reopened.get_history_heatmap(&server_id, 0, 0, &[]).unwrap();
-        assert!(buckets.is_empty());
-        assert!(reopened.get_compacted_history(&server_id, 0, 60).unwrap().is_empty());
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].sample_count, 1);
+        assert_eq!(buckets[0].cpu_utilization, 55.0);
     }
 
     #[test]
@@ -2125,6 +2030,42 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert!(remaining[0].dataset_ids.is_empty());
         assert!(remaining[0].model_ids.is_empty());
+    }
+
+    #[test]
+    fn project_save_preserves_synced_target_when_only_trailing_slashes_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("project-path-normalization.sqlite")).unwrap();
+        let source = db.save_server(draft("Source", 30)).unwrap();
+        let target = db.save_server(ServerDraft { host: "10.0.0.2".into(), ..draft("Target", 30) }).unwrap();
+        let project = db.save_project(ProjectDraft {
+            id: None,
+            name: "Training".into(),
+            kind: "project".into(),
+            source_server_id: source.id.clone(),
+            source_path: "~/training".into(),
+            dataset_ids: vec![],
+            model_ids: vec![],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: target.id.clone(), path: "~/training-copy".into() }],
+        }).unwrap();
+        let mut synced_target = project.targets[0].clone();
+        synced_target.status = "synced".into();
+        synced_target.last_synced_at = Some(100);
+        db.update_project_checks(&project.id, true, true, 10, 1, Some(100), &[synced_target], "synced", None).unwrap();
+
+        let saved = db.save_project(ProjectDraft {
+            id: Some(project.id),
+            name: "Training".into(),
+            kind: "project".into(),
+            source_server_id: source.id,
+            source_path: "~/training/".into(),
+            dataset_ids: vec![],
+            model_ids: vec![],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: target.id, path: "~/training-copy/".into() }],
+        }).unwrap();
+
+        assert_eq!(saved.targets[0].status, "synced");
+        assert_eq!(saved.targets[0].last_synced_at, Some(100));
     }
 
     #[test]

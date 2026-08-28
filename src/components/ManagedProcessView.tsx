@@ -110,7 +110,7 @@ function currentUserSnapshot(snapshot: Snapshot, runs: ManagedRun[]) {
   }
 }
 
-export function ManagedProcessView({ servers, snapshots, projects, warnings, launchIntent, initialTab = 'running', onLaunchIntentConsumed, onDismissWarning, onOpenTerminal, onNotice, onRefreshServer, onExpectedProcessExit }: {
+export function ManagedProcessView({ servers, snapshots, projects, warnings, launchIntent, initialTab = 'running', onLaunchIntentConsumed, onDismissWarning, onOpenTerminal, onNotice, onRefreshServer }: {
   servers: Server[]
   snapshots: Record<string, Snapshot>
   projects: Project[]
@@ -122,7 +122,6 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
   onOpenTerminal: (serverId: string) => void
   onNotice: (message: string) => void
   onRefreshServer: (serverId: string) => Promise<void>
-  onExpectedProcessExit?: (serverId: string, pid: number, expected: boolean) => void
 }) {
   const [tab, setTab] = useState<ViewTab>(initialTab)
   const [profiles, setProfiles] = useState<LaunchProfile[]>(() => loadLaunchProfiles())
@@ -407,14 +406,12 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
     const target = pendingStop
     setPendingStop(null)
     setStoppingRunIds((current) => new Set(current).add(target.id))
-    onExpectedProcessExit?.(target.serverId, target.pid, true)
     try {
       await api.terminateProcess(target.serverId, target.pid)
       setRuns((current) => current.map((run) => run.id === target.id ? { ...run, status: 'stopped', endedAt: Math.floor(Date.now() / 1_000) } : run))
       onNotice(`已结束“${target.name}”`)
       await onRefreshServer(target.serverId)
     } catch (reason) {
-      onExpectedProcessExit?.(target.serverId, target.pid, false)
       onNotice(`结束任务失败：${String(reason).replace(/^Error:\s*/, '')}`)
     } finally {
       setStoppingRunIds((current) => { const next = new Set(current); next.delete(target.id); return next })
@@ -478,13 +475,11 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
     const key = `${server.id}:${group.rootPid}`
     setPendingUnmanagedStop(null)
     setStoppingUnmanagedKeys((current) => new Set(current).add(key))
-    onExpectedProcessExit?.(server.id, group.rootPid, true)
     try {
       await api.terminateProcess(server.id, group.rootPid)
       onNotice(`已结束未关联进程 PID ${group.rootPid}`)
       await onRefreshServer(server.id)
     } catch (reason) {
-      onExpectedProcessExit?.(server.id, group.rootPid, false)
       onNotice(`结束进程失败：${String(reason).replace(/^Error:\s*/, '')}`)
     } finally {
       setStoppingUnmanagedKeys((current) => { const next = new Set(current); next.delete(key); return next })
@@ -520,7 +515,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
             const terminating = stoppingRunIds.has(run.id)
             return <article className={`managed-run-row ${expanded ? 'is-expanded' : ''}${terminating ? ' is-terminating' : ''}`} key={run.id} aria-busy={terminating}>
               <button className="managed-run-disclosure" onClick={() => setExpandedRuns((current) => { const next = new Set(current); if (next.has(run.id)) next.delete(run.id); else next.add(run.id); return next })} aria-label={expanded ? '收起任务' : '展开任务'}>{expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</button>
-              <div className="managed-run-identity"><div><CircleDot size={13} /><strong>{run.name}</strong>{terminating ? <span className="managed-run-terminating" role="status"><LoaderCircle className="spin" size={11} />正在结束</span> : run.projectId && <span>项目任务</span>}</div><p>{profiles.find((profile) => profile.id === run.profileId)?.name ?? '临时任务'} · <code>{run.command}</code></p></div>
+              <div className="managed-run-identity"><div><CircleDot size={13} /><strong>{run.name}</strong>{terminating ? <span className="managed-run-terminating" role="status"><LoaderCircle className="spin" size={11} />正在结束</span> : run.projectId && <span>项目任务</span>}</div><p>{profiles.find((profile) => profile.id === run.profileId)?.name ?? '临时任务'} · <code title={run.command}>{run.command}</code></p></div>
               <div className="managed-run-placement"><strong>{run.gpuIndices.length ? `GPU ${run.gpuIndices.join(', ')}` : 'CPU'}</strong><small>{run.gpuIndices.length ? `${run.gpuIndices.length} 张 GPU` : '未使用 GPU'}</small></div>
               <dl className="managed-run-metrics">{run.gpuIndices.length ? <><div><dt>UTL</dt><dd>{utilization.toFixed(0)}%</dd></div><div><dt>MEM</dt><dd>{formatMemoryMb(memoryMb)}</dd></div><div><dt>SM</dt><dd>{sm.toFixed(0)}%</dd></div></> : <><div><dt>CPU</dt><dd>{observed.reduce((sum, process) => sum + process.cpuPercent, 0).toFixed(0)}%</dd></div><div><dt>内存</dt><dd>{formatMemoryMb(observed.reduce((sum, process) => sum + ('memoryUsedBytes' in process ? process.memoryUsedBytes / 1024 ** 2 : 0), 0))}</dd></div><div><dt>进程</dt><dd>{observed.length}</dd></div></>}<div><dt>运行</dt><dd>{relativeDuration(run.startedAt)}</dd></div></dl>
               <div className="managed-run-actions"><button className="icon-button" title="打开终端" disabled={terminating} onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={14} /></button><button className="icon-button" title="查看日志" disabled={terminating} onClick={() => void openLog(run)}><ScrollText size={14} /></button><button className="icon-button" title="重新启动" disabled={terminating} onClick={() => void restartRun(run)}><RotateCcw size={14} /></button><button className="icon-button is-danger" title={terminating ? '正在结束' : '结束任务'} disabled={terminating} onClick={() => setPendingStop(run)}>{terminating ? <LoaderCircle className="spin" size={13} /> : <Square size={12} fill="currentColor" />}</button><button className="icon-button" title="更多操作" disabled={terminating}><MoreHorizontal size={15} /></button></div>
