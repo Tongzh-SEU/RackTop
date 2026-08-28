@@ -1,0 +1,47 @@
+[package]
+name = "racktop"
+version = "1.25.2"
+description = "Live GPU & CPU monitoring for every server"
+authors = ["RackTop"]
+edition = "2024"
+default-run = "racktop"
+autobins = false
+
+[lib]
+name = "racktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+integration-probe = []
+
+[[bin]]
+name = "racktop"
+path = "src/main.rs"
+
+[[bin]]
+name = "racktop-probe"
+path = "src/bin/racktop-probe.rs"
+required-features = ["integration-probe"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "time", "rt-multi-thread", "macros", "io-util"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
+thiserror = "2"
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+base64 = "0.22"
+sha2 = "0.10"
+portable-pty = "0.9.0"
+
+[dev-dependencies]
+tempfile = "3"
