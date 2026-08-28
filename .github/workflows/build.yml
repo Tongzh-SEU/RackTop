@@ -6,19 +6,12 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-14
-            args: --target aarch64-apple-darwin --bundles app,dmg
-            rust-target: aarch64-apple-darwin
-          - platform: windows-latest
-            args: --bundles msi,nsis
-            rust-target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.platform }}
+  macos:
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,24 +20,108 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rust-target }}
+          targets: aarch64-apple-darwin
       - run: npm ci
-      - run: npm run build
+      - run: npm run test
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Import Apple Developer ID certificate
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          CONFIGURED_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          NOTARY_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            if [ -n "$APPLE_CERTIFICATE_PASSWORD$NOTARY_APPLE_ID$NOTARY_APPLE_PASSWORD$NOTARY_APPLE_TEAM_ID" ]; then
+              echo "Apple signing and notarization secrets are only partially configured." >&2
+              exit 1
+            fi
+            echo "No Apple certificate configured; the artifact will be marked unsigned."
+            echo "RACKTOP_MARK_UNSIGNED=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ -z "$APPLE_CERTIFICATE_PASSWORD" ] || [ -z "$NOTARY_APPLE_ID" ] \
+            || [ -z "$NOTARY_APPLE_PASSWORD" ] || [ -z "$NOTARY_APPLE_TEAM_ID" ]; then
+            echo "A certificate and all Apple notarization secrets must be configured together." >&2
+            exit 1
+          fi
+
+          CERTIFICATE_PATH="$RUNNER_TEMP/racktop-developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/racktop-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+          SIGNING_IDENTITY="$CONFIGURED_SIGNING_IDENTITY"
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+              | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)"
+          fi
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "No Developer ID Application identity was found in APPLE_CERTIFICATE." >&2
+            exit 1
+          fi
+          echo "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          echo "RACKTOP_MARK_UNSIGNED=0" >> "$GITHUB_ENV"
+
+      - name: Build, sign, notarize, and verify macOS DMG
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          RACKTOP_MACOS_TARGET: aarch64-apple-darwin
+        run: npm run bundle:macos
+
+      - name: Upload verified macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: racktop-macos-arm64
+          if-no-files-found: error
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.sha256
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.signing.txt
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - run: npm ci
+      - run: npm run test
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          args: ${{ matrix.args }}
+          args: --target x86_64-pc-windows-msvc --bundles msi,nsis
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: racktop-[platform]-[arch]-[bundle]
       - name: Smoke-test Windows installers
-        if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $msi = Get-ChildItem 'src-tauri/target/release/bundle/msi' -Filter '*.msi' | Select-Object -First 1
-          $nsis = Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter '*-setup.exe' | Select-Object -First 1
+          $msi = Get-ChildItem 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi' -Filter '*.msi' | Select-Object -First 1
+          $nsis = Get-ChildItem 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis' -Filter '*-setup.exe' | Select-Object -First 1
           if (-not $msi) { throw 'Windows build did not produce an MSI installer.' }
           if (-not $nsis) { throw 'Windows build did not produce an NSIS setup executable.' }
 

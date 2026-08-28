@@ -153,6 +153,7 @@ describe('ProjectForm focus management', () => {
       kind: 'dataset',
       syncOnSave: true,
       targets: [{ serverId: target.id, path: '~/datasets/target' }],
+      registeredTargets: [{ serverId: alternateTarget.id, path: '~/datasets/alternate' }],
     })
   })
 

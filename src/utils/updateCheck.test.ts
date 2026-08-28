@@ -17,6 +17,6 @@ describe('update checks', () => {
   it('hides only the ignored release and reappears for a newer release', () => {
     expect(shouldShowUpdateBadge('1.25.0', undefined)).toBe(true)
     expect(shouldShowUpdateBadge('1.25.0', '1.25.0')).toBe(false)
-    expect(shouldShowUpdateBadge('1.26.0', '1.25.0')).toBe(true)
+    expect(shouldShowUpdateBadge('1.25.2', '1.25.1')).toBe(true)
   })
 })

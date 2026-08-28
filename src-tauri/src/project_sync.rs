@@ -172,6 +172,10 @@ struct DirectoryDelta {
     payload_bytes: u64,
 }
 
+fn delta_can_sync_without_confirmation(delta: &DirectoryDelta) -> bool {
+    delta.replace_paths.is_empty() && delta.remove_paths.is_empty()
+}
+
 fn parse_directory_manifest(output: &str) -> Result<BTreeMap<String, ManifestEntry>, String> {
     let fields: Vec<&str> = output.split('\0').collect();
     let mut entries = BTreeMap::new();
@@ -380,7 +384,6 @@ find "$parent" -maxdepth 1 -mindepth 1 -type d -print 2>/dev/null | sort | while
   case "$base" in "$prefix"*) ;; *) continue ;; esac
   case "$prefix:$base" in .*:*) ;; *:.*) continue ;; esac
   case "$mode" in home) display="~/${{match#"$HOME"/}}" ;; relative) display="${{match#"$HOME"/}}" ;; *) display="$match" ;; esac
-  display="$display/"
   printf '__RACKTOP_SUGGEST__\t%s\n' "$display"
 done | head -n 12"#, query = shell_quote(query))
 }
@@ -435,7 +438,7 @@ pub async fn inspect(database: &Database, project: &Project) -> Result<Project, 
         let target_unchanged_since_sync = target.last_synced_at.is_some() && !target_changed_since_sync;
         targets.push(crate::models::ProjectTarget {
             server_id: target.server_id.clone(), path: check.suggested_path.clone(),
-            status: if paused { "paused".into() } else if check.error.is_some() { "offline".into() } else if !check.exists { "missing".into() } else if target_changed_since_sync { "conflict".into() } else if source_unchanged_since_sync && target_unchanged_since_sync { "synced".into() } else { "found".into() },
+            status: if paused { "paused".into() } else if check.error.is_some() { "offline".into() } else if !check.exists { "missing".into() } else if target.last_synced_at.is_some() && target_changed_since_sync { "conflict".into() } else if source_unchanged_since_sync && target_unchanged_since_sync { "synced".into() } else { "found".into() },
             exists: check.exists, is_directory: check.is_directory, size_bytes: check.size_bytes, file_count: check.file_count,
             modified_at: check.modified_at,
             last_checked_at: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64),
@@ -443,7 +446,7 @@ pub async fn inspect(database: &Database, project: &Project) -> Result<Project, 
             synced_target_size_bytes: target.synced_target_size_bytes, synced_target_file_count: target.synced_target_file_count, synced_target_modified_at: target.synced_target_modified_at,
             error: if paused {
                 target.error.clone()
-            } else if target_changed_since_sync {
+            } else if target.last_synced_at.is_some() && target_changed_since_sync {
                 Some(if target.last_synced_at.is_some() { "目标内容已在上次同步后修改".into() } else { "目标目录已有内容，首次同步需要确认".into() })
             } else { check.error },
         });
@@ -506,7 +509,7 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
         let expand_target = remote_home_expansion("target");
         let artifact_id = sync_artifact_id(project, &target_server, &target.path);
         let expected_target_signature = path_check_signature(&target_check_before);
-        let delta_plan = if source_check.is_directory && target_check_before.is_directory && target.last_synced_at.is_some() && !force {
+        let delta_plan = if source_check.is_directory && target_check_before.is_directory && !force {
             let (source_manifest_output, target_manifest_output) = tokio::try_join!(
                 remote_output(&source, source_password.as_deref(), directory_manifest_script(&source_check.suggested_path), 120),
                 remote_output(&target_server, target_password.as_deref(), directory_manifest_script(&target.path), 120),
@@ -524,7 +527,8 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
         let checkpoint_signature = sync_checkpoint_signature(&source_signature, &expected_target_signature);
         let checkpoint = remote_output(&target_server, target_password.as_deref(), resume_checkpoint_script(&target.path, &artifact_id), 20).await?;
         let resumable = target.status == "paused" && resume_checkpoint_offset(&checkpoint, &checkpoint_signature).is_some();
-        if target_check_before.exists && target_changed_since_sync(target, &target_check_before) && !force && !resumable {
+        let delta_is_additive_only = delta_plan.as_ref().is_some_and(|(delta, _)| delta_can_sync_without_confirmation(delta));
+        if target_check_before.exists && target_changed_since_sync(target, &target_check_before) && !force && !resumable && !delta_is_additive_only {
             return Err("__RACKTOP_CONFLICT__:目标目录已有内容或已在上次同步后修改".into());
         }
         if let Some((delta, _)) = &delta_plan {
@@ -644,7 +648,7 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{acquire_sync_target, directory_delta, parse_directory_manifest, path_check_signature, remote_home_expansion, resume_checkpoint_offset, shell_quote, suggestion_script, sync_checkpoint_signature, target_changed_since_sync, target_publish_script, targets_after_source_check};
+    use super::{acquire_sync_target, delta_can_sync_without_confirmation, directory_delta, parse_directory_manifest, path_check_signature, remote_home_expansion, resume_checkpoint_offset, shell_quote, suggestion_script, sync_checkpoint_signature, target_changed_since_sync, target_publish_script, targets_after_source_check};
     use crate::{models::{Project, ProjectDraft, ProjectPathCheck, ProjectTarget, ProjectTargetDraft, ServerDraft}, storage::Database};
     use std::{fs, process::Command, time::{Duration, SystemTime, UNIX_EPOCH}};
 
@@ -684,7 +688,7 @@ mod tests {
         let output = Command::new("sh").arg("-c").arg(suggestion_script(&query)).env("HOME", home.path()).output().unwrap();
         assert!(output.status.success());
         let suggestions = String::from_utf8(output.stdout).unwrap();
-        assert!(suggestions.contains(&format!("__RACKTOP_SUGGEST__\t{}/projects/", home.path().display())));
+        assert!(suggestions.contains(&format!("__RACKTOP_SUGGEST__\t{}/projects", home.path().display())));
         assert!(!suggestions.contains(".cache"));
         assert!(!suggestions.contains("~/"));
     }
@@ -713,6 +717,16 @@ mod tests {
     #[test]
     fn directory_delta_rejects_parent_paths() {
         assert!(parse_directory_manifest("../escape\0f\01\0100.0\0\0644\0").is_err());
+    }
+
+    #[test]
+    fn directory_delta_requires_confirmation_before_replacing_or_deleting_target_content() {
+        let source = parse_directory_manifest("keep.txt\0f\03\0100.0\0\0644\0new.txt\0f\05\0200.0\0\0644\0").unwrap();
+        let additive_target = parse_directory_manifest("keep.txt\0f\03\0100.0\0\0644\0").unwrap();
+        assert!(delta_can_sync_without_confirmation(&directory_delta(&source, &additive_target)));
+
+        let changed_target = parse_directory_manifest("keep.txt\0f\04\0300.0\0\0644\0target-only.txt\0f\01\0300.0\0\0644\0").unwrap();
+        assert!(!delta_can_sync_without_confirmation(&directory_delta(&source, &changed_target)));
     }
 
     #[test]

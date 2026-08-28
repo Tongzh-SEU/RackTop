@@ -23,16 +23,15 @@ export function ResourceTrend({ snapshot, kind, gpuUuid, title, animate }: { sna
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
-    const bucketSeconds = range > 3 ? 10 * 60 : 60
-    const refreshIntervalMs = range > 3 ? 5 * 60_000 : 60_000
-    const cacheKey = `${snapshot.serverId}:${range}:${bucketSeconds}`
+    const bucketSeconds = range > 3 ? 10 * 60 : undefined
+    const cacheKey = `${snapshot.serverId}:${range}:${bucketSeconds ?? 0}`
     const cached = getCachedTrendHistory(cacheKey)
     setPoints(cached ?? [])
     setLoading(!cached)
     setError(null)
-    const load = () => loadCachedTrendHistory(cacheKey, () => api.getHistory(snapshot.serverId, Math.floor(Date.now() / 1000) - range * 3600, bucketSeconds), refreshIntervalMs).then((value) => { if (!cancelled) setPoints(value) }).catch((reason) => { if (!cancelled) setError(String(reason)) }).finally(() => { if (!cancelled) setLoading(false) })
+    const load = () => loadCachedTrendHistory(cacheKey, () => api.getHistory(snapshot.serverId, Math.floor(Date.now() / 1000) - range * 3600, bucketSeconds)).then((value) => { if (!cancelled) setPoints(value) }).catch((reason) => { if (!cancelled) setError(String(reason)) }).finally(() => { if (!cancelled) setLoading(false) })
     void load()
-    const interval = window.setInterval(() => void load(), refreshIntervalMs)
+    const interval = window.setInterval(() => void load(), 30_000)
     return () => { cancelled = true; window.clearInterval(interval) }
   }, [range, snapshot.serverId])
   const mode = kind === 'cpu' ? (metric === 'utl' ? 'cpu' : 'systemMemory') : (metric === 'utl' ? 'gpu' : 'gpuMemory')

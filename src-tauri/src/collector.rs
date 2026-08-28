@@ -7,6 +7,44 @@ use std::os::windows::process::CommandExt;
 use tokio::{process::Command, time::{timeout, Duration}};
 
 const REMOTE_SCRIPT: &str = r#"export LANG=C LC_ALL=C;
+cleanup_marker="$HOME/.racktop/.cleanup-usercpu-redirection-v1";
+if [ ! -e "$cleanup_marker" ]; then
+  cleanup_lock="$HOME/.racktop/.cleanup-usercpu-redirection-v1.lock";
+  if mkdir -p "$HOME/.racktop" && chmod 700 "$HOME/.racktop" && mkdir "$cleanup_lock" 2>/dev/null; then
+    (
+      trap 'rmdir "$cleanup_lock" 2>/dev/null || true' EXIT HUP INT TERM;
+      cleanup_uid="$(id -u)";
+      cleanup_cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 0)";
+      case "$cleanup_cpu_count" in
+        ''|*[!0-9]*|0) ;;
+        *)
+          cleanup_expected="${cleanup_cpu_count}.00";
+          cleanup_expected_size=$((${#cleanup_expected} + 1));
+          cleanup_recovery="$HOME/.racktop/recovered-usercpu-redirection-v1";
+          if mkdir -p "$cleanup_recovery" && chmod 700 "$cleanup_recovery"; then
+            cleanup_complete=1;
+            for cleanup_candidate in "$HOME"/*; do
+              [ -f "$cleanup_candidate" ] && [ ! -L "$cleanup_candidate" ] || continue;
+              cleanup_name="${cleanup_candidate##*/}";
+              case "$cleanup_name" in ''|*[!0-9.]*|*.*.*|.*|*.) continue ;; esac;
+              cleanup_owner="$(stat -c %u "$cleanup_candidate" 2>/dev/null || printf '')";
+              cleanup_links="$(stat -c %h "$cleanup_candidate" 2>/dev/null || printf '')";
+              cleanup_size="$(stat -c %s "$cleanup_candidate" 2>/dev/null || printf '')";
+              [ "$cleanup_owner" = "$cleanup_uid" ] && [ "$cleanup_links" = 1 ] && [ "$cleanup_size" = "$cleanup_expected_size" ] || continue;
+              [ "$(cat "$cleanup_candidate" 2>/dev/null)" = "$cleanup_expected" ] || continue;
+              if [ -e "$cleanup_recovery/$cleanup_name" ]; then cleanup_complete=0; continue; fi;
+              mv "$cleanup_candidate" "$cleanup_recovery/$cleanup_name" || cleanup_complete=0;
+            done;
+            [ "$cleanup_complete" = 1 ] && touch "$cleanup_marker";
+          fi;
+          ;;
+      esac;
+    ) </dev/null >/dev/null 2>&1 &
+    cleanup_pid=$!;
+    command -v renice >/dev/null 2>&1 && renice 19 -p "$cleanup_pid" >/dev/null 2>&1 || true;
+    command -v ionice >/dev/null 2>&1 && ionice -c 3 -p "$cleanup_pid" >/dev/null 2>&1 || true;
+  fi;
+fi;
 if [ "${RACKTOP_REMOTE_HISTORY:-0}" = "1" ]; then mkdir -p "$HOME/.racktop" && touch "$HOME/.racktop/.client-heartbeat"; fi;
 printf '__RACKTOP_USER__\n'; id -un;
 uid_min="$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null)"; uid_min="${uid_min:-1000}";
@@ -37,7 +75,7 @@ if [ "${RACKTOP_INCLUDE_DISKS:-1}" = "1" ]; then
     printf '%s|%s|%s|%s|%s\n' "$mount" "$used" "$total" "$available" "$own";
   done | head -n 16;
 fi;
-printf '__RACKTOP_USERCPU__\n'; ps -u "$(id -un)" -o pcpu= 2>/dev/null | awk -v n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)" '{s+=$1} END {printf "%.2f\n", n>0?s/n:s+0}';
+printf '__RACKTOP_USERCPU__\n'; ps -u "$(id -un)" -o pcpu= 2>/dev/null | awk -v n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)" '{s+=$1} END {printf "%.2f\n", (n>0?s/n:s+0)}';
 printf '__RACKTOP_ACCELERATOR__\n';
 if command -v nvidia-smi >/dev/null 2>&1; then printf 'nvidia\n'; elif command -v npu-smi >/dev/null 2>&1; then printf 'ascend\n'; else printf 'nvidia\n'; fi;
 printf '__RACKTOP_NVIDIA__\n';
@@ -789,6 +827,40 @@ mod tests {
         assert!(REMOTE_SCRIPT.contains("used_gpu_memory"));
         assert!(REMOTE_SCRIPT.contains("used_memory"));
         assert!(REMOTE_SCRIPT.contains("query_gpu_processes \"-i $gpu_index\""));
+    }
+
+    #[test]
+    fn user_cpu_collection_cannot_be_parsed_as_an_awk_file_redirect() {
+        assert!(REMOTE_SCRIPT.contains("printf \"%.2f\\n\", (n>0?s/n:s+0)"));
+        assert!(!REMOTE_SCRIPT.contains("printf \"%.2f\\n\", n>0?s/n:s+0"));
+    }
+
+    #[test]
+    fn legacy_user_cpu_files_require_exact_content_before_recovery() {
+        assert!(REMOTE_SCRIPT.contains("cleanup_expected=\"${cleanup_cpu_count}.00\""));
+        assert!(REMOTE_SCRIPT.contains("[ \"$(cat \"$cleanup_candidate\" 2>/dev/null)\" = \"$cleanup_expected\" ]"));
+        assert!(REMOTE_SCRIPT.contains("[ ! -L \"$cleanup_candidate\" ]"));
+        assert!(REMOTE_SCRIPT.contains("[ \"$cleanup_links\" = 1 ]"));
+        assert!(REMOTE_SCRIPT.contains("mv \"$cleanup_candidate\" \"$cleanup_recovery/$cleanup_name\""));
+        assert!(!REMOTE_SCRIPT.contains("rm -f \"$cleanup_candidate\""));
+    }
+
+    #[test]
+    fn legacy_user_cpu_recovery_runs_once_without_blocking_collection() {
+        assert!(REMOTE_SCRIPT.contains("mkdir \"$cleanup_lock\" 2>/dev/null"));
+        assert!(REMOTE_SCRIPT.contains(") </dev/null >/dev/null 2>&1 &"));
+        assert!(REMOTE_SCRIPT.contains("renice 19 -p \"$cleanup_pid\""));
+        assert!(REMOTE_SCRIPT.contains("ionice -c 3 -p \"$cleanup_pid\""));
+        assert!(REMOTE_SCRIPT.contains("[ \"$cleanup_complete\" = 1 ] && touch \"$cleanup_marker\""));
+        assert!(REMOTE_SCRIPT.find(") </dev/null >/dev/null 2>&1 &").unwrap()
+            < REMOTE_SCRIPT.find("printf '__RACKTOP_USER__").unwrap());
+    }
+
+    #[test]
+    fn legacy_user_cpu_recovery_marks_an_empty_scan_complete() {
+        let loop_end = REMOTE_SCRIPT.find("[ \"$cleanup_complete\" = 1 ] && touch \"$cleanup_marker\"").unwrap();
+        assert!(REMOTE_SCRIPT[..loop_end].contains("cleanup_complete=1"));
+        assert!(!REMOTE_SCRIPT[..loop_end].contains("cleanup_found"));
     }
 
     #[test]

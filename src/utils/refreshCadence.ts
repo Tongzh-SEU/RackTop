@@ -5,11 +5,6 @@ export function shouldCollectDetailData(quiet: boolean, hasPreviousSnapshot: boo
   return !quiet || hasPreviousSnapshot
 }
 
-export function shouldIncludeProcesses(hasPreviousSnapshot: boolean, collectDetailData: boolean, quiet: boolean, fastStatusView: boolean, lastAttemptAtMs: number | undefined, nowMs: number, intervalSeconds: number): boolean {
-  if (!hasPreviousSnapshot) return true
-  return collectDetailData && (!quiet || fastStatusView || nowMs - (lastAttemptAtMs ?? 0) >= intervalSeconds * 1_000)
-}
-
 export function statusRefreshIntervalMs(fastStatusView: boolean, documentHidden: boolean, samplingIntervalSeconds: number, backgroundIntervalSeconds: number): number {
   if (documentHidden) return Math.max(samplingIntervalSeconds, backgroundIntervalSeconds) * 1_000
   return (fastStatusView ? FOREGROUND_STATUS_INTERVAL_MS : Math.max(1, samplingIntervalSeconds) * 1_000)
