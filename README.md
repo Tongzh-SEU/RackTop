@@ -1,14 +1,58 @@
+<div align="right">
+  🌐 Language:
+  <kbd><strong>✔简体中文</strong></kbd>
+  <a href="./README_EN.md"><kbd>English</kbd></a>
+</div>
+
 <p align="center">
-  <img src="docs/assets/readme/racktop-icon.png" alt="RackTop Logo" width="300" />
+  <img src="docs/assets/readme/racktop-icon.png" alt="RackTop macOS Logo" width="300" />
 </p>
 
-<h1 align="center">RackTop</h1>
+<h2 align="center">多台服务器，一个训练工作台</h2>
 
-<p align="center">多服务器 GPU 算力与训练任务工作台</p>
+<p align="center">
+  📊 查看算力、🔄 同步项目、🚀 启动任务，📈 并持续掌握运行状态。
+</p>
 
-RackTop 是面向个人研究者和小型团队的 GPU 服务器工作台。它把多台 Linux 服务器的算力状态、远程终端、项目资料和训练任务集中到一个桌面应用中，让你可以在启动任务前看清资源，在运行过程中持续掌握状态，在不同服务器之间保持项目资料一致。
+<p align="center">
+RackTop 是面向个人研究者和小型团队的 GPU 服务器桌面工作台，将分散在多台 Linux 服务器的算力状态、远程终端、项目资料和训练任务集中管理。
+启动前快速找到合适的 GPU，运行中持续掌握资源与进程状态，切换服务器时让项目、数据集和模型保持就绪。
+</p>
 
-RackTop 通过本机 OpenSSH 连接服务器，不要求在远程机器安装常驻 Agent。服务器、项目、数据集、模型和启动配置都保存在本地，连接信息和密钥由用户掌控。
+<p align="center">
+  <a href="https://github.com/Tongzh-SEU/RackTop/releases/latest"><img src="https://img.shields.io/github/v/release/Tongzh-SEU/RackTop?style=flat-square&logo=github&label=release" alt="Release"></a>
+  <a href="https://github.com/Tongzh-SEU/RackTop/stargazers"><img src="https://img.shields.io/github/stars/Tongzh-SEU/RackTop?style=flat-square&logo=github&label=stars" alt="GitHub Stars"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-1687b8?style=flat-square" alt="Platform">
+  <a href="https://github.com/Tongzh-SEU/RackTop/releases"><img src="https://img.shields.io/github/downloads/Tongzh-SEU/RackTop/total?style=flat-square&logo=github&label=downloads" alt="Downloads"></a>
+  <a href="https://github.com/Tongzh-SEU/RackTop/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-green?style=flat-square" alt="GPL-3.0 License"></a>
+</p>
+
+ 
+
+<p align="center">
+  <img src="docs/assets/readme/fleet-overview.png" alt="全局算力总览" width="33%">
+  <img src="docs/assets/readme/history-heatmap.png" alt="资源历史热力图" width="33%">
+  <img src="docs/assets/readme/idle-compute.png" alt="空闲算力筛选" width="33%">
+</p>
+
+## 下载
+
+当前稳定版：**v1.25.1**
+
+| 平台 | 安装包 | 下载 |
+| --- | --- | --- |
+| macOS Apple Silicon | `RackTop-1.25.1-macos-arm64.dmg` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.1/RackTop-1.25.1-macos-arm64.dmg) |
+| Windows x64 | `RackTop-1.25.1-windows-x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.1/RackTop-1.25.1-windows-x64-setup.exe) |
+
+更多版本见 [GitHub Releases](https://github.com/Tongzh-SEU/RackTop/releases)。
+macOS版本若首次打开时提示应用来源受限，请前往“系统设置 → 隐私与安全性”，确认允许打开该应用。
+Windows版本若提示“智能应用控制已阻止可能不安全的应用”，请在“设置”中搜索“智能应用控制”，并将其关闭。
+
+## 作者的话
+
+实验室服务器越来越多以后，项目之间的同步、任务运行和服务器状态查看会变得越来越麻烦。把这些事情交给 AI 做，往往又会浪费不少 token 和时间，所以我决定开发 RackTop，把这些重复的操作收进一个真正可操作的工具里。
+
+当然，开发这个 App 的过程本身也花了很多 token，笑死。至少现在，下一次启动任务时不用再从头解释一遍服务器、项目和命令了。
 
 ## 主要功能
 
@@ -20,12 +64,6 @@ RackTop 通过本机 OpenSSH 连接服务器，不要求在远程机器安装常
 - **运行状态与历史**：查看 RackTop 任务和外部进程、日志、资源监测、历史热力图，以及离线、高温、空闲和进程退出通知。
 - **安全连接**：支持 SSH Agent、密钥、密码、`~/.ssh/config`、ProxyJump 和 Host Key 指纹核验，不自动接受未知主机。
 
-
-## 作者的话
-
-实验室服务器越来越多以后，项目之间的同步、任务运行和服务器状态查看会变得越来越麻烦。把这些事情交给 AI 做，往往又会浪费不少 token 和时间，所以我决定开发 RackTop，把这些重复的操作收进一个真正可操作的工具里。
-
-当然，开发这个 App 的过程本身也花了很多 token，笑死。至少现在，下一次启动任务时不用再从头解释一遍服务器、项目和命令了。
 
 ## 安全与数据
 
