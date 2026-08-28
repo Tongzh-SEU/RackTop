@@ -37,7 +37,7 @@ Find the right GPU before launching a job, monitor resources and processes while
 
 Current stable release: **v1.25.2**
 
-| 平台 | 安装包 | 下载 |
+| Platform | Installer | Download |
 | --- | --- | --- |
 | macOS Apple Silicon | `RackTop-1.25.2-macos-arm64.dmg` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.2/RackTop-1.25.2-macos-arm64.dmg) |
 | Windows x64 | `RackTop-1.25.2-windows-x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.2/RackTop-1.25.2-windows-x64-setup.exe) |
