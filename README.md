@@ -20,16 +20,6 @@ RackTop 通过本机 OpenSSH 连接服务器，不要求在远程机器安装常
 - **运行状态与历史**：查看 RackTop 任务和外部进程、日志、资源监测、历史热力图，以及离线、高温、空闲和进程退出通知。
 - **安全连接**：支持 SSH Agent、密钥、密码、`~/.ssh/config`、ProxyJump 和 Host Key 指纹核验，不自动接受未知主机。
 
-## 下载
-
-当前稳定版：**v1.24.5**
-
-| 平台 | 安装包 | 下载 |
-| --- | --- | --- |
-| macOS Apple Silicon | `RackTop_1.24.5_macos-arm64.zip` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.24.5/RackTop_1.24.5_macos-arm64.zip) |
-| Windows x64 | `RackTop_1.24.5_x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.24.5/RackTop_1.24.5_x64-setup.exe) |
-
-更多版本和校验信息见 [GitHub Releases](https://github.com/Tongzh-SEU/RackTop/releases)。macOS 首次打开若提示来源限制，请在“系统设置 → 隐私与安全性”中确认打开。
 
 ## 作者的话
 
