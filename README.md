@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/readme/racktop-icon.png" alt="RackTop Logo" width="96" />
+  <img src="docs/assets/readme/racktop-icon.png" alt="RackTop Logo" width="300" />
 </p>
 
 <h1 align="center">RackTop</h1>
