@@ -9,8 +9,13 @@ pub mod storage;
 mod terminal;
 
 use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::collections::HashMap;
+#[cfg(target_os = "windows")]
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+#[cfg(target_os = "macos")]
+use std::fs::OpenOptions;
+#[cfg(target_os = "macos")]
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -225,10 +230,10 @@ fn reorder_servers(database: State<'_, Database>, server_ids: Vec<String>) -> Re
 }
 
 #[tauri::command]
-fn start_terminal(app: tauri::AppHandle, database: State<'_, Database>, terminals: State<'_, TerminalManager>, server_id: String, columns: u16, rows: u16, gpu_index: Option<u32>) -> Result<String, String> {
+fn start_terminal(app: tauri::AppHandle, database: State<'_, Database>, terminals: State<'_, TerminalManager>, server_id: String, columns: u16, rows: u16, gpu_index: Option<u32>, accelerator_vendor: Option<String>) -> Result<String, String> {
     let server = database.get_server(&server_id)?;
     let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
-    terminals.start(app, &server, password.as_deref(), columns, rows, gpu_index)
+    terminals.start(app, &server, password.as_deref(), columns, rows, gpu_index, accelerator_vendor.as_deref().unwrap_or("nvidia"))
 }
 
 #[tauri::command]
@@ -251,9 +256,26 @@ fn open_setup_terminal(script: String) -> Result<(), String> {
     if script.trim().is_empty() { return Err("启动配置命令为空".into()); }
     #[cfg(target_os = "macos")]
     {
-        let encoded = STANDARD.encode(script.as_bytes());
-        let command = format!("printf '%s' '{encoded}' | base64 -D | /bin/sh");
-        Command::new("osascript").args(["-e", &format!("tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{command}\"")]).spawn().map_err(|error| format!("无法打开 macOS Terminal：{error}"))?;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let script_path = std::env::temp_dir().join(format!(
+            "racktop-ssh-setup-{}-{}.sh",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_nanos(),
+        ));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&script_path)
+            .map_err(|error| format!("无法创建 macOS SSH 配置脚本：{error}"))?;
+        file.write_all(script.as_bytes()).map_err(|error| format!("无法写入 macOS SSH 配置脚本：{error}"))?;
+        file.sync_all().map_err(|error| format!("无法保存 macOS SSH 配置脚本：{error}"))?;
+
+        let path = shell_quote(script_path.to_string_lossy().as_ref());
+        let command = format!("clear; printf '%s\\n\\n' 'RackTop SSH 密钥快速配置'; cat {path}; printf '%s\\n\\n' '正在执行…'; /bin/sh {path}; status=$?; rm -f {path}; printf '\\n%s\\n' 'RackTop SSH 配置已结束。'; exit $status");
+        let apple_script_command = command.replace('\\', "\\\\").replace('"', "\\\"");
+        Command::new("osascript").args(["-e", &format!("tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{apple_script_command}\"")]).spawn().map_err(|error| format!("无法打开 macOS Terminal：{error}"))?;
     }
     #[cfg(target_os = "windows")]
     {
@@ -266,6 +288,10 @@ fn open_setup_terminal(script: String) -> Result<(), String> {
         Command::new("x-terminal-emulator").args(["-e", "sh", "-lc", &format!("{}; exec \"${{SHELL:-/bin/sh}}\"", script)]).spawn().map_err(|error| format!("无法打开系统终端：{error}"))?;
     }
     Ok(())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\\"'\\\"'"))
 }
 
 #[cfg(target_os = "windows")]
@@ -366,7 +392,7 @@ async fn get_history(app: AppHandle, server_id: String, from_timestamp: i64, buc
         let database = app.state::<Database>();
         match bucket_seconds.filter(|seconds| *seconds > 0) {
             Some(seconds) => database.get_compacted_history(&server_id, from_timestamp, seconds),
-            None => database.get_history(&server_id, from_timestamp),
+            None => database.get_recent_history(&server_id, from_timestamp),
         }
     }).await.map_err(|error| error.to_string())?
 }
@@ -562,10 +588,10 @@ async fn terminate_process(database: State<'_, Database>, server_id: String, pid
 }
 
 #[tauri::command]
-async fn launch_managed_run(database: State<'_, Database>, server_id: String, run_id: String, working_directory: String, command: String, gpu_indices: Vec<u32>, project_log_path: Option<String>) -> Result<ManagedRunLaunchResult, String> {
+async fn launch_managed_run(database: State<'_, Database>, server_id: String, run_id: String, working_directory: String, command: String, gpu_indices: Vec<u32>, project_log_path: Option<String>, accelerator_vendor: Option<String>) -> Result<ManagedRunLaunchResult, String> {
     let server = database.get_server(&server_id)?;
     let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
-    collector::launch_managed_run(&server, password.as_deref(), &run_id, &working_directory, &command, &gpu_indices, project_log_path.as_deref()).await
+    collector::launch_managed_run(&server, password.as_deref(), &run_id, &working_directory, &command, &gpu_indices, project_log_path.as_deref(), accelerator_vendor.as_deref().unwrap_or("nvidia")).await
 }
 
 #[tauri::command]
