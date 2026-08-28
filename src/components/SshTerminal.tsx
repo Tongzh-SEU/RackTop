@@ -6,10 +6,11 @@ import '@xterm/xterm/css/xterm.css'
 import { AlertCircle, RefreshCw, SquareTerminal, X } from 'lucide-react'
 import { api } from '../services/api'
 import { analyzeCudaCommand } from '../utils/cudaCommand'
+import { bracketTerminalPaste, isMultilineTerminalPaste, normalizeTerminalPaste } from '../utils/terminalPaste'
 
 interface TerminalEvent { sessionId: string; data?: string }
 
-export function SshTerminal({ serverId, serverName, gpuIndex, onNotice }: { serverId: string; serverName: string; gpuIndex?: number; onNotice?: (message: string) => void }) {
+export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor = 'nvidia', onNotice }: { serverId: string; serverName: string; gpuIndex?: number; acceleratorVendor?: 'nvidia' | 'ascend'; onNotice?: (message: string) => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<string | null>(null)
   const lineRef = useRef('')
@@ -50,6 +51,17 @@ export function SshTerminal({ serverId, serverName, gpuIndex, onNotice }: { serv
     })
 
     const send = (data: string) => { const id = sessionRef.current; if (id) void api.writeTerminal(id, data).catch((reason) => setError(String(reason))) }
+    const handlePaste = (event: ClipboardEvent) => {
+      const pasted = event.clipboardData?.getData('text/plain') ?? ''
+      if (!isMultilineTerminalPaste(pasted)) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      const normalized = normalizeTerminalPaste(pasted)
+      lineRef.current += normalized
+      send(bracketTerminalPaste(normalized))
+      onNotice?.(`已整体粘贴 ${normalized.split('\n').filter(Boolean).length} 行，按回车执行`)
+    }
+    containerRef.current.addEventListener('paste', handlePaste, true)
     const dataDisposable = terminal.onData((data) => {
       if (pendingEnterRef.current) return
       if (gpuIndex !== undefined && (data === '\r' || data === '\n')) {
@@ -65,7 +77,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, onNotice }: { serv
 
     const resize = new ResizeObserver(fitAndResize)
     resize.observe(containerRef.current)
-    void api.startTerminal(serverId, terminal.cols, terminal.rows, gpuIndex).then((id) => {
+    void api.startTerminal(serverId, terminal.cols, terminal.rows, gpuIndex, acceleratorVendor).then((id) => {
       if (disposed) { void api.closeTerminal(id); return }
       sessionRef.current = id
       setStatus('connected')
@@ -79,6 +91,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, onNotice }: { serv
       disposed = true
       if (fitFrame !== null) cancelAnimationFrame(fitFrame)
       resize.disconnect()
+      containerRef.current?.removeEventListener('paste', handlePaste, true)
       dataDisposable.dispose()
       void outputListener.then((unlisten) => unlisten())
       void exitListener.then((unlisten) => unlisten())
@@ -87,7 +100,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, onNotice }: { serv
       if (id) void api.closeTerminal(id)
       terminal.dispose()
     }
-  }, [gpuIndex, onNotice, restart, serverId])
+  }, [acceleratorVendor, gpuIndex, onNotice, restart, serverId])
 
   const confirmPending = (sendEnter: boolean) => {
     pendingEnterRef.current = false

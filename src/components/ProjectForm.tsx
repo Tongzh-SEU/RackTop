@@ -4,10 +4,11 @@ import type { LinkedProjectResourcePlan, Project, ProjectDraft, ProjectKind, Pro
 import { api } from '../services/api'
 import { defaultProjectTargetPath, isLegacyProjectNameTargetPath } from '../utils/projectPaths'
 
-export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
+export function ProjectForm({ initial, projects, servers, activeSyncTargets, onClose, onSave }: {
   initial?: Project | null
   projects: Project[]
   servers: Server[]
+  activeSyncTargets?: ReadonlySet<string>
   onClose: () => void
   onSave: (draft: ProjectDraft, syncAfterSave: boolean, linkedResources: LinkedProjectResourcePlan[]) => Promise<void>
 }) {
@@ -34,8 +35,11 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
   const [resourceSyncIds, setResourceSyncIds] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState<'save' | 'sync' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [nameInvalid, setNameInvalid] = useState(false)
+  const pathCheckGeneration = useRef(0)
   const resourceCheckGeneration = useRef(0)
   const sheetRef = useRef<HTMLElement>(null)
+  const nameInputRef = useRef<HTMLInputElement>(null)
   const manuallyEditedTargets = useRef(new Set(initial?.targets.filter((target) => !isLegacyProjectNameTargetPath(target.path, initial.sourcePath, initial.name)).map((target) => target.serverId) ?? []))
   const eligibleTargets = useMemo(() => servers.filter((server) => server.id !== draft.sourceServerId), [draft.sourceServerId, servers])
   const sourceServerMissing = Boolean(initial && !servers.some((server) => server.id === draft.sourceServerId))
@@ -117,7 +121,17 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
     const checks = resourceChecks[resource.id] ?? {}
     return resourceProbeDraft(resource).targets.filter((target) => {
       const check = checks[target.serverId]
-      return check && !check.exists && !check.error && check.matches.length === 0
+      const active = activeSyncTargets?.has(`${resource.id}:${target.serverId}`)
+        || resource.targets.some((item) => item.serverId === target.serverId && item.status === 'syncing')
+      return !active && check && !check.exists && !check.error && check.matches.length === 0
+    }).map((target) => ({ ...target, path: checks[target.serverId]?.suggestedPath ?? target.path }))
+  }
+
+  function registeredResourceTargets(resource: Project) {
+    const checks = resourceChecks[resource.id] ?? {}
+    return resourceProbeDraft(resource).targets.filter((target) => {
+      const check = checks[target.serverId]
+      return Boolean(check?.exists && !check.error && check.matches.length === 0)
     }).map((target) => ({ ...target, path: checks[target.serverId]?.suggestedPath ?? target.path }))
   }
 
@@ -161,7 +175,7 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
     let cancelled = false
     const timer = window.setTimeout(() => {
       if (!cancelled) void detectLinkedResources().catch(() => {})
-    }, 500)
+    }, 250)
     return () => { cancelled = true; window.clearTimeout(timer) }
     // Dependency checks intentionally follow relationship and target selection changes only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -178,15 +192,17 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
     }))
   }
 
-  async function detectPaths() {
-    if (!draft.name.trim() || !draft.sourceServerId || !draft.sourcePath.trim()) {
-      setError('请先填写名称、主服务器和主目录。')
+  async function detectPaths(silent = false) {
+    if (!draft.sourceServerId || !draft.sourcePath.trim()) {
+      if (!silent) setError('请先选择主服务器并填写主目录。')
       return
     }
+    const generation = ++pathCheckGeneration.current
     setChecking(true)
-    setError(null)
+    if (!silent) setError(null)
     try {
       const results = await api.probeProjectPaths(draft)
+      if (generation !== pathCheckGeneration.current) return
       setChecks(Object.fromEntries(results.map((result) => [result.serverId, result])))
       setDraft((current) => ({
         ...current,
@@ -196,8 +212,24 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
           return result?.exists ? { ...target, path: result.suggestedPath } : target
         }),
       }))
-    } catch (reason) { setError(String(reason)) } finally { setChecking(false) }
+    } catch (reason) {
+      if (generation === pathCheckGeneration.current && !silent) setError(String(reason))
+    } finally {
+      if (generation === pathCheckGeneration.current) setChecking(false)
+    }
   }
+
+  useEffect(() => {
+    if (!draft.sourceServerId || !draft.sourcePath.trim() || draft.targets.length === 0) {
+      pathCheckGeneration.current += 1
+      setChecking(false)
+      return
+    }
+    const timer = window.setTimeout(() => void detectPaths(true), 250)
+    return () => window.clearTimeout(timer)
+    // Path checks follow server, directory, and target selection changes only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.sourceServerId, draft.sourcePath, draft.targets.map((target) => `${target.serverId}:${target.path}`).join('|')])
 
   async function detectConfiguration() {
     await Promise.all([
@@ -208,6 +240,12 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
 
   async function submit(syncAfterSave: boolean, event?: FormEvent) {
     event?.preventDefault()
+    if (!draft.name.trim()) {
+      setNameInvalid(true)
+      setError(`请填写${draft.kind === 'project' ? '项目' : draft.kind === 'dataset' ? '数据集' : '模型'}名称。`)
+      nameInputRef.current?.focus()
+      return
+    }
     if (draft.targets.length === 0) { setError('至少选择一台目标服务器。'); return }
     const unsafe = [draft.sourcePath, ...draft.targets.map((target) => target.path)].find((path) => { const normalized = path.trim().replace(/\/+$/, ''); return !normalized || ['/', '~', '$HOME', '${HOME}', '.', '..'].includes(normalized) || normalized.split('/').includes('..') })
     if (unsafe) { setError('主目录和目标目录不能是根目录、Home 根目录或包含 ..'); return }
@@ -220,6 +258,7 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
         kind: resource.kind as 'dataset' | 'model',
         syncOnSave: syncAfterSave && resourceSyncIds.has(resource.id) && targets.length > 0,
         targets,
+        registeredTargets: registeredResourceTargets(resource),
       }
     })
     try { await onSave(draft, syncAfterSave, linkedResources) } catch (reason) { setError(String(reason)); setSaving(null) }
@@ -246,14 +285,17 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
         const targetChecks = draft.targets.map((target) => target.serverId === resource.sourceServerId
           ? { serverId: target.serverId, exists: true, matches: [], error: undefined } as Pick<ProjectPathCheck, 'serverId' | 'exists' | 'matches' | 'error'>
           : checks[target.serverId]).filter(Boolean)
-        const found = targetChecks.filter((check) => check?.exists).length
-        const candidates = targetChecks.filter((check) => !check?.exists && !check?.error && check?.matches.length === 1).length
-        const ambiguous = targetChecks.filter((check) => !check?.exists && !check?.error && (check?.matches.length ?? 0) > 1).length
-        const failed = targetChecks.filter((check) => Boolean(check?.error)).length
+        const targetIsSyncing = (serverId: string | undefined) => Boolean(serverId) && (activeSyncTargets?.has(`${resource.id}:${serverId}`)
+          || resource.targets.some((item) => item.serverId === serverId && item.status === 'syncing'))
+        const syncing = targetChecks.filter((check) => targetIsSyncing(check?.serverId)).length
+        const found = targetChecks.filter((check) => !targetIsSyncing(check?.serverId) && check?.exists).length
+        const candidates = targetChecks.filter((check) => !targetIsSyncing(check?.serverId) && !check?.exists && !check?.error && check?.matches.length === 1).length
+        const ambiguous = targetChecks.filter((check) => !targetIsSyncing(check?.serverId) && !check?.exists && !check?.error && (check?.matches.length ?? 0) > 1).length
+        const failed = targetChecks.filter((check) => !targetIsSyncing(check?.serverId) && Boolean(check?.error)).length
         const checked = targetChecks.length === draft.targets.length && !checkingResources
-        const missingCount = checked ? Math.max(0, draft.targets.length - found - candidates - ambiguous - failed) : 0
+        const missingCount = checked ? Math.max(0, draft.targets.length - syncing - found - candidates - ambiguous - failed) : 0
         const willSync = resourceSyncIds.has(resource.id) && missingCount > 0
-        const parts = [[found, '已存在'], [missingCount, '缺失'], [candidates, '候选待确认'], [ambiguous, '同名冲突'], [failed, '连接失败']].filter(([count]) => Number(count) > 0).map(([count, partLabel]) => `${count} 台${partLabel}`)
+        const parts = [[syncing, '正在同步'], [found, '已存在'], [missingCount, '缺失'], [candidates, '候选待确认'], [ambiguous, '同名冲突'], [failed, '连接失败']].filter(([count]) => Number(count) > 0).map(([count, partLabel]) => `${count} 台${partLabel}`)
         const status = !linked ? '未关联' : draft.targets.length === 0 ? '请先选择目标服务器' : checkingResources ? '正在检查…' : !checked ? '等待检查' : parts.join(' · ') || '等待检查'
         const problem = checked && (missingCount > 0 || candidates > 0 || ambiguous > 0 || failed > 0)
         return <div key={resource.id} className={`project-dataset-row${initial ? ' project-dataset-row--editing' : ''}${linked ? ' is-selected' : ''}`}>
@@ -271,7 +313,7 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
         <form className="project-form" onSubmit={(event) => void submit(false, event)}>
           <div className="project-form__body">
             <div className="project-identity-fields">
-              <label>名称<input required value={draft.name} placeholder={draft.kind === 'project' ? '例如：Llama 微调项目' : draft.kind === 'dataset' ? '例如：ImageNet-1K' : '例如：Llama-3-8B'} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} /></label>
+              <label className={nameInvalid ? 'field-error' : undefined}>名称<input ref={nameInputRef} aria-invalid={nameInvalid} value={draft.name} placeholder={draft.kind === 'project' ? '例如：Llama 微调项目' : draft.kind === 'dataset' ? '例如：ImageNet-1K' : '例如：Llama-3-8B'} onChange={(event) => { const name = event.target.value; setDraft((current) => ({ ...current, name })); if (name.trim()) { setNameInvalid(false); if (error?.includes('名称')) setError(null) } }} />{nameInvalid && <small className="field-error__message">{draft.kind === 'project' ? '项目' : draft.kind === 'dataset' ? '数据集' : '模型'}名称不能为空</small>}</label>
               <fieldset className="project-kind-field"><legend>类型</legend><div className="segmented project-kind-segmented"><button type="button" disabled={Boolean(initial)} className={draft.kind === 'project' ? 'is-selected' : ''} onClick={() => setKind('project')}><FolderGit2 size={13} />项目</button><button type="button" disabled={Boolean(initial)} className={draft.kind === 'dataset' ? 'is-selected' : ''} onClick={() => setKind('dataset')}><Database size={13} />数据集</button><button type="button" disabled={Boolean(initial)} className={draft.kind === 'model' ? 'is-selected' : ''} onClick={() => setKind('model')}><Box size={13} />模型</button></div></fieldset>
             </div>
             <section className="project-source-section" aria-label="同步来源">
@@ -293,7 +335,7 @@ export function ProjectForm({ initial, projects, servers, onClose, onSave }: {
             </div>
             {draft.kind === 'project' && renderResourceLinks('dataset')}
             {draft.kind === 'project' && renderResourceLinks('model')}
-            <p className="project-safety-note">主服务器是唯一来源。同步会将目标目录替换为完整副本；已有内容或后续修改必须先确认。</p>
+            <p className="project-safety-note">主服务器是唯一来源。新加入的目标会在“保存并同步”时替换为完整副本；已同步目标后续被修改时仍需确认。</p>
             {error && <p className="form-error" role="alert">{error}</p>}
           </div>
           <footer className="sheet__footer"><button type="button" className="button button--secondary" onClick={onClose} disabled={Boolean(saving)}>取消</button><button className="button button--secondary" type="submit" disabled={Boolean(saving)}><Check size={16} />{saving === 'save' ? '保存中…' : '保存'}</button><button className="button button--primary" type="button" disabled={Boolean(saving)} onClick={() => void submit(true)}><RefreshCw size={16} />{saving === 'sync' ? '正在准备…' : plannedResourceSummary ? `保存并同步（含 ${plannedResourceSummary}）` : '保存并同步'}</button></footer>

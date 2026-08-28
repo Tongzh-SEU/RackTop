@@ -4,7 +4,8 @@ import { isRackTopManagedIdentity, RACKTOP_MANAGED_IDENTITY_PATH, sshSetupTarget
 describe('SSH setup scripts', () => {
   it('renders a directly runnable macOS/Linux script with the current target', () => {
     const script = unixSshSetupScript({ username: 'tongzh', host: '10.0.0.1', port: 2222 })
-    expect(script).toContain('ssh-copy-id -o PreferredAuthentications=password -o PubkeyAuthentication=no -i "$KEY_PATH.pub" -p 2222 \'tongzh@10.0.0.1\'')
+    expect(script).toContain('cat "$KEY_PATH.pub" | ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no -o IdentitiesOnly=yes -p 2222 \'tongzh@10.0.0.1\'')
+    expect(script).not.toContain('\nssh-copy-id ')
     expect(script).toContain('KEY_PATH="$HOME/.ssh/racktop_ed25519"')
     expect(script).toContain('mkdir -p "$HOME/.ssh"')
     expect(script).toContain('set -eu')
@@ -13,6 +14,7 @@ describe('SSH setup scripts', () => {
     expect(script).toContain('__RACKTOP_SSH_READY__')
     expect(script).toContain('# 本机：')
     expect(script).toContain('# 远程：')
+    expect(script).toContain('ProxyCommand / ProxyJump')
   })
 
   it('renders a PowerShell script that performs the remote append through ssh', () => {

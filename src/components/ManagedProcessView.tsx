@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AlertCircle, Box, CheckCircle2, ChevronDown, ChevronRight, CircleDot, Database, FolderGit2, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, RotateCcw, Save, ScrollText, Server as ServerIcon, SlidersHorizontal, Square, TerminalSquare, Trash2, X } from 'lucide-react'
 import { api } from '../services/api'
-import type { LaunchProfile, ManagedRun, Project, Server, Snapshot } from '../types/models'
+import type { LaunchProfile, ManagedRun, ManagedRunRemoteStatus, Project, Server, Snapshot } from '../types/models'
 import { hasOtherUserGpuWorkload } from '../utils/gpu'
 import { currentUserProcessCount } from '../utils/processRelations'
 import { loadLaunchProfiles, loadManagedRuns, processBelongsToManagedRun, projectPathOnServer, projectWorkingDirectory, runIsObserved, runProcesses, saveLaunchProfiles, saveManagedRuns } from '../utils/managedRuns'
@@ -9,8 +9,19 @@ import type { MineProcessWarning } from '../utils/mineProcessWarnings'
 import { elapsedSeconds, isGpuProcess, unmanagedProcessGroups } from '../utils/unmanagedProcessGroups'
 import type { UnmanagedProcessGroup } from '../utils/unmanagedProcessGroups'
 import { normalizeLaunchCommand, parseTaskParameters, replaceLaunchContext, resolveProjectLogPath, updateLaunchParameter } from '../utils/launchCommand'
+import { acceleratorLabel } from '../utils/accelerator'
 
 type ViewTab = 'running' | 'profiles' | 'recent'
+
+export function managedRunAfterRemoteStatus(run: ManagedRun, status: ManagedRunRemoteStatus, now = Math.floor(Date.now() / 1_000)): ManagedRun {
+  if (status.status === 'running') return run.status === 'running' ? run : { ...run, status: 'running' }
+  if (status.status === 'exited') {
+    const nextStatus = status.exitCode === 0 ? 'completed' : 'failed'
+    if (run.status === nextStatus && run.exitCode === status.exitCode && run.endedAt) return run
+    return { ...run, status: nextStatus, exitCode: status.exitCode, endedAt: now }
+  }
+  return { ...run, status: 'failed', endedAt: now }
+}
 
 export function launchDependencyIssue(project: Project, projects: Project[], serverId: string) {
   for (const [kind, ids] of [['dataset', project.datasetIds], ['model', project.modelIds]] as const) {
@@ -146,7 +157,8 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
   const [pendingUnmanagedStop, setPendingUnmanagedStop] = useState<{ server: Server; group: UnmanagedProcessGroup } | null>(null)
   const [pendingAssociation, setPendingAssociation] = useState<{ server: Server; group: UnmanagedProcessGroup } | null>(null)
   const [associationProjectId, setAssociationProjectId] = useState('')
-  const [stopping, setStopping] = useState(false)
+  const [stoppingRunIds, setStoppingRunIds] = useState<Set<string>>(new Set())
+  const [stoppingUnmanagedKeys, setStoppingUnmanagedKeys] = useState<Set<string>>(new Set())
 
   useEffect(() => { saveLaunchProfiles(profiles) }, [profiles])
   useEffect(() => { saveManagedRuns(runs) }, [runs])
@@ -184,7 +196,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
   }, [launchIntent?.id, profiles, projects])
 
   useEffect(() => {
-    const active = runs.filter((run) => ['starting', 'running', 'unknown'].includes(run.status) && !runIsObserved(run, snapshots[run.serverId]) && Date.now() / 1_000 - run.startedAt > 12)
+    const active = runs.filter((run) => ['starting', 'running', 'unknown'].includes(run.status) && !runIsObserved(run, snapshots[run.serverId]) && Date.now() / 1_000 - run.startedAt > 2)
     if (active.length === 0) return
     let cancelled = false
     const check = async () => {
@@ -198,27 +210,15 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
         const next = current.map((run) => {
           const status = byId.get(run.id)
           if (!status) return run
-          if (status.status === 'running' && run.status !== 'running') {
-            changed = true
-            return { ...run, status: 'running' as const }
-          }
-          if (status.status === 'exited') {
-            const nextStatus = status.exitCode === 0 ? 'completed' as const : 'failed' as const
-            if (run.status === nextStatus && run.exitCode === status.exitCode && run.endedAt) return run
-            changed = true
-            return { ...run, status: nextStatus, exitCode: status.exitCode, endedAt: Math.floor(Date.now() / 1_000) }
-          }
-          if (status.status === 'unknown' && run.status !== 'unknown') {
-            changed = true
-            return { ...run, status: 'unknown' as const }
-          }
-          return run
+          const updated = managedRunAfterRemoteStatus(run, status)
+          if (updated !== run) changed = true
+          return updated
         })
         return changed ? next : current
       })
     }
     void check()
-    const interval = window.setInterval(check, 15_000)
+    const interval = window.setInterval(check, 5_000)
     return () => { cancelled = true; window.clearInterval(interval) }
   }, [runs, snapshots])
 
@@ -235,6 +235,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
 
   const selectedServer = servers.find((server) => server.id === selectedServerId)
   const selectedSnapshot = selectedServerId ? snapshots[selectedServerId] : undefined
+  const selectedAccelerator = selectedSnapshot ? acceleratorLabel(selectedSnapshot) : 'GPU'
   const selectedProject = projects.find((project) => project.id === launchProfile.projectId)
   const selectedProjectPath = selectedProject && selectedServerId ? projectWorkingDirectory(selectedProject, selectedServerId) : launchProfile.workingDirectory
   const launchServers = useMemo(() => servers.filter((server) => snapshots[server.id] && (!selectedProject || Boolean(projectPathOnServer(selectedProject, server.id)))), [selectedProject, servers, snapshots])
@@ -345,12 +346,12 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
     const server = servers.find((item) => item.id === selectedServerId)
     if (!server || !selectedSnapshot) { setLaunchError('请选择已连接的服务器。'); return }
     const gpuUuids = launchProfile.gpuCount > 0 ? selectedGpuUuids : []
-    if (gpuUuids.length !== launchProfile.gpuCount) { setLaunchError(`当前配置需要 ${launchProfile.gpuCount} 张 GPU。`); return }
+    if (gpuUuids.length !== launchProfile.gpuCount) { setLaunchError(`当前配置需要 ${launchProfile.gpuCount} 张 ${selectedAccelerator}。`); return }
     const gpus = gpuUuids.map((uuid) => selectedSnapshot.gpus.find((gpu) => gpu.uuid === uuid)).filter(Boolean) as Snapshot['gpus']
     const workingDirectory = selectedProject ? selectedProjectPath : profile.workingDirectory
     if (!workingDirectory) { setLaunchError('所选服务器上没有项目副本，请先在“我的项目”中配置同步目标。'); return }
     const normalizedCommand = normalizeLaunchCommand(profile.command)
-    if (!normalizedCommand.command) { setLaunchError('启动命令在移除目录、GPU 和后台包装后为空。请保留实际执行命令。'); return }
+    if (!normalizedCommand.command) { setLaunchError(`启动命令在移除目录、${selectedAccelerator} 和后台包装后为空。请保留实际执行命令。`); return }
     const preparedProfile = { ...profile, command: normalizedCommand.command }
     if (selectedProject) {
       const dependencyIssue = launchDependencyIssue(selectedProject, projects, server.id)
@@ -370,7 +371,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
       }
       const runId = crypto.randomUUID()
       const projectLogPath = profile.projectLogPath ? resolveProjectLogPath(profile.projectLogPath, profile.command) : null
-      const result = await api.launchManagedRun(server.id, runId, workingDirectory, preparedProfile.command, gpus.map((gpu) => gpu.index), projectLogPath)
+      const result = await api.launchManagedRun(server.id, runId, workingDirectory, preparedProfile.command, gpus.map((gpu) => gpu.index), projectLogPath, selectedSnapshot.acceleratorVendor)
       const run: ManagedRun = { id: runId, profileId: saveProfile ? profile.id : null, name: profile.name.trim() || '临时任务', projectId: profile.projectId, serverId: server.id, gpuUuids, gpuIndices: gpus.map((gpu) => gpu.index), workingDirectory, command: preparedProfile.command, pid: result.pid, logPath: result.logPath, startedAt: Math.floor(Date.now() / 1_000), status: 'starting' }
       setRuns((current) => [run, ...current])
       if (saveProfile) setProfiles((current) => [{ ...profile, updatedAt: Math.floor(Date.now() / 1_000) }, ...current.filter((item) => item.id !== profile.id)])
@@ -402,14 +403,19 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
 
   async function stopRun() {
     if (!pendingStop) return
-    setStopping(true)
+    const target = pendingStop
+    setPendingStop(null)
+    setStoppingRunIds((current) => new Set(current).add(target.id))
     try {
-      await api.terminateProcess(pendingStop.serverId, pendingStop.pid)
-      setRuns((current) => current.map((run) => run.id === pendingStop.id ? { ...run, status: 'stopped', endedAt: Math.floor(Date.now() / 1_000) } : run))
-      onNotice(`已结束“${pendingStop.name}”`)
-      await onRefreshServer(pendingStop.serverId)
-      setPendingStop(null)
-    } catch (reason) { onNotice(`结束任务失败：${String(reason).replace(/^Error:\s*/, '')}`) } finally { setStopping(false) }
+      await api.terminateProcess(target.serverId, target.pid)
+      setRuns((current) => current.map((run) => run.id === target.id ? { ...run, status: 'stopped', endedAt: Math.floor(Date.now() / 1_000) } : run))
+      onNotice(`已结束“${target.name}”`)
+      await onRefreshServer(target.serverId)
+    } catch (reason) {
+      onNotice(`结束任务失败：${String(reason).replace(/^Error:\s*/, '')}`)
+    } finally {
+      setStoppingRunIds((current) => { const next = new Set(current); next.delete(target.id); return next })
+    }
   }
 
   function openAssociation(server: Server, group: UnmanagedProcessGroup) {
@@ -465,17 +471,18 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
 
   async function stopUnmanagedProcess() {
     if (!pendingUnmanagedStop) return
-    setStopping(true)
     const { server, group } = pendingUnmanagedStop
+    const key = `${server.id}:${group.rootPid}`
+    setPendingUnmanagedStop(null)
+    setStoppingUnmanagedKeys((current) => new Set(current).add(key))
     try {
       await api.terminateProcess(server.id, group.rootPid)
       onNotice(`已结束未关联进程 PID ${group.rootPid}`)
       await onRefreshServer(server.id)
-      setPendingUnmanagedStop(null)
     } catch (reason) {
       onNotice(`结束进程失败：${String(reason).replace(/^Error:\s*/, '')}`)
     } finally {
-      setStopping(false)
+      setStoppingUnmanagedKeys((current) => { const next = new Set(current); next.delete(key); return next })
     }
   }
 
@@ -505,12 +512,13 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
             const memoryMb = gpuProcesses.reduce((sum, process) => sum + ('memoryUsedMb' in process ? process.memoryUsedMb : 0), 0)
             const sm = gpuProcesses.length ? gpuProcesses.reduce((sum, process) => sum + (process.smUtilization ?? 0), 0) / gpuProcesses.length : 0
             const expanded = expandedRuns.has(run.id)
-            return <article className={`managed-run-row ${expanded ? 'is-expanded' : ''}`} key={run.id}>
+            const terminating = stoppingRunIds.has(run.id)
+            return <article className={`managed-run-row ${expanded ? 'is-expanded' : ''}${terminating ? ' is-terminating' : ''}`} key={run.id} aria-busy={terminating}>
               <button className="managed-run-disclosure" onClick={() => setExpandedRuns((current) => { const next = new Set(current); if (next.has(run.id)) next.delete(run.id); else next.add(run.id); return next })} aria-label={expanded ? '收起任务' : '展开任务'}>{expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</button>
-              <div className="managed-run-identity"><div><CircleDot size={13} /><strong>{run.name}</strong>{run.projectId && <span>项目任务</span>}</div><p>{profiles.find((profile) => profile.id === run.profileId)?.name ?? '临时任务'} · <code>{run.command}</code></p></div>
+              <div className="managed-run-identity"><div><CircleDot size={13} /><strong>{run.name}</strong>{terminating ? <span className="managed-run-terminating" role="status"><LoaderCircle className="spin" size={11} />正在结束</span> : run.projectId && <span>项目任务</span>}</div><p>{profiles.find((profile) => profile.id === run.profileId)?.name ?? '临时任务'} · <code title={run.command}>{run.command}</code></p></div>
               <div className="managed-run-placement"><strong>{run.gpuIndices.length ? `GPU ${run.gpuIndices.join(', ')}` : 'CPU'}</strong><small>{run.gpuIndices.length ? `${run.gpuIndices.length} 张 GPU` : '未使用 GPU'}</small></div>
               <dl className="managed-run-metrics">{run.gpuIndices.length ? <><div><dt>UTL</dt><dd>{utilization.toFixed(0)}%</dd></div><div><dt>MEM</dt><dd>{formatMemoryMb(memoryMb)}</dd></div><div><dt>SM</dt><dd>{sm.toFixed(0)}%</dd></div></> : <><div><dt>CPU</dt><dd>{observed.reduce((sum, process) => sum + process.cpuPercent, 0).toFixed(0)}%</dd></div><div><dt>内存</dt><dd>{formatMemoryMb(observed.reduce((sum, process) => sum + ('memoryUsedBytes' in process ? process.memoryUsedBytes / 1024 ** 2 : 0), 0))}</dd></div><div><dt>进程</dt><dd>{observed.length}</dd></div></>}<div><dt>运行</dt><dd>{relativeDuration(run.startedAt)}</dd></div></dl>
-              <div className="managed-run-actions"><button className="icon-button" title="打开终端" onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={14} /></button><button className="icon-button" title="查看日志" onClick={() => void openLog(run)}><ScrollText size={14} /></button><button className="icon-button" title="重新启动" onClick={() => void restartRun(run)}><RotateCcw size={14} /></button><button className="icon-button is-danger" title="结束任务" onClick={() => setPendingStop(run)}><Square size={12} fill="currentColor" /></button><button className="icon-button" title="更多操作"><MoreHorizontal size={15} /></button></div>
+              <div className="managed-run-actions"><button className="icon-button" title="打开终端" disabled={terminating} onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={14} /></button><button className="icon-button" title="查看日志" disabled={terminating} onClick={() => void openLog(run)}><ScrollText size={14} /></button><button className="icon-button" title="重新启动" disabled={terminating} onClick={() => void restartRun(run)}><RotateCcw size={14} /></button><button className="icon-button is-danger" title={terminating ? '正在结束' : '结束任务'} disabled={terminating} onClick={() => setPendingStop(run)}>{terminating ? <LoaderCircle className="spin" size={13} /> : <Square size={12} fill="currentColor" />}</button><button className="icon-button" title="更多操作" disabled={terminating}><MoreHorizontal size={15} /></button></div>
               {expanded && <div className="managed-run-details"><dl><div><dt>工作目录</dt><dd><code>{run.workingDirectory}</code></dd></div><div><dt>任务根 PID</dt><dd><code>{run.pid}</code></dd></div><div><dt>日志</dt><dd><code>{run.logPath}</code></dd></div><div><dt>状态</dt><dd>{run.status === 'starting' ? '正在确认进程' : run.status === 'unknown' ? '等待远端确认' : '运行中'}</dd></div></dl>{observed.length > 0 ? <div className="managed-process-tree">{observed.map((process) => <div key={`${process.pid}-${'gpuUuid' in process ? process.gpuUuid : 'cpu'}`}><i /><code>PID {process.pid}</code><span>{process.command}</span><em>{'gpuIndex' in process ? `GPU ${process.gpuIndex}` : 'CPU'}</em></div>)}</div> : <p className="managed-run-waiting"><LoaderCircle className="spin" size={13} />等待下一次进程采样建立附属关系</p>}</div>}
             </article>
           })}</div>
@@ -524,12 +532,13 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
           <div className="managed-run-list unmanaged-run-list">{groups.map((group) => {
             const groupKey = `${server.id}:${group.rootPid}`
             const expanded = expandedUnmanaged.has(groupKey)
-            return <article className={`managed-run-row unmanaged-run-row ${expanded ? 'is-expanded' : ''}`} key={groupKey}>
+            const terminating = stoppingUnmanagedKeys.has(groupKey)
+            return <article className={`managed-run-row unmanaged-run-row ${expanded ? 'is-expanded' : ''}${terminating ? ' is-terminating' : ''}`} key={groupKey} aria-busy={terminating}>
               <button className="managed-run-disclosure" onClick={() => setExpandedUnmanaged((current) => { const next = new Set(current); if (next.has(groupKey)) next.delete(groupKey); else next.add(groupKey); return next })} aria-label={expanded ? '收起进程组' : '展开进程组'}>{expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</button>
-              <div className="managed-run-identity"><div><CircleDot size={13} /><strong title={group.root.command}>{group.root.command}</strong><span className="is-unmanaged">未关联</span></div><p>外部启动 · PID {group.rootPid} · {group.root.username}</p></div>
+              <div className="managed-run-identity"><div><CircleDot size={13} /><strong title={group.root.command}>{group.root.command}</strong>{terminating ? <span className="managed-run-terminating" role="status"><LoaderCircle className="spin" size={11} />正在结束</span> : <span className="is-unmanaged">未关联</span>}</div><p>外部启动 · PID {group.rootPid} · {group.root.username}</p></div>
               <div className="managed-run-placement"><strong>{group.gpuIndices.length ? `GPU ${group.gpuIndices.join(', ')}` : 'CPU'}</strong><small>{group.gpuIndices.length ? `${group.gpuIndices.length} 张 GPU` : '未使用 GPU'}</small></div>
               <dl className="managed-run-metrics"><div><dt>显存</dt><dd>{group.gpuIndices.length ? formatMemoryMb(group.gpuMemoryMb) : '—'}</dd></div><div><dt>CPU</dt><dd>{group.cpuPercent.toFixed(1)}%</dd></div><div><dt>{group.gpuIndices.length ? '进程' : '内存'}</dt><dd>{group.gpuIndices.length ? group.processes.length : formatMemoryMb(group.systemMemoryMb)}</dd></div><div><dt>运行</dt><dd>{group.elapsed}</dd></div></dl>
-              <div className="managed-run-actions unmanaged-run-actions"><button className="icon-button" title="关联项目" aria-label="关联项目" disabled={!projects.some((project) => project.kind === 'project')} onClick={() => openAssociation(server, group)}><FolderGit2 size={14} /></button><button className="icon-button" title="保存为启动配置" aria-label="保存为启动配置" onClick={() => saveUnmanagedProfile(group)}><Save size={14} /></button><button className="icon-button" title="打开终端" aria-label="打开终端" onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={14} /></button><button className="icon-button is-danger" title="结束进程" aria-label="结束进程" onClick={() => setPendingUnmanagedStop({ server, group })}><Square size={12} fill="currentColor" /></button></div>
+              <div className="managed-run-actions unmanaged-run-actions"><button className="icon-button" title="关联项目" aria-label="关联项目" disabled={terminating || !projects.some((project) => project.kind === 'project')} onClick={() => openAssociation(server, group)}><FolderGit2 size={14} /></button><button className="icon-button" title="保存为启动配置" aria-label="保存为启动配置" disabled={terminating} onClick={() => saveUnmanagedProfile(group)}><Save size={14} /></button><button className="icon-button" title="打开终端" aria-label="打开终端" disabled={terminating} onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={14} /></button><button className="icon-button is-danger" title={terminating ? '正在结束' : '结束进程'} aria-label={terminating ? '正在结束进程' : '结束进程'} disabled={terminating} onClick={() => setPendingUnmanagedStop({ server, group })}>{terminating ? <LoaderCircle className="spin" size={13} /> : <Square size={12} fill="currentColor" />}</button></div>
               {expanded && <div className="managed-run-details"><dl><div><dt>工作目录</dt><dd>未获取</dd></div><div><dt>根 PID</dt><dd><code>{group.rootPid}</code></dd></div><div><dt>日志</dt><dd>未获取</dd></div><div><dt>状态</dt><dd>未关联 · 运行中</dd></div></dl><div className="managed-process-tree">{group.processes.map((process) => <div key={`${process.pid}-${isGpuProcess(process) ? process.gpuUuid : 'cpu'}`}><i /><code>PID {process.pid}</code><span title={process.command}>{process.command}</span><em>{isGpuProcess(process) ? `GPU ${process.gpuIndex}` : 'CPU'}</em></div>)}</div></div>}
             </article>
           })}</div>
@@ -555,7 +564,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
             <button className={!profiles.some((profile) => profile.id === launchProfile.id) ? 'is-selected' : ''} onClick={() => { setLaunchProfile(defaultProfile(projects, launchProjectContextId)); setParametersOpen(false) }}><span>{launchProjectContextId ? '添加启动配置' : '临时任务'}</span><small>{launchProjectContextId ? '为当前项目创建模板' : '可选择保存配置'}</small></button>
           </aside>
           <div className="managed-launch-form">
-            <section><header><span>1</span><div><strong>任务与命令</strong><small>工作目录、GPU 与后台日志由 RackTop 统一处理。</small></div></header>
+            <section><header><span>1</span><div><strong>任务与命令</strong><small>工作目录、运行位置与后台日志由 RackTop 统一处理。</small></div></header>
               <div className="managed-launch-fields">
                 <label>配置名称<input value={launchProfile.name} onChange={(event) => updateLaunchProfile({ name: event.target.value })} /></label>
                 <label>关联项目<select value={launchProfile.projectId ?? ''} onChange={(event) => { const project = projects.find((item) => item.id === event.target.value); updateLaunchProfile({ projectId: project?.id ?? null, workingDirectory: project?.sourcePath ?? launchProfile.workingDirectory, datasetIds: project?.datasetIds ?? [] }); setLaunchProjectContextId(project?.id ?? null); setSelectedServerId('') }}><option value="">不关联项目</option>{projects.filter((project) => project.kind === 'project').map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label>
@@ -568,7 +577,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
                 {parametersOpen && <div className="managed-parameter-editor__list" id="managed-parameter-list"><div className="managed-parameter-editor__head"><span>名称</span><span>值</span></div>{launchParameters.map((parameter) => <div className="managed-parameter-editor__row" key={`${parameter.start}-${parameter.name}`}><code title={parameter.name}>{parameter.name}</code>{parameter.hasValue ? <input aria-label={`${parameter.name} 的值`} value={parameter.value} onChange={(event) => updateLaunchProfile({ command: updateLaunchParameter(launchProfile.command, parameter, event.target.value) })} /> : <label><input type="checkbox" checked onChange={(event) => updateLaunchProfile({ command: updateLaunchParameter(launchProfile.command, parameter, '', event.target.checked) })} />启用</label>}</div>)}</div>}
               </div>}
             </section>
-            <section><header><span>2</span><div><strong>运行位置</strong><small>{selectedProject ? '仅显示已配置当前项目的服务器。' : '自动推荐按空闲显存排序，也可以指定具体 GPU。'}</small></div></header><div className="managed-launch-server-list">{launchServers.map((server) => { const system = snapshots[server.id]?.system; const availableMemoryBytes = system?.memoryAvailableBytes ?? Math.max(0, (system?.memoryTotalBytes ?? 0) - (system?.memoryUsedBytes ?? 0)); return <button className={server.id === selectedServerId ? 'is-selected' : ''} key={server.id} onClick={() => { setSelectedServerId(server.id); setSelectedGpuUuids([]); setLaunchError(null) }}><span><i className={`server-row__status server-row__status--${server.status}`} /><strong>{server.name}</strong></span><small>{snapshots[server.id]?.gpus.length ?? 0} 张 GPU · {formatMemoryBytes(availableMemoryBytes).replace(' GB', '')} / {formatMemoryBytes(system?.memoryTotalBytes ?? 0)} 系统 MEM 可用</small></button>})}{launchServers.length === 0 && <p className="managed-launch-server-empty">当前没有已配置该项目且在线的服务器，请先在“我的项目”中配置同步目标。</p>}</div><div className="managed-assignment-mode"><button className={assignmentMode === 'automatic' ? 'is-selected' : ''} onClick={() => setAssignmentMode('automatic')}>自动推荐</button><button className={assignmentMode === 'manual' ? 'is-selected' : ''} onClick={() => setAssignmentMode('manual')}>指定 GPU</button></div><div className="managed-gpu-list">{availableGpus.map((gpu, index) => { const selected = selectedGpuUuids.includes(gpu.uuid); return <label className={selected ? 'is-selected' : ''} key={gpu.uuid}><input type="checkbox" checked={selected} disabled={assignmentMode === 'automatic'} onChange={(event) => setSelectedGpuUuids((current) => event.target.checked ? [...current, gpu.uuid] : current.filter((uuid) => uuid !== gpu.uuid))} /><span><strong>GPU {gpu.index}</strong><small>{((gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024).toFixed(1)} / {(gpu.memoryTotalMb / 1024).toFixed(1)} GB MEM 可用</small></span>{assignmentMode === 'automatic' && index < launchProfile.gpuCount && <em>推荐</em>}</label>})}{selectedServerId && availableGpus.length === 0 && <p>没有满足当前筛选条件的 GPU。</p>}</div><div className="managed-resource-fields"><label>GPU 数量<input type="number" min="0" max="16" value={launchProfile.gpuCount} onChange={(event) => updateLaunchProfile({ gpuCount: Math.max(0, Number(event.target.value) || 0) })} /></label><label>每卡最低空闲显存<input type="number" min="0" value={launchProfile.minimumGpuMemoryGb} onChange={(event) => updateLaunchProfile({ minimumGpuMemoryGb: Math.max(0, Number(event.target.value) || 0) })} /></label><label className="managed-resource-occupancy"><span>GPU 使用情况</span><span className="managed-resource-occupancy__control"><span>是否独占</span><input type="checkbox" checked={excludeOccupiedGpus} onChange={(event) => setExcludeOccupiedGpus(event.target.checked)} /></span></label></div></section>
+            <section><header><span>2</span><div><strong>运行位置</strong><small>{selectedProject ? '仅显示已配置当前项目的服务器。' : `自动推荐按空闲显存排序，也可以指定具体 ${selectedAccelerator}。`}</small></div></header><div className="managed-launch-server-list">{launchServers.map((server) => { const snapshot = snapshots[server.id]; const system = snapshot?.system; const accelerator = snapshot ? acceleratorLabel(snapshot) : 'GPU'; const availableMemoryBytes = system?.memoryAvailableBytes ?? Math.max(0, (system?.memoryTotalBytes ?? 0) - (system?.memoryUsedBytes ?? 0)); return <button className={server.id === selectedServerId ? 'is-selected' : ''} key={server.id} onClick={() => { setSelectedServerId(server.id); setSelectedGpuUuids([]); setLaunchError(null) }}><span><i className={`server-row__status server-row__status--${server.status}`} /><strong>{server.name}</strong></span><small>{snapshot?.gpus.length ?? 0} 张 {accelerator} · {formatMemoryBytes(availableMemoryBytes).replace(' GB', '')} / {formatMemoryBytes(system?.memoryTotalBytes ?? 0)} 系统 MEM 可用</small></button>})}{launchServers.length === 0 && <p className="managed-launch-server-empty">当前没有已配置该项目且在线的服务器，请先在“我的项目”中配置同步目标。</p>}</div><div className="managed-assignment-mode"><button className={assignmentMode === 'automatic' ? 'is-selected' : ''} onClick={() => setAssignmentMode('automatic')}>自动推荐</button><button className={assignmentMode === 'manual' ? 'is-selected' : ''} onClick={() => setAssignmentMode('manual')}>指定 {selectedAccelerator}</button></div><div className="managed-gpu-list">{availableGpus.map((gpu, index) => { const selected = selectedGpuUuids.includes(gpu.uuid); return <label className={selected ? 'is-selected' : ''} key={gpu.uuid}><input type="checkbox" checked={selected} disabled={assignmentMode === 'automatic'} onChange={(event) => setSelectedGpuUuids((current) => event.target.checked ? [...current, gpu.uuid] : current.filter((uuid) => uuid !== gpu.uuid))} /><span><strong>{selectedAccelerator} {gpu.index}</strong><small>{((gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024).toFixed(1)} / {(gpu.memoryTotalMb / 1024).toFixed(1)} GB MEM 可用</small></span>{assignmentMode === 'automatic' && index < launchProfile.gpuCount && <em>推荐</em>}</label>})}{selectedServerId && availableGpus.length === 0 && <p>没有满足当前筛选条件的 {selectedAccelerator}。</p>}</div><div className="managed-resource-fields"><label>{selectedAccelerator} 数量<input type="number" min="0" max="16" value={launchProfile.gpuCount} onChange={(event) => updateLaunchProfile({ gpuCount: Math.max(0, Number(event.target.value) || 0) })} /></label><label>每卡最低空闲显存<input type="number" min="0" value={launchProfile.minimumGpuMemoryGb} onChange={(event) => updateLaunchProfile({ minimumGpuMemoryGb: Math.max(0, Number(event.target.value) || 0) })} /></label><label className="managed-resource-occupancy"><span>{selectedAccelerator} 使用情况</span><span className="managed-resource-occupancy__control"><span>是否独占</span><input type="checkbox" checked={excludeOccupiedGpus} onChange={(event) => setExcludeOccupiedGpus(event.target.checked)} /></span></label></div></section>
             <section><header><span>3</span><div><strong>启动前检查</strong><small>项目、数据集和模型只在确实缺少副本时同步。</small></div></header><div className="managed-preflight"><div><CheckCircle2 size={15} /><span><strong>{selectedProject?.name ?? '临时命令'}</strong><small>{selectedProject ? selectedProjectPath || '所选服务器没有项目副本' : launchProfile.workingDirectory}</small></span></div>{selectedProject?.datasetIds.map((id) => { const dataset = projects.find((item) => item.id === id); const path = dataset && selectedServerId ? projectPathOnServer(dataset, selectedServerId) : ''; return dataset ? <div key={id}><Database size={15} /><span><strong>{dataset.name}</strong><small>{path || '所选服务器尚未配置数据集副本'}</small></span></div> : null })}{selectedProject?.modelIds.map((id) => { const model = projects.find((item) => item.id === id); const path = model && selectedServerId ? projectPathOnServer(model, selectedServerId) : ''; return model ? <div key={id}><Box size={15} /><span><strong>{model.name}</strong><small>{path || '所选服务器尚未配置模型副本'}</small></span></div> : null })}<label><input type="checkbox" checked={syncDependencies} onChange={(event) => setSyncDependencies(event.target.checked)} /><span><strong>启动前补齐待更新副本</strong><small>遇到冲突时停止启动，不覆盖远端修改。</small></span></label></div><pre className="managed-command-preview"><code>{replaceLaunchContext(launchProfile.command, selectedProjectPath || launchProfile.workingDirectory, selectedGpuIndices)}{'\n\n'}# RackTop 受管日志: ~/.racktop/runs/&lt;task-id&gt;/output.log{launchProfile.projectLogPath ? `\n# 同步到项目: ${resolveProjectLogPath(launchProfile.projectLogPath, launchProfile.command)}` : ''}</code></pre><label className="managed-save-profile"><input type="checkbox" checked={saveProfile} onChange={(event) => setSaveProfile(event.target.checked)} />启动后保存为启动配置</label>{launchError && <p className="form-error" role="alert">{launchError}</p>}</section>
           </div>
         </div>
@@ -580,7 +589,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
 
     {pendingAssociation && <div className="scrim"><section className="sheet managed-association-sheet" role="dialog" aria-modal="true" aria-labelledby="managed-association-title"><header className="sheet__header"><div><p className="eyebrow">关联项目</p><h2 id="managed-association-title">将外部进程纳入任务视图</h2></div><button className="icon-button" onClick={() => setPendingAssociation(null)} aria-label="关闭"><X size={17} /></button></header><div className="managed-association-body"><div><span>当前进程</span><strong>{pendingAssociation.group.root.command}</strong><small>{pendingAssociation.server.name} · 根 PID {pendingAssociation.group.rootPid}</small></div><label>关联项目<select value={associationProjectId} onChange={(event) => setAssociationProjectId(event.target.value)}><option value="">请选择项目</option>{projects.filter((project) => project.kind === 'project').map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label><p>进程的工作目录和日志无法从当前采样中确定，关联后未知字段会显示为“未获取”。</p></div><footer className="sheet__footer"><button className="button button--secondary" onClick={() => setPendingAssociation(null)}>取消</button><button className="button button--primary" onClick={associateProcess} disabled={!associationProjectId}><FolderGit2 size={13} />确认关联</button></footer></section></div>}
 
-    {pendingStop && <div className="scrim"><section className="sheet managed-stop-sheet" role="alertdialog" aria-modal="true"><header><span><Square size={15} fill="currentColor" /></span><div><p className="eyebrow">结束远程任务</p><h2>确认结束“{pendingStop.name}”？</h2></div></header><p>将结束任务根 PID {pendingStop.pid} 及其子进程。未保存的训练状态可能丢失。</p><footer><button className="button button--secondary" onClick={() => setPendingStop(null)} disabled={stopping}>取消</button><button className="button button--danger" onClick={() => void stopRun()} disabled={stopping}>{stopping ? <LoaderCircle className="spin" size={14} /> : <Square size={12} fill="currentColor" />}结束任务</button></footer></section></div>}
-    {pendingUnmanagedStop && <div className="scrim"><section className="sheet managed-stop-sheet" role="alertdialog" aria-modal="true"><header><span><Square size={15} fill="currentColor" /></span><div><p className="eyebrow">结束未关联进程</p><h2>确认结束 PID {pendingUnmanagedStop.group.rootPid}？</h2></div></header><p>将结束根 PID {pendingUnmanagedStop.group.rootPid} 及展开区中的子进程。该进程不由 RackTop 启动，不提供任务重启或任务日志。</p><footer><button className="button button--secondary" onClick={() => setPendingUnmanagedStop(null)} disabled={stopping}>取消</button><button className="button button--danger" onClick={() => void stopUnmanagedProcess()} disabled={stopping}>{stopping ? <LoaderCircle className="spin" size={14} /> : <Square size={12} fill="currentColor" />}结束进程</button></footer></section></div>}
+    {pendingStop && <div className="scrim"><section className="sheet managed-stop-sheet" role="alertdialog" aria-modal="true"><header><span><Square size={15} fill="currentColor" /></span><div><p className="eyebrow">结束远程任务</p><h2>确认结束“{pendingStop.name}”？</h2></div></header><p>将结束任务根 PID {pendingStop.pid} 及其子进程。未保存的训练状态可能丢失。</p><footer><button className="button button--secondary" onClick={() => setPendingStop(null)}>取消</button><button className="button button--danger" onClick={() => void stopRun()}><Square size={12} fill="currentColor" />结束任务</button></footer></section></div>}
+    {pendingUnmanagedStop && <div className="scrim"><section className="sheet managed-stop-sheet" role="alertdialog" aria-modal="true"><header><span><Square size={15} fill="currentColor" /></span><div><p className="eyebrow">结束未关联进程</p><h2>确认结束 PID {pendingUnmanagedStop.group.rootPid}？</h2></div></header><p>将结束根 PID {pendingUnmanagedStop.group.rootPid} 及展开区中的子进程。该进程不由 RackTop 启动，不提供任务重启或任务日志。</p><footer><button className="button button--secondary" onClick={() => setPendingUnmanagedStop(null)}>取消</button><button className="button button--danger" onClick={() => void stopUnmanagedProcess()}><Square size={12} fill="currentColor" />结束进程</button></footer></section></div>}
   </div>
 }

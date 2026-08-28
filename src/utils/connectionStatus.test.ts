@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canDisplayServerDetails, serverStatusAfterFailure, shouldShowConnectingOnAttempt } from './connectionStatus'
+import { canDisplayServerDetails, offlineFailureThreshold, serverStatusAfterFailure, serverStatusAfterSyncAwareFailure, shouldShowConnectingOnAttempt } from './connectionStatus'
 
 describe('connection status', () => {
   it('keeps initial retry waits blue and turns red after three consecutive failures', () => {
@@ -25,5 +25,14 @@ describe('connection status', () => {
     expect(canDisplayServerDetails('connecting')).toBe(false)
     expect(canDisplayServerDetails('offline')).toBe(false)
     expect(canDisplayServerDetails('unknown')).toBe(false)
+  })
+
+  it('keeps the last online snapshot through short collection stalls during project sync', () => {
+    expect(offlineFailureThreshold(false)).toBe(3)
+    expect(offlineFailureThreshold(true)).toBe(6)
+    expect(serverStatusAfterSyncAwareFailure('online', 3, true, true)).toBe('online')
+    expect(serverStatusAfterSyncAwareFailure('warning', 5, true, true)).toBe('warning')
+    expect(serverStatusAfterSyncAwareFailure('online', 6, true, true)).toBe('offline')
+    expect(serverStatusAfterSyncAwareFailure('online', 1, false, true)).toBe('connecting')
   })
 })

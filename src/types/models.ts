@@ -102,6 +102,7 @@ export interface Snapshot {
   osName: string
   timestamp: number
   status: ServerStatus
+  acceleratorVendor?: 'nvidia' | 'ascend'
   system: SystemMetric
   gpus: GpuMetric[]
   disks?: DiskMetric[]
@@ -190,6 +191,7 @@ export interface AppSettings {
   temperatureThresholdCelsius: number
   currentUserAccent: string
   theme: 'system' | 'light' | 'dark'
+  fontSize: 'standard' | 'large'
   menuBarMode: 'compact' | 'expanded'
   reduceMotion: boolean
   showAddServerGuide: boolean
@@ -352,6 +354,8 @@ export interface LinkedProjectResourcePlan {
   kind: 'dataset' | 'model'
   syncOnSave: boolean
   targets: Array<{ serverId: string; path: string }>
+  /** All verified replicas to register on the resource; `targets` remains the transfer list. */
+  registeredTargets?: Array<{ serverId: string; path: string }>
 }
 
 export interface ProjectPathCheck {

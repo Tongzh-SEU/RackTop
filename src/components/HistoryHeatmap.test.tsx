@@ -32,6 +32,14 @@ describe('HistoryHeatmaps', () => {
     expect(markup).toContain('GPU 1 MEM 每 3 小时平均值热力图')
   })
 
+  it('uses NPU labels for Ascend snapshots without changing NVIDIA labels', () => {
+    const ascendMarkup = renderToStaticMarkup(<HistoryHeatmaps snapshot={{ ...snapshot, acceleratorVendor: 'ascend' }} points={points} retentionDays={2} />)
+    const nvidiaMarkup = renderToStaticMarkup(<HistoryHeatmaps snapshot={{ ...snapshot, acceleratorVendor: 'nvidia' }} points={points} retentionDays={2} />)
+    expect(ascendMarkup).toContain('NPU 0 MEM 每 3 小时平均值热力图')
+    expect(ascendMarkup).not.toContain('GPU 0 MEM 每 3 小时平均值热力图')
+    expect(nvidiaMarkup).toContain('GPU 0 MEM 每 3 小时平均值热力图')
+  })
+
   it('uses a full-width responsive grid while preserving minimum cell size', () => {
     const markup = renderToStaticMarkup(<HistoryHeatmaps snapshot={snapshot} points={points} retentionDays={30} />)
     expect(markup).toContain('data-columns="30" data-rows="8"')

@@ -1,5 +1,6 @@
 #!/bin/sh
-set -eu
+set -e
+set -u
 umask 077
 
 state_dir="$HOME/.racktop"

@@ -1,6 +1,6 @@
 use crate::{collector, models::{Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult}, storage::Database};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, process::Stdio, sync::{atomic::{AtomicBool, Ordering}, Arc, LazyLock, Mutex}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::{BTreeMap, HashMap}, process::Stdio, sync::{atomic::{AtomicBool, Ordering}, Arc, LazyLock, Mutex}, time::{SystemTime, UNIX_EPOCH}};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Child, time::{timeout, Duration}};
 
 struct ActiveSyncEntry {
@@ -42,6 +42,14 @@ fn update_sync_progress(key: &str, transferred_bytes: u64, state: &str) {
         if let Some(entry) = targets.get_mut(key) {
             entry.progress.transferred_bytes = transferred_bytes;
             entry.progress.state = state.into();
+        }
+    }
+}
+
+fn update_sync_total(key: &str, total_bytes: u64) {
+    if let Ok(mut targets) = ACTIVE_SYNC_TARGETS.lock() {
+        if let Some(entry) = targets.get_mut(key) {
+            entry.progress.total_bytes = total_bytes;
         }
     }
 }
@@ -102,6 +110,23 @@ fn path_check_signature(check: &ProjectPathCheck) -> String {
     format!("{}:{}:{}:{}:{}", check.exists as u8, check.is_directory as u8, check.size_bytes, check.file_count, check.modified_at.unwrap_or_default())
 }
 
+fn sync_checkpoint_signature(source_signature: &str, target_signature: &str) -> String {
+    format!("v2:{source_signature}:{target_signature}")
+}
+
+fn resume_checkpoint_offset(output: &str, expected_signature: &str) -> Option<u64> {
+    output.lines().find_map(|line| {
+        let fields = line.strip_prefix("__RACKTOP_CHECKPOINT__\t")?.split_once('\t')?;
+        (fields.0 == expected_signature).then(|| fields.1.parse::<u64>().ok()).flatten()
+    })
+}
+
+fn resume_checkpoint_script(target_path: &str, artifact_id: &str) -> String {
+    let target_path = shell_quote(target_path);
+    let expand_target = remote_home_expansion("target");
+    format!(r#"target={target_path}; {expand_target}; parent="${{target%/*}}"; [ "$parent" = "$target" ] && parent="$HOME"; part="$parent/.racktop-sync-{artifact_id}.part"; meta="$parent/.racktop-sync-{artifact_id}.meta"; stored="$(cat "$meta" 2>/dev/null)"; offset="$(stat -c '%s' "$part" 2>/dev/null)"; printf '__RACKTOP_CHECKPOINT__\t%s\t%s\n' "$stored" "${{offset:-0}}""#)
+}
+
 fn target_changed_since_sync(target: &crate::models::ProjectTarget, check: &ProjectPathCheck) -> bool {
     if !check.exists {
         return target.last_synced_at.is_some();
@@ -128,6 +153,129 @@ fn target_publish_script(target_path: &str, artifact_id: &str, expected_target_s
     } else {
         format!(r#"target={target_path}; {expand_target}; parent="${{target%/*}}"; [ "$parent" = "$target" ] && parent="$HOME"; part="$parent/.racktop-sync-{artifact_id}.part"; meta="$parent/.racktop-sync-{artifact_id}.meta"; backup="$parent/.racktop-sync-{artifact_id}.backup"; published=0; cleanup() {{ code=$?; if [ "$published" = 0 ] && [ -e "$backup" ] && [ ! -e "$target" ]; then mv -- "$backup" "$target"; elif [ "$published" = 1 ]; then rm -rf -- "$backup"; fi; exit "$code"; }}; trap cleanup EXIT HUP INT TERM; cat >> "$part"; actual="$(stat -c '%s' "$part" 2>/dev/null)"; if [ "${{actual:-0}}" -ne {source_size} ]; then printf 'RackTop: 传输文件大小校验失败\n' >&2; exit 76; fi; {signature_guard} [ ! -e "$target" ] || mv -- "$target" "$backup"; mv -- "$part" "$target"; published=1; rm -rf -- "$backup"; rm -f -- "$meta""#)
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManifestEntry {
+    kind: String,
+    size: u64,
+    modified_at: String,
+    link_target: String,
+    mode: String,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct DirectoryDelta {
+    archive_paths: Vec<String>,
+    remove_paths: Vec<String>,
+    replace_paths: Vec<String>,
+    payload_bytes: u64,
+}
+
+fn delta_can_sync_without_confirmation(delta: &DirectoryDelta) -> bool {
+    delta.replace_paths.is_empty() && delta.remove_paths.is_empty()
+}
+
+fn parse_directory_manifest(output: &str) -> Result<BTreeMap<String, ManifestEntry>, String> {
+    let fields: Vec<&str> = output.split('\0').collect();
+    let mut entries = BTreeMap::new();
+    for record in fields.chunks(6) {
+        if record.len() < 6 || record[0].is_empty() { continue; }
+        let path = record[0];
+        if path.starts_with('/') || path.split('/').any(|part| part == "..") {
+            return Err("远端目录包含不安全的相对路径".into());
+        }
+        entries.insert(path.to_string(), ManifestEntry {
+            kind: record[1].to_string(),
+            size: record[2].parse().unwrap_or(0),
+            modified_at: record[3].split('.').next().unwrap_or(record[3]).to_string(),
+            link_target: record[4].to_string(),
+            mode: record[5].to_string(),
+        });
+    }
+    Ok(entries)
+}
+
+fn directory_delta(source: &BTreeMap<String, ManifestEntry>, target: &BTreeMap<String, ManifestEntry>) -> DirectoryDelta {
+    let mut delta = DirectoryDelta::default();
+    for (path, source_entry) in source {
+        let target_entry = target.get(path);
+        if target_entry == Some(source_entry) { continue; }
+        delta.archive_paths.push(path.clone());
+        if target_entry.is_some_and(|target_entry| target_entry.kind != source_entry.kind || source_entry.kind != "d") {
+            delta.replace_paths.push(path.clone());
+        }
+        if source_entry.kind == "f" { delta.payload_bytes = delta.payload_bytes.saturating_add(source_entry.size); }
+    }
+    delta.remove_paths = target.keys().filter(|path| !source.contains_key(*path)).cloned().collect();
+    delta.remove_paths.sort_by_key(|path| std::cmp::Reverse(path.matches('/').count()));
+    delta
+}
+
+fn nul_path_list(paths: &[String]) -> Vec<u8> {
+    let mut output = Vec::new();
+    for path in paths {
+        output.extend_from_slice(path.as_bytes());
+        output.push(0);
+    }
+    output
+}
+
+fn directory_delta_signature(delta: &DirectoryDelta, source: &BTreeMap<String, ManifestEntry>) -> String {
+    let mut digest = Sha256::new();
+    for path in &delta.archive_paths {
+        digest.update(b"archive\0");
+        digest.update(path.as_bytes());
+        if let Some(entry) = source.get(path) {
+            digest.update([0]);
+            digest.update(entry.kind.as_bytes());
+            digest.update([0]);
+            digest.update(entry.size.to_le_bytes());
+            digest.update(entry.modified_at.as_bytes());
+            digest.update([0]);
+            digest.update(entry.link_target.as_bytes());
+            digest.update([0]);
+            digest.update(entry.mode.as_bytes());
+        }
+    }
+    for path in &delta.remove_paths {
+        digest.update(b"remove\0");
+        digest.update(path.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+fn directory_manifest_script(path: &str) -> String {
+    let expand_root = remote_home_expansion("root");
+    format!(r#"root={}; {}; [ -d "$root" ] || exit 0; find "$root" -mindepth 1 -printf '%P\0%y\0%s\0%T@\0%l\0%m\0'"#, shell_quote(path), expand_root)
+}
+
+async fn remote_input(server: &crate::models::Server, password: Option<&str>, script: String, input: Vec<u8>, timeout_seconds: u64) -> Result<(), String> {
+    let (mut command, target) = collector::configured_ssh_command(server, password)?;
+    command.arg(target).arg(script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.kill_on_drop(true);
+    let mut child = command.spawn().map_err(|error| format!("无法启动系统 ssh：{error}"))?;
+    let mut stdin = child.stdin.take().ok_or("无法写入远端数据")?;
+    let writer = tokio::spawn(async move { stdin.write_all(&input).await.map_err(|error| error.to_string())?; stdin.shutdown().await.map_err(|error| error.to_string()) });
+    let output = timeout(Duration::from_secs(timeout_seconds), child.wait_with_output()).await.map_err(|_| format!("连接 {} 超时", server.name))?.map_err(|error| error.to_string())?;
+    writer.await.map_err(|error| error.to_string())??;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if error.is_empty() { format!("{} 写入增量清单失败", server.name) } else { error });
+    }
+    Ok(())
+}
+
+fn delta_list_write_script(target_path: &str, artifact_id: &str, suffix: &str) -> String {
+    let expand_target = remote_home_expansion("target");
+    format!(r#"target={}; {}; parent="${{target%/*}}"; [ "$parent" = "$target" ] && parent="$HOME"; mkdir -p "$parent"; cat > "$parent/.racktop-sync-{}.{}""#, shell_quote(target_path), expand_target, artifact_id, suffix)
+}
+
+fn target_delta_publish_script(target_path: &str, artifact_id: &str, expected_target_signature: &str) -> String {
+    let target_path = shell_quote(target_path);
+    let expand_target = remote_home_expansion("target");
+    let signature_guard = target_signature_guard(expected_target_signature);
+    format!(r#"target={target_path}; {expand_target}; parent="${{target%/*}}"; [ "$parent" = "$target" ] && parent="$HOME"; part="$parent/.racktop-sync-{artifact_id}.part"; meta="$parent/.racktop-sync-{artifact_id}.meta"; remove="$parent/.racktop-sync-{artifact_id}.remove"; replace="$parent/.racktop-sync-{artifact_id}.replace"; stage="$parent/.racktop-sync-{artifact_id}.stage"; backup="$parent/.racktop-sync-{artifact_id}.backup"; published=0; cleanup() {{ code=$?; rm -rf -- "$stage"; if [ "$published" = 0 ] && [ -e "$backup" ] && [ ! -e "$target" ]; then mv -- "$backup" "$target"; elif [ "$published" = 1 ]; then rm -rf -- "$backup"; fi; exit "$code"; }}; trap cleanup EXIT HUP INT TERM; cat >> "$part"; rm -rf -- "$stage"; mkdir -p "$stage"; [ ! -d "$target" ] || cp -al -- "$target"/. "$stage"/; (cd "$stage" && xargs -0 -r rm -rf -- < "$remove" && xargs -0 -r rm -rf -- < "$replace"); tar -xf "$part" -C "$stage"; {signature_guard} [ ! -e "$target" ] || mv -- "$target" "$backup"; mv -- "$stage" "$target"; published=1; rm -rf -- "$backup"; rm -f -- "$part" "$meta" "$remove" "$replace""#)
 }
 
 async fn stop_child(child: &mut Child) {
@@ -236,7 +384,6 @@ find "$parent" -maxdepth 1 -mindepth 1 -type d -print 2>/dev/null | sort | while
   case "$base" in "$prefix"*) ;; *) continue ;; esac
   case "$prefix:$base" in .*:*) ;; *:.*) continue ;; esac
   case "$mode" in home) display="~/${{match#"$HOME"/}}" ;; relative) display="${{match#"$HOME"/}}" ;; *) display="$match" ;; esac
-  display="$display/"
   printf '__RACKTOP_SUGGEST__\t%s\n' "$display"
 done | head -n 12"#, query = shell_quote(query))
 }
@@ -286,17 +433,20 @@ pub async fn inspect(database: &Database, project: &Project) -> Result<Project, 
         let source_unchanged_since_sync = target.synced_source_size_bytes == Some(source_check.size_bytes)
             && target.synced_source_file_count == Some(source_check.file_count)
             && target.synced_source_modified_at == source_check.modified_at;
-        let target_changed_since_sync = check.error.is_none() && check.exists && target_changed_since_sync(target, &check);
+        let paused = target.status == "paused";
+        let target_changed_since_sync = !paused && check.error.is_none() && check.exists && target_changed_since_sync(target, &check);
         let target_unchanged_since_sync = target.last_synced_at.is_some() && !target_changed_since_sync;
         targets.push(crate::models::ProjectTarget {
             server_id: target.server_id.clone(), path: check.suggested_path.clone(),
-            status: if check.error.is_some() { "offline".into() } else if !check.exists { "missing".into() } else if target_changed_since_sync { "conflict".into() } else if source_unchanged_since_sync && target_unchanged_since_sync { "synced".into() } else { "found".into() },
+            status: if paused { "paused".into() } else if check.error.is_some() { "offline".into() } else if !check.exists { "missing".into() } else if target.last_synced_at.is_some() && target_changed_since_sync { "conflict".into() } else if source_unchanged_since_sync && target_unchanged_since_sync { "synced".into() } else { "found".into() },
             exists: check.exists, is_directory: check.is_directory, size_bytes: check.size_bytes, file_count: check.file_count,
             modified_at: check.modified_at,
             last_checked_at: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64),
             last_synced_at: target.last_synced_at, synced_source_size_bytes: target.synced_source_size_bytes, synced_source_file_count: target.synced_source_file_count, synced_source_modified_at: target.synced_source_modified_at,
             synced_target_size_bytes: target.synced_target_size_bytes, synced_target_file_count: target.synced_target_file_count, synced_target_modified_at: target.synced_target_modified_at,
-            error: if target_changed_since_sync {
+            error: if paused {
+                target.error.clone()
+            } else if target.last_synced_at.is_some() && target_changed_since_sync {
                 Some(if target.last_synced_at.is_some() { "目标内容已在上次同步后修改".into() } else { "目标目录已有内容，首次同步需要确认".into() })
             } else { check.error },
         });
@@ -308,7 +458,7 @@ pub async fn inspect(database: &Database, project: &Project) -> Result<Project, 
 
 fn targets_after_source_check(project: &Project, source_check: &ProjectPathCheck) -> Vec<crate::models::ProjectTarget> {
     project.targets.iter().cloned().map(|mut target| {
-        if matches!(target.status.as_str(), "missing" | "offline" | "error" | "conflict") {
+        if matches!(target.status.as_str(), "syncing" | "paused" | "missing" | "offline" | "error" | "conflict") {
             return target;
         }
         let source_unchanged_since_sync = target.last_synced_at.is_some()
@@ -350,30 +500,57 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
         if !source_check.exists { return Err(source_check.error.unwrap_or_else(|| "主目录不存在".into())); }
         let target_check_before = check_path(&target_server, target_password.as_deref(), &target.path, &basename).await;
         if let Some(error) = target_check_before.error.clone() { return Err(error); }
-        if target_check_before.exists && target_changed_since_sync(target, &target_check_before) && !force {
-            return Err("__RACKTOP_CONFLICT__:目标目录已有内容或已在上次同步后修改".into());
-        }
         if source.host.eq_ignore_ascii_case(&target_server.host) && source.port == target_server.port && source.username == target_server.username {
             validate_same_server_paths(&source, source_password.as_deref(), &source_check.suggested_path, &target.path).await?;
         }
 
-        let (mut source_command, source_host) = collector::configured_ssh_command(&source, source_password.as_deref())?;
-        let (mut target_command, target_host) = collector::configured_ssh_command(&target_server, target_password.as_deref())?;
         let source_path = shell_quote(&source_check.suggested_path);
         let target_path = shell_quote(&target.path);
         let expand_target = remote_home_expansion("target");
         let artifact_id = sync_artifact_id(project, &target_server, &target.path);
-        let source_signature = format!("{}:{}:{}:{}", source_check.size_bytes, source_check.file_count, source_check.modified_at.unwrap_or_default(), source_check.is_directory as u8);
         let expected_target_signature = path_check_signature(&target_check_before);
-        let prepare_script = format!(r#"target={target_path}; {expand_target}; parent="${{target%/*}}"; [ "$parent" = "$target" ] && parent="$HOME"; [ "$target" != / ] && [ "$target" != "$HOME" ] || {{ printf 'RackTop: 不允许使用根目录或 Home 根目录\n' >&2; exit 64; }}; mkdir -p "$parent"; part="$parent/.racktop-sync-{artifact_id}.part"; meta="$parent/.racktop-sync-{artifact_id}.meta"; backup="$parent/.racktop-sync-{artifact_id}.backup"; [ -e "$target" ] || [ ! -e "$backup" ] || mv -- "$backup" "$target"; signature={signature}; stored="$(cat "$meta" 2>/dev/null)"; if [ "$stored" != "$signature" ]; then rm -f -- "$part"; printf '%s' "$signature" > "$meta"; fi; offset="$(stat -c '%s' "$part" 2>/dev/null)"; offset="${{offset:-0}}"; if [ {source_is_directory} -eq 0 ] && [ "$offset" -gt {source_size} ]; then rm -f -- "$part"; offset=0; fi; available_kb="$(df -Pk "$parent" | awk 'NR==2 {{print $4}}')"; existing_kb=0; [ -e "$target" ] && existing_kb="$(du -sk "$target" 2>/dev/null | awk '{{print $1}}')"; required_kb=$((({source_size} * 2 + 1023) / 1024 + existing_kb + 65536 - offset / 1024)); [ "$required_kb" -lt 65536 ] && required_kb=65536; if [ "${{available_kb:-0}}" -lt "$required_kb" ]; then printf 'RackTop: 目标磁盘空间不足，需要约 %s KB，可用 %s KB\n' "$required_kb" "${{available_kb:-0}}" >&2; exit 73; fi; printf '__RACKTOP_OFFSET__\t%s\n' "$offset""#, artifact_id = artifact_id, signature = shell_quote(&source_signature), source_size = source_check.size_bytes, source_is_directory = source_check.is_directory as u8);
+        let delta_plan = if source_check.is_directory && target_check_before.is_directory && !force {
+            let (source_manifest_output, target_manifest_output) = tokio::try_join!(
+                remote_output(&source, source_password.as_deref(), directory_manifest_script(&source_check.suggested_path), 120),
+                remote_output(&target_server, target_password.as_deref(), directory_manifest_script(&target.path), 120),
+            )?;
+            let source_manifest = parse_directory_manifest(&source_manifest_output)?;
+            let target_manifest = parse_directory_manifest(&target_manifest_output)?;
+            let delta = directory_delta(&source_manifest, &target_manifest);
+            let signature = directory_delta_signature(&delta, &source_manifest);
+            Some((delta, signature))
+        } else { None };
+        if delta_plan.as_ref().is_some_and(|(delta, _)| delta.archive_paths.is_empty() && delta.remove_paths.is_empty()) {
+            return Ok((0, source_check.size_bytes, source_check.file_count, source_check.modified_at));
+        }
+        let source_signature = format!("{}:{}:{}:{}:{}", source_check.size_bytes, source_check.file_count, source_check.modified_at.unwrap_or_default(), source_check.is_directory as u8, delta_plan.as_ref().map(|(_, signature)| signature.as_str()).unwrap_or("full"));
+        let checkpoint_signature = sync_checkpoint_signature(&source_signature, &expected_target_signature);
+        let checkpoint = remote_output(&target_server, target_password.as_deref(), resume_checkpoint_script(&target.path, &artifact_id), 20).await?;
+        let resumable = target.status == "paused" && resume_checkpoint_offset(&checkpoint, &checkpoint_signature).is_some();
+        let delta_is_additive_only = delta_plan.as_ref().is_some_and(|(delta, _)| delta_can_sync_without_confirmation(delta));
+        if target_check_before.exists && target_changed_since_sync(target, &target_check_before) && !force && !resumable && !delta_is_additive_only {
+            return Err("__RACKTOP_CONFLICT__:目标目录已有内容或已在上次同步后修改".into());
+        }
+        if let Some((delta, _)) = &delta_plan {
+            remote_input(&target_server, target_password.as_deref(), delta_list_write_script(&target.path, &artifact_id, "remove"), nul_path_list(&delta.remove_paths), 60).await?;
+            remote_input(&target_server, target_password.as_deref(), delta_list_write_script(&target.path, &artifact_id, "replace"), nul_path_list(&delta.replace_paths), 60).await?;
+        }
+        let payload_size = delta_plan.as_ref().map(|(delta, _)| delta.payload_bytes).unwrap_or(source_check.size_bytes);
+        update_sync_total(&target_key, payload_size.max(1));
+        let prepare_script = format!(r#"target={target_path}; {expand_target}; parent="${{target%/*}}"; [ "$parent" = "$target" ] && parent="$HOME"; [ "$target" != / ] && [ "$target" != "$HOME" ] || {{ printf 'RackTop: 不允许使用根目录或 Home 根目录\n' >&2; exit 64; }}; mkdir -p "$parent"; part="$parent/.racktop-sync-{artifact_id}.part"; meta="$parent/.racktop-sync-{artifact_id}.meta"; backup="$parent/.racktop-sync-{artifact_id}.backup"; [ -e "$target" ] || [ ! -e "$backup" ] || mv -- "$backup" "$target"; signature={signature}; stored="$(cat "$meta" 2>/dev/null)"; if [ "$stored" != "$signature" ]; then rm -f -- "$part"; printf '%s' "$signature" > "$meta"; fi; offset="$(stat -c '%s' "$part" 2>/dev/null)"; offset="${{offset:-0}}"; if [ {source_is_directory} -eq 0 ] && [ "$offset" -gt {source_size} ]; then rm -f -- "$part"; offset=0; fi; available_kb="$(df -Pk "$parent" | awk 'NR==2 {{print $4}}')"; required_kb=$((({payload_size} * 2 + 1023) / 1024 + 65536 - offset / 1024)); [ "$required_kb" -lt 65536 ] && required_kb=65536; if [ "${{available_kb:-0}}" -lt "$required_kb" ]; then printf 'RackTop: 目标磁盘空间不足，需要约 %s KB，可用 %s KB\n' "$required_kb" "${{available_kb:-0}}" >&2; exit 73; fi; printf '__RACKTOP_OFFSET__\t%s\n' "$offset""#, artifact_id = artifact_id, signature = shell_quote(&checkpoint_signature), source_size = source_check.size_bytes, payload_size = payload_size, source_is_directory = source_check.is_directory as u8);
         let prepared = remote_output(&target_server, target_password.as_deref(), prepare_script, 20).await?;
         let resume_offset = prepared.lines().find_map(|line| line.strip_prefix("__RACKTOP_OFFSET__\t")).and_then(|value| value.parse::<u64>().ok()).unwrap_or(0);
         set_sync_resume_offset(&target_key, resume_offset);
         update_sync_progress(&target_key, resume_offset, "transferring");
-        let source_stream = if source_check.is_directory { format!("cd {source_path} && tar --sort=name -cf - .") } else { format!("cat -- {source_path}") };
+        let source_input = delta_plan.as_ref().map(|(delta, _)| nul_path_list(&delta.archive_paths));
+        let source_stream = if delta_plan.is_some() {
+            format!("cd {source_path} && tar --sort=name --no-recursion --verbatim-files-from --null -T - -cf -")
+        } else if source_check.is_directory { format!("cd {source_path} && tar --sort=name -cf - .") } else { format!("cat -- {source_path}") };
         let source_script = if resume_offset > 0 { format!("{source_stream} | tail -c +{}", resume_offset.saturating_add(1)) } else { source_stream };
-        let target_script = target_publish_script(&target.path, &artifact_id, &expected_target_signature, source_check.is_directory, source_check.size_bytes);
-        source_command.arg(source_host).arg(source_script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let target_script = if delta_plan.is_some() { target_delta_publish_script(&target.path, &artifact_id, &expected_target_signature) } else { target_publish_script(&target.path, &artifact_id, &expected_target_signature, source_check.is_directory, source_check.size_bytes) };
+        let (mut source_command, source_host) = collector::configured_ssh_command(&source, source_password.as_deref())?;
+        let (mut target_command, target_host) = collector::configured_ssh_command(&target_server, target_password.as_deref())?;
+        source_command.arg(source_host).arg(source_script).stdin(if source_input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
         target_command.arg(target_host).arg(target_script).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
         source_command.kill_on_drop(true);
         target_command.kill_on_drop(true);
@@ -387,6 +564,10 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
             let mut target_stderr = target_child.stderr.take().ok_or("无法读取目标服务器错误信息")?;
             let source_stderr_task = tokio::spawn(async move { let mut value = Vec::new(); let _ = source_stderr.read_to_end(&mut value).await; value });
             let target_stderr_task = tokio::spawn(async move { let mut value = Vec::new(); let _ = target_stderr.read_to_end(&mut value).await; value });
+            let source_input_task = if let Some(input) = source_input {
+                let mut stdin = source_child.stdin.take().ok_or("无法发送增量文件清单")?;
+                Some(tokio::spawn(async move { stdin.write_all(&input).await.map_err(|error| error.to_string())?; stdin.shutdown().await.map_err(|error| error.to_string()) }))
+            } else { None };
             update_sync_progress(&target_key, resume_offset, "transferring");
             let transfer_result: Result<(u64, std::process::ExitStatus, std::process::ExitStatus), String> = async {
                 let mut transferred = resume_offset;
@@ -419,6 +600,7 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
                 update_sync_progress(&target_key, transferred, "publishing");
                 let source_status = wait_child_with_cancel(&mut source_child, &cancel_signal).await?;
                 let target_status = wait_child_with_cancel(&mut target_child, &cancel_signal).await?;
+                if let Some(task) = source_input_task { task.await.map_err(|error| error.to_string())??; }
                 Ok((transferred, source_status, target_status))
             }.await;
             if transfer_result.is_err() {
@@ -466,7 +648,7 @@ pub async fn sync(database: &Database, project: &Project, target_server_id: &str
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{acquire_sync_target, path_check_signature, remote_home_expansion, shell_quote, suggestion_script, target_changed_since_sync, target_publish_script, targets_after_source_check};
+    use super::{acquire_sync_target, delta_can_sync_without_confirmation, directory_delta, parse_directory_manifest, path_check_signature, remote_home_expansion, resume_checkpoint_offset, shell_quote, suggestion_script, sync_checkpoint_signature, target_changed_since_sync, target_publish_script, targets_after_source_check};
     use crate::{models::{Project, ProjectDraft, ProjectPathCheck, ProjectTarget, ProjectTargetDraft, ServerDraft}, storage::Database};
     use std::{fs, process::Command, time::{Duration, SystemTime, UNIX_EPOCH}};
 
@@ -506,7 +688,7 @@ mod tests {
         let output = Command::new("sh").arg("-c").arg(suggestion_script(&query)).env("HOME", home.path()).output().unwrap();
         assert!(output.status.success());
         let suggestions = String::from_utf8(output.stdout).unwrap();
-        assert!(suggestions.contains(&format!("__RACKTOP_SUGGEST__\t{}/projects/", home.path().display())));
+        assert!(suggestions.contains(&format!("__RACKTOP_SUGGEST__\t{}/projects", home.path().display())));
         assert!(!suggestions.contains(".cache"));
         assert!(!suggestions.contains("~/"));
     }
@@ -519,6 +701,32 @@ mod tests {
         drop(second_path);
         drop(first);
         assert!(acquire_sync_target("server:path".into(), "project", "server", 100).is_ok());
+    }
+
+    #[test]
+    fn directory_delta_transfers_only_changes_and_tracks_deletions() {
+        let source = parse_directory_manifest("keep.txt\0f\03\0100.123\0\0644\0changed.txt\0f\05\0200.0\0\0644\0folder\0d\00\0300.0\0\0755\0folder/new.txt\0f\07\0300.0\0\0644\0").unwrap();
+        let target = parse_directory_manifest("keep.txt\0f\03\0100.999\0\0644\0changed.txt\0f\04\0100.0\0\0644\0folder\0d\00\0100.0\0\0755\0old.txt\0f\09\0100.0\0\0644\0").unwrap();
+        let delta = directory_delta(&source, &target);
+        assert_eq!(delta.archive_paths, vec!["changed.txt", "folder", "folder/new.txt"]);
+        assert_eq!(delta.replace_paths, vec!["changed.txt"]);
+        assert_eq!(delta.remove_paths, vec!["old.txt"]);
+        assert_eq!(delta.payload_bytes, 12);
+    }
+
+    #[test]
+    fn directory_delta_rejects_parent_paths() {
+        assert!(parse_directory_manifest("../escape\0f\01\0100.0\0\0644\0").is_err());
+    }
+
+    #[test]
+    fn directory_delta_requires_confirmation_before_replacing_or_deleting_target_content() {
+        let source = parse_directory_manifest("keep.txt\0f\03\0100.0\0\0644\0new.txt\0f\05\0200.0\0\0644\0").unwrap();
+        let additive_target = parse_directory_manifest("keep.txt\0f\03\0100.0\0\0644\0").unwrap();
+        assert!(delta_can_sync_without_confirmation(&directory_delta(&source, &additive_target)));
+
+        let changed_target = parse_directory_manifest("keep.txt\0f\04\0300.0\0\0644\0target-only.txt\0f\01\0300.0\0\0644\0").unwrap();
+        assert!(!delta_can_sync_without_confirmation(&directory_delta(&source, &changed_target)));
     }
 
     #[test]
@@ -539,6 +747,37 @@ mod tests {
             size_bytes: 12, file_count: 2, modified_at: Some(120), matches: vec![], error: None,
         };
         assert_eq!(targets_after_source_check(&project, &changed)[0].status, "found");
+    }
+
+    #[test]
+    fn source_only_check_preserves_paused_target_for_resume() {
+        let target = ProjectTarget {
+            server_id: "target".into(), path: "~/demo".into(), status: "paused".into(), exists: true, is_directory: true,
+            size_bytes: 10, file_count: 1, modified_at: Some(100), last_checked_at: Some(100), last_synced_at: None,
+            synced_source_size_bytes: None, synced_source_file_count: None, synced_source_modified_at: None,
+            synced_target_size_bytes: None, synced_target_file_count: None, synced_target_modified_at: None, error: Some("同步已暂停，可继续同步".into()),
+        };
+        let project = Project {
+            id: "project".into(), name: "demo".into(), kind: "project".into(), source_server_id: "source".into(), source_path: "~/demo".into(),
+            source_exists: true, source_is_directory: true, source_size_bytes: 10, source_file_count: 1, source_modified_at: Some(100),
+            dataset_ids: vec![], model_ids: vec![], targets: vec![target], created_at: 1, updated_at: 1, last_sync_at: None, status: "unknown".into(), last_error: None,
+        };
+        let changed = ProjectPathCheck {
+            server_id: "source".into(), requested_path: "~/demo".into(), suggested_path: "~/demo".into(), exists: true, is_directory: true,
+            size_bytes: 12, file_count: 2, modified_at: Some(120), matches: vec![], error: None,
+        };
+        let preserved = targets_after_source_check(&project, &changed);
+        assert_eq!(preserved[0].status, "paused");
+        assert_eq!(preserved[0].error.as_deref(), Some("同步已暂停，可继续同步"));
+    }
+
+    #[test]
+    fn resume_checkpoint_requires_matching_source_and_target_signatures() {
+        let signature = sync_checkpoint_signature("10:1:100:1", "1:1:10:1:100");
+        let output = format!("__RACKTOP_CHECKPOINT__\t{signature}\t4096\n");
+        assert_eq!(resume_checkpoint_offset(&output, &signature), Some(4096));
+        assert_eq!(resume_checkpoint_offset(&output, &sync_checkpoint_signature("11:1:101:1", "1:1:10:1:100")), None);
+        assert_eq!(resume_checkpoint_offset(&output, &sync_checkpoint_signature("10:1:100:1", "1:1:12:1:101")), None);
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { isPermissionGranted, onAction, requestPermission, sendNotification } fr
 import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
 import { clampPercent, gpuMemoryPercent, hasOtherUserGpuWorkload } from '../utils/gpu'
 import { RACKTOP_MANAGED_IDENTITY_PATH } from '../utils/sshSetup'
+import type { ReleaseInfo } from '../utils/updateCheck'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -48,6 +49,9 @@ const demoServers: Server[] = [
   {
   id: 'demo-h100', name: '8*H100', location: '计算中心 1 楼 · H2 机架', host: '10.201.37.250', port: 22, username: 'tongzh', tags: ['lab', 'H100'], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, sortOrder: 3, authMethod: 'sshAgent', status: 'online', lastSeenAt: now,
   },
+  {
+  id: 'demo-ascend', name: '昇腾训练节点', location: '智算中心 · N3 机架', host: '10.201.37.260', port: 22, username: 'tongzh', tags: ['lab', 'Ascend 910B'], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, sortOrder: 4, authMethod: 'sshAgent', status: 'online', lastSeenAt: now,
+  },
 ]
 
 const defaultSettings: AppSettings = {
@@ -63,6 +67,7 @@ const defaultSettings: AppSettings = {
   temperatureThresholdCelsius: 85,
   currentUserAccent: '#0a84ff',
   theme: 'system',
+  fontSize: 'standard',
   menuBarMode: 'compact',
   reduceMotion: false,
   showAddServerGuide: true,
@@ -166,6 +171,21 @@ const a100Snapshot: Snapshot = {
   nvidiaSmi: 'available',
 }
 
+const ascendSnapshot: Snapshot = {
+  ...demoSnapshot,
+  serverId: 'demo-ascend',
+  hostname: 'ascend-910b-node',
+  acceleratorVendor: 'ascend',
+  system: { ...demoSnapshot.system, cpuModel: 'Kunpeng 920', cpuUtilization: 21.6, currentUserCpuUtilization: 12.4 },
+  gpus: [
+    { index: 0, uuid: 'NPU-0-0', name: 'Ascend 910B', utilization: 72, memoryUtilization: 58, memoryUsedMb: 37_980, memoryTotalMb: 65_536, temperatureCelsius: 61, powerWatts: 286 },
+    { index: 1, uuid: 'NPU-1-0', name: 'Ascend 910B', utilization: 0, memoryUtilization: 0, memoryUsedMb: 24, memoryTotalMb: 65_536, temperatureCelsius: 42, powerWatts: 46 },
+  ],
+  processes: [
+    { gpuUuid: 'NPU-0-0', gpuIndex: 0, pid: 31284, parentPid: 1, username: 'tongzh', command: 'python train.py --device npu:0', memoryUsedMb: 37_888, smUtilization: 70, cpuPercent: 24.1, elapsed: '00:48:12', isCurrentUser: true, isGroupLeader: true },
+  ],
+}
+
 let browserServers = [...demoServers]
 let browserSettings = { ...defaultSettings }
 let browserReservations: IdleReservation[] = []
@@ -178,6 +198,7 @@ let browserProjects: Project[] = [
       { serverId: 'demo-132', path: '~/projects/narcissistic-number', status: 'found', exists: true, isDirectory: true, sizeBytes: 42 * 1024, fileCount: 4, modifiedAt: now - 3_600, lastCheckedAt: now - 30, lastSyncedAt: now - 86_400, syncedSourceSizeBytes: 40 * 1024, syncedSourceFileCount: 4, syncedSourceModifiedAt: now - 86_800, syncedTargetSizeBytes: 40 * 1024, syncedTargetFileCount: 4, syncedTargetModifiedAt: now - 86_800 },
       { serverId: 'demo-4090', path: '~/projects/narcissistic-number', status: 'synced', exists: true, isDirectory: true, sizeBytes: 48 * 1024, fileCount: 5, modifiedAt: now - 420, lastCheckedAt: now - 25, lastSyncedAt: now - 360, syncedSourceSizeBytes: 48 * 1024, syncedSourceFileCount: 5, syncedSourceModifiedAt: now - 420, syncedTargetSizeBytes: 48 * 1024, syncedTargetFileCount: 5, syncedTargetModifiedAt: now - 420 },
       { serverId: 'demo-h100', path: '~/workspace/narcissistic-number', status: 'missing', exists: false, isDirectory: false, sizeBytes: 0, fileCount: 0, modifiedAt: null, lastCheckedAt: now - 20 },
+      { serverId: 'demo-ascend', path: '~/projects/narcissistic-number', status: 'synced', exists: true, isDirectory: true, sizeBytes: 48 * 1024, fileCount: 5, modifiedAt: now - 420, lastCheckedAt: now - 15, lastSyncedAt: now - 300, syncedSourceSizeBytes: 48 * 1024, syncedSourceFileCount: 5, syncedSourceModifiedAt: now - 420, syncedTargetSizeBytes: 48 * 1024, syncedTargetFileCount: 5, syncedTargetModifiedAt: now - 420 },
     ],
     createdAt: now - 172_800, updatedAt: now - 30, lastSyncAt: now - 86_400, status: 'unknown', lastError: null,
   },
@@ -198,6 +219,7 @@ let browserProjects: Project[] = [
       { serverId: 'demo-132', path: '~/datasets/APPS_hf', status: 'synced', exists: true, isDirectory: true, sizeBytes: 8.6 * 1024 ** 3, fileCount: 12_480, modifiedAt: now - 3_600, lastCheckedAt: now - 20, lastSyncedAt: now - 3_000, syncedSourceSizeBytes: 8.6 * 1024 ** 3, syncedSourceFileCount: 12_480, syncedSourceModifiedAt: now - 3_600, syncedTargetSizeBytes: 8.6 * 1024 ** 3, syncedTargetFileCount: 12_480, syncedTargetModifiedAt: now - 3_600 },
       { serverId: 'demo-4090', path: '~/datasets/APPS_hf', status: 'found', exists: true, isDirectory: true, sizeBytes: 8.4 * 1024 ** 3, fileCount: 12_102, modifiedAt: now - 86_400, lastCheckedAt: now - 20 },
       { serverId: 'demo-h100', path: '~/datasets/APPS_hf', status: 'missing', exists: false, isDirectory: false, sizeBytes: 0, fileCount: 0, modifiedAt: null, lastCheckedAt: now - 20 },
+      { serverId: 'demo-ascend', path: '~/datasets/APPS_hf', status: 'synced', exists: true, isDirectory: true, sizeBytes: 8.6 * 1024 ** 3, fileCount: 12_480, modifiedAt: now - 3_600, lastCheckedAt: now - 15, lastSyncedAt: now - 300, syncedSourceSizeBytes: 8.6 * 1024 ** 3, syncedSourceFileCount: 12_480, syncedSourceModifiedAt: now - 3_600, syncedTargetSizeBytes: 8.6 * 1024 ** 3, syncedTargetFileCount: 12_480, syncedTargetModifiedAt: now - 3_600 },
     ],
     createdAt: now - 1_209_600, updatedAt: now - 20, lastSyncAt: now - 3_000, status: 'synced', lastError: null,
   },
@@ -280,9 +302,9 @@ export const api = {
     const order = new Map(serverIds.map((id, index) => [id, index]))
     browserServers = [...browserServers].sort((left, right) => (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.id) ?? Number.MAX_SAFE_INTEGER)).map((server, index) => ({ ...server, sortOrder: index }))
   },
-  async startTerminal(serverId: string, columns: number, rows: number, gpuIndex?: number): Promise<string> {
+  async startTerminal(serverId: string, columns: number, rows: number, gpuIndex?: number, acceleratorVendor: Snapshot['acceleratorVendor'] = 'nvidia'): Promise<string> {
     if (!isTauri) throw new Error('终端仅在 RackTop 桌面 App 中可用')
-    return invoke('start_terminal', { serverId, columns, rows, gpuIndex: gpuIndex ?? null })
+    return invoke('start_terminal', { serverId, columns, rows, gpuIndex: gpuIndex ?? null, acceleratorVendor })
   },
   async writeTerminal(sessionId: string, data: string): Promise<void> {
     if (isTauri) return invoke('write_terminal', { sessionId, data })
@@ -308,7 +330,7 @@ export const api = {
     browserInteractionSummary.sentBytes += sentBytes
     browserInteractionSummary.servers = [...browserInteractionSummary.servers.filter((item) => item.serverId !== serverId), entry].sort((left, right) => left.serverName.localeCompare(right.serverName, 'zh-CN'))
     await new Promise((resolve) => setTimeout(resolve, 450))
-    const source = serverId === 'demo-132' ? a100Snapshot : demoSnapshot
+    const source = serverId === 'demo-132' ? a100Snapshot : serverId === 'demo-ascend' ? ascendSnapshot : demoSnapshot
     const snapshot = { ...source, serverId, timestamp: Math.floor(Date.now() / 1000), processesSampled: includeProcesses, disks: includeDisks ? source.disks : [] }
     const responseBytes = new TextEncoder().encode(JSON.stringify(snapshot)).length
     const storedBytes = recordHistory ? responseBytes : 0
@@ -422,7 +444,7 @@ export const api = {
     const lastSlash = query.lastIndexOf('/')
     const parent = lastSlash >= 0 ? query.slice(0, lastSlash + 1) : '~/'
     const prefix = lastSlash >= 0 ? query.slice(lastSlash + 1).toLowerCase() : query.toLowerCase()
-    return directoryNames.filter((name) => name.toLowerCase().startsWith(prefix)).map((name) => `${parent}${name}/`).slice(0, 12)
+    return directoryNames.filter((name) => name.toLowerCase().startsWith(prefix)).map((name) => `${parent}${name}`).slice(0, 12)
   },
   async inspectProject(projectId: string): Promise<Project> {
     if (isTauri) return invoke('inspect_project', { projectId })
@@ -461,6 +483,16 @@ export const api = {
     browserSettings = settings
     return settings
   },
+  async getLatestRelease(): Promise<ReleaseInfo> {
+    if (!isTauri) return { version: '1.25.2', url: 'https://github.com/Tongzh-SEU/RackTop/releases/tag/v1.25.2', publishedAt: new Date().toISOString() }
+    const response = await fetch('https://api.github.com/repos/Tongzh-SEU/RackTop/releases/latest', {
+      headers: { Accept: 'application/vnd.github+json' },
+    })
+    if (!response.ok) throw new Error(`GitHub Release 检查失败（HTTP ${response.status}）`)
+    const release = await response.json() as { tag_name?: string; html_url?: string; published_at?: string }
+    if (!release.tag_name || !release.html_url) throw new Error('GitHub Release 返回内容不完整')
+    return { version: release.tag_name.replace(/^v/i, ''), url: release.html_url, publishedAt: release.published_at }
+  },
   async retryNvidia(serverId: string): Promise<Snapshot> {
     return this.collectServer(serverId, true, true, true, true)
   },
@@ -479,8 +511,8 @@ export const api = {
     if (isTauri) return invoke('terminate_process', { serverId, pid, confirmed: true })
     return `已在演示服务器 ${serverId} 上模拟结束 PID ${pid}。`
   },
-  async launchManagedRun(serverId: string, runId: string, workingDirectory: string, command: string, gpuIndices: number[], projectLogPath: string | null = null): Promise<ManagedRunLaunchResult> {
-    if (isTauri) return invoke('launch_managed_run', { serverId, runId, workingDirectory, command, gpuIndices, projectLogPath })
+  async launchManagedRun(serverId: string, runId: string, workingDirectory: string, command: string, gpuIndices: number[], projectLogPath: string | null = null, acceleratorVendor: Snapshot['acceleratorVendor'] = 'nvidia'): Promise<ManagedRunLaunchResult> {
+    if (isTauri) return invoke('launch_managed_run', { serverId, runId, workingDirectory, command, gpuIndices, projectLogPath, acceleratorVendor })
     await new Promise((resolve) => window.setTimeout(resolve, 500))
     return { pid: 60_000 + Math.floor(Math.random() * 9_000), logPath: `~/.racktop/runs/${runId}/output.log` }
   },
