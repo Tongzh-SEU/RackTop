@@ -1104,6 +1104,30 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
 
+    pub fn get_recent_history(&self, server_id: &str, from_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,gpu_other_user_occupancy_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
+        let rows = statement.query_map(params![server_id, from_timestamp], |row| {
+            let cpu_utilization = row.get(1)?;
+            let memory_utilization = row.get(2)?;
+            let swap_utilization = row.get(3)?;
+            let gpu_utilizations: HashMap<String, f64> = serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default();
+            let gpu_memory_utilizations: HashMap<String, f64> = serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default();
+            let gpu_other_user_occupancies: HashMap<String, bool> = serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default();
+            Ok(HistoryPoint {
+                timestamp: row.get(0)?, is_compacted: false,
+                cpu_utilization, memory_utilization, swap_utilization,
+                cpu_min: cpu_utilization, cpu_max: cpu_utilization,
+                memory_min: memory_utilization, memory_max: memory_utilization,
+                swap_min: swap_utilization, swap_max: swap_utilization,
+                gpu_mins: gpu_utilizations.clone(), gpu_maxes: gpu_utilizations.clone(),
+                gpu_memory_mins: gpu_memory_utilizations.clone(), gpu_memory_maxes: gpu_memory_utilizations.clone(),
+                gpu_utilizations, gpu_memory_utilizations, gpu_other_user_occupancies,
+            })
+        }).map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
     pub fn get_compacted_history(&self, server_id: &str, from_timestamp: i64, bucket_seconds: i64) -> Result<Vec<HistoryPoint>, String> {
         let bucket_seconds = bucket_seconds.max(60);
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
@@ -1299,7 +1323,7 @@ impl Database {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let previous_source: Option<(String, String, i64, i64, i64, i64, Option<i64>)> = connection.query_row("SELECT source_server_id,source_path,source_exists,source_is_directory,source_size_bytes,source_file_count,source_modified_at FROM projects WHERE id=?1", [&id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))).optional().map_err(|error| error.to_string())?;
-        let same_source = previous_source.as_ref().is_some_and(|(server_id, path, ..)| server_id == &draft.source_server_id && path == source_path);
+        let same_source = previous_source.as_ref().is_some_and(|(server_id, path, ..)| server_id == &draft.source_server_id && normalized_project_path(path) == normalized_project_path(source_path));
         let source_exists = if same_source { previous_source.as_ref().map(|value| value.2).unwrap_or(0) } else { 0 };
         let source_is_directory = if same_source { previous_source.as_ref().map(|value| value.3).unwrap_or(0) } else { 0 };
         let source_size_bytes = if same_source { previous_source.as_ref().map(|value| value.4).unwrap_or(0) } else { 0 };
@@ -1307,7 +1331,7 @@ impl Database {
         let source_modified_at = if same_source { previous_source.as_ref().and_then(|value| value.6) } else { None };
         let previous_targets: Vec<ProjectTarget> = connection.query_row("SELECT targets_json FROM projects WHERE id=?1", [&id], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())?.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default();
         let targets: Vec<ProjectTarget> = draft.targets.into_iter().map(|target| {
-            let previous = same_source.then(|| previous_targets.iter().find(|item| item.server_id == target.server_id && item.path == target.path.trim())).flatten();
+            let previous = same_source.then(|| previous_targets.iter().find(|item| item.server_id == target.server_id && normalized_project_path(&item.path) == normalized_project_path(target.path.trim()))).flatten();
             ProjectTarget { server_id: target.server_id, path: target.path.trim().to_string(), status: previous.map(|item| item.status.clone()).unwrap_or_else(|| "unknown".into()), exists: previous.map(|item| item.exists).unwrap_or(false), is_directory: previous.map(|item| item.is_directory).unwrap_or(false), size_bytes: previous.map(|item| item.size_bytes).unwrap_or(0), file_count: previous.map(|item| item.file_count).unwrap_or(0), modified_at: previous.and_then(|item| item.modified_at), last_checked_at: previous.and_then(|item| item.last_checked_at), last_synced_at: previous.and_then(|item| item.last_synced_at), synced_source_size_bytes: previous.and_then(|item| item.synced_source_size_bytes), synced_source_file_count: previous.and_then(|item| item.synced_source_file_count), synced_source_modified_at: previous.and_then(|item| item.synced_source_modified_at), synced_target_size_bytes: previous.and_then(|item| item.synced_target_size_bytes), synced_target_file_count: previous.and_then(|item| item.synced_target_file_count), synced_target_modified_at: previous.and_then(|item| item.synced_target_modified_at), error: None }
         }).collect();
         let targets_json = serde_json::to_string(&targets).map_err(|error| error.to_string())?;
@@ -1480,6 +1504,7 @@ mod tests {
             os_name: "Ubuntu".into(),
             timestamp,
             status: "online".into(),
+            accelerator_vendor: "nvidia".into(),
             system: SystemMetric { cpu_model: "Test CPU".into(), memory_total_bytes: 1024, ..Default::default() },
             gpus: Vec::new(),
             disks: Vec::new(),
@@ -1727,6 +1752,10 @@ mod tests {
         assert!(raw_values.contains(&10.0));
         assert!(raw_values.contains(&90.0));
         assert!(raw_values.contains(&20.0));
+        let recent = reopened.get_recent_history(&server_id, 2_000_000 - 3 * 3_600).unwrap();
+        assert_eq!(recent.len(), 4);
+        assert!(recent.iter().all(|point| !point.is_compacted));
+        assert!(recent.iter().any(|point| point.cpu_utilization == 90.0));
         let long = history.iter().find(|point| point.cpu_max == 75.0).unwrap();
         assert!((long.cpu_utilization - 40.0).abs() < 0.01);
         assert_eq!(long.cpu_min, 5.0);
@@ -2001,6 +2030,42 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert!(remaining[0].dataset_ids.is_empty());
         assert!(remaining[0].model_ids.is_empty());
+    }
+
+    #[test]
+    fn project_save_preserves_synced_target_when_only_trailing_slashes_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("project-path-normalization.sqlite")).unwrap();
+        let source = db.save_server(draft("Source", 30)).unwrap();
+        let target = db.save_server(ServerDraft { host: "10.0.0.2".into(), ..draft("Target", 30) }).unwrap();
+        let project = db.save_project(ProjectDraft {
+            id: None,
+            name: "Training".into(),
+            kind: "project".into(),
+            source_server_id: source.id.clone(),
+            source_path: "~/training".into(),
+            dataset_ids: vec![],
+            model_ids: vec![],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: target.id.clone(), path: "~/training-copy".into() }],
+        }).unwrap();
+        let mut synced_target = project.targets[0].clone();
+        synced_target.status = "synced".into();
+        synced_target.last_synced_at = Some(100);
+        db.update_project_checks(&project.id, true, true, 10, 1, Some(100), &[synced_target], "synced", None).unwrap();
+
+        let saved = db.save_project(ProjectDraft {
+            id: Some(project.id),
+            name: "Training".into(),
+            kind: "project".into(),
+            source_server_id: source.id,
+            source_path: "~/training/".into(),
+            dataset_ids: vec![],
+            model_ids: vec![],
+            targets: vec![crate::models::ProjectTargetDraft { server_id: target.id, path: "~/training-copy/".into() }],
+        }).unwrap();
+
+        assert_eq!(saved.targets[0].status, "synced");
+        assert_eq!(saved.targets[0].last_synced_at, Some(100));
     }
 
     #[test]
