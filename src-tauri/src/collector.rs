@@ -7,6 +7,44 @@ use std::os::windows::process::CommandExt;
 use tokio::{process::Command, time::{timeout, Duration}};
 
 const REMOTE_SCRIPT: &str = r#"export LANG=C LC_ALL=C;
+cleanup_marker="$HOME/.racktop/.cleanup-usercpu-redirection-v1";
+if [ ! -e "$cleanup_marker" ]; then
+  cleanup_lock="$HOME/.racktop/.cleanup-usercpu-redirection-v1.lock";
+  if mkdir -p "$HOME/.racktop" && chmod 700 "$HOME/.racktop" && mkdir "$cleanup_lock" 2>/dev/null; then
+    (
+      trap 'rmdir "$cleanup_lock" 2>/dev/null || true' EXIT HUP INT TERM;
+      cleanup_uid="$(id -u)";
+      cleanup_cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 0)";
+      case "$cleanup_cpu_count" in
+        ''|*[!0-9]*|0) ;;
+        *)
+          cleanup_expected="${cleanup_cpu_count}.00";
+          cleanup_expected_size=$((${#cleanup_expected} + 1));
+          cleanup_recovery="$HOME/.racktop/recovered-usercpu-redirection-v1";
+          if mkdir -p "$cleanup_recovery" && chmod 700 "$cleanup_recovery"; then
+            cleanup_complete=1;
+            for cleanup_candidate in "$HOME"/*; do
+              [ -f "$cleanup_candidate" ] && [ ! -L "$cleanup_candidate" ] || continue;
+              cleanup_name="${cleanup_candidate##*/}";
+              case "$cleanup_name" in ''|*[!0-9.]*|*.*.*|.*|*.) continue ;; esac;
+              cleanup_owner="$(stat -c %u "$cleanup_candidate" 2>/dev/null || printf '')";
+              cleanup_links="$(stat -c %h "$cleanup_candidate" 2>/dev/null || printf '')";
+              cleanup_size="$(stat -c %s "$cleanup_candidate" 2>/dev/null || printf '')";
+              [ "$cleanup_owner" = "$cleanup_uid" ] && [ "$cleanup_links" = 1 ] && [ "$cleanup_size" = "$cleanup_expected_size" ] || continue;
+              [ "$(cat "$cleanup_candidate" 2>/dev/null)" = "$cleanup_expected" ] || continue;
+              if [ -e "$cleanup_recovery/$cleanup_name" ]; then cleanup_complete=0; continue; fi;
+              mv "$cleanup_candidate" "$cleanup_recovery/$cleanup_name" || cleanup_complete=0;
+            done;
+            [ "$cleanup_complete" = 1 ] && touch "$cleanup_marker";
+          fi;
+          ;;
+      esac;
+    ) </dev/null >/dev/null 2>&1 &
+    cleanup_pid=$!;
+    command -v renice >/dev/null 2>&1 && renice 19 -p "$cleanup_pid" >/dev/null 2>&1 || true;
+    command -v ionice >/dev/null 2>&1 && ionice -c 3 -p "$cleanup_pid" >/dev/null 2>&1 || true;
+  fi;
+fi;
 if [ "${RACKTOP_REMOTE_HISTORY:-0}" = "1" ]; then mkdir -p "$HOME/.racktop" && touch "$HOME/.racktop/.client-heartbeat"; fi;
 printf '__RACKTOP_USER__\n'; id -un;
 uid_min="$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null)"; uid_min="${uid_min:-1000}";
@@ -37,9 +75,31 @@ if [ "${RACKTOP_INCLUDE_DISKS:-1}" = "1" ]; then
     printf '%s|%s|%s|%s|%s\n' "$mount" "$used" "$total" "$available" "$own";
   done | head -n 16;
 fi;
-printf '__RACKTOP_USERCPU__\n'; ps -u "$(id -un)" -o pcpu= 2>/dev/null | awk -v n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)" '{s+=$1} END {printf "%.2f\n", n>0?s/n:s+0}';
+printf '__RACKTOP_USERCPU__\n'; ps -u "$(id -un)" -o pcpu= 2>/dev/null | awk -v n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)" '{s+=$1} END {printf "%.2f\n", (n>0?s/n:s+0)}';
+printf '__RACKTOP_ACCELERATOR__\n';
+if command -v nvidia-smi >/dev/null 2>&1; then printf 'nvidia\n'; elif command -v npu-smi >/dev/null 2>&1; then printf 'ascend\n'; else printf 'nvidia\n'; fi;
 printf '__RACKTOP_NVIDIA__\n';
-if ! command -v nvidia-smi >/dev/null 2>&1; then
+if ! command -v nvidia-smi >/dev/null 2>&1 && command -v npu-smi >/dev/null 2>&1; then
+  ascend_info="$(npu-smi info 2>&1)"; ascend_status=$?;
+  if [ "$ascend_status" -eq 0 ]; then
+    printf 'available\n';
+    printf '__RACKTOP_GPU__\n';
+    printf '%s\n' "$ascend_info" | awk -F '|' '
+      function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value }
+      /^\|/ {
+        for (i=2; i<NF; i++) field[i]=trim($i)
+        if (field[2] ~ /^[0-9]+$/ && field[4] ~ /^(OK|Warning|Alarm|Failure)$/) {
+          device=field[2]; name=field[3]; power=field[5]+0; temperature=field[6]+0; next
+        }
+        if (device != "" && field[2] ~ /^[0-9]+$/ && field[3] ~ /^[0-9]+$/ && field[4] ~ /:/) {
+          split(field[7], memory, "/"); used=trim(memory[1])+0; total=trim(memory[2])+0;
+          memory_percent=(total > 0 ? used/total*100 : 0);
+          printf "%s, Ascend %s, NPU-%s-%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n", device, name, device, field[2], field[5]+0, memory_percent, used, total, temperature, power
+        }
+      }';
+  elif printf '%s\n' "$ascend_info" | grep -qi 'permission denied'; then printf 'permissionDenied\n%s\n' "$ascend_info";
+  else printf 'failed\n%s\n' "$ascend_info"; fi;
+elif ! command -v nvidia-smi >/dev/null 2>&1; then
   printf 'missing\n';
 else
   nvidia_list="$(nvidia-smi -L 2>&1)"; nvidia_status=$?;
@@ -86,6 +146,17 @@ if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = "1" ]; then
     if ! gpu_proc="$(query_gpu_processes '')"; then
       gpu_proc="$(printf '%s\n' "$nvidia_list" | sed -n 's/^GPU \([0-9][0-9]*\):.*/\1/p' | while read -r gpu_index; do query_gpu_processes "-i $gpu_index" || true; done)";
     fi;
+    printf '%s\n' "$gpu_proc";
+  elif command -v npu-smi >/dev/null 2>&1; then
+    gpu_proc="$(npu-smi info 2>/dev/null | awk -F '|' '
+      function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value }
+      /^\|/ { for (i=2; i<NF; i++) field[i]=trim($i); if (field[2] ~ /^[0-9]+$/ && field[4] ~ /^(OK|Warning|Alarm|Failure)$/) print field[2] }
+    ' | sort -nu | while read -r npu_index; do
+      npu-smi info -t proc-mem -i "$npu_index" 2>/dev/null | awk -F '|' '
+        function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value }
+        /^\|/ { for (i=2; i<NF; i++) field[i]=trim($i); if (field[2] ~ /^[0-9]+$/ && field[3] ~ /^[0-9]+$/ && field[4] ~ /^[0-9]+$/) printf "NPU-%s-%s, %s, %s, %.2f\n", field[2], field[3], field[4], field[5], field[6]+0 }
+      '
+    done)";
     printf '%s\n' "$gpu_proc";
   fi;
   printf '__RACKTOP_GPUPMON__\n';
@@ -254,6 +325,8 @@ pub(crate) fn classify_ssh_error(stderr: &str) -> String {
         format!("SSH 认证失败：{stderr}")
     } else if lower.contains("connection refused") {
         format!("SSH 连接被拒绝：{stderr}")
+    } else if lower.contains("connection closed by 127.0.0.1") || lower.contains("connect to host 127.0.0.1") {
+        format!("本机 SSH 代理拒绝了连接：{stderr}。请确认代理正在运行；若此服务器不需要代理，请检查 ~/.ssh/config 中的 ProxyCommand / ProxyJump。")
     } else if lower.contains("no route to host") || lower.contains("operation timed out") {
         format!("服务器不可达：{stderr}")
     } else if stderr.is_empty() {
@@ -285,11 +358,12 @@ pub fn parse_snapshot(server_id: &str, output: &str) -> Result<Snapshot, String>
     system.current_user_cpu_utilization = first_line(&sections, "USERCPU").map(parse_number).unwrap_or_default();
     let disks = sections.get("DISK").map(|lines| lines.iter().filter_map(|line| parse_disk(line).ok()).collect()).unwrap_or_default();
 
+    let accelerator_vendor = first_line(&sections, "ACCELERATOR").filter(|value| *value == "ascend").unwrap_or("nvidia").to_string();
     let nvidia_lines = sections.get("NVIDIA").cloned().unwrap_or_default();
     let nvidia_smi = nvidia_lines.first().map(String::as_str).unwrap_or("missing").to_string();
     let nvidia_message = match nvidia_smi.as_str() {
         "available" => None,
-        "missing" => Some("服务器未检测到 nvidia-smi；可能没有 NVIDIA GPU，或驱动工具未安装/不在 PATH 中。".into()),
+        "missing" => Some("服务器未检测到 nvidia-smi 或 npu-smi；可能没有受支持的加速卡，或驱动工具未安装/不在 PATH 中。".into()),
         _ => Some(nvidia_lines.iter().skip(1).cloned().collect::<Vec<_>>().join("\n").trim().to_string()).filter(|value| !value.is_empty()).or_else(|| Some("nvidia-smi 存在但无法执行，请检查驱动和权限。".into())),
     };
     let gpus: Vec<GpuMetric> = sections
@@ -302,7 +376,7 @@ pub fn parse_snapshot(server_id: &str, output: &str) -> Result<Snapshot, String>
     let cpu_processes = parse_cpu_processes(&ps, &processes, &username, uid_min);
     let processes_sampled = sections.contains_key("GPUPROC");
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
-    Ok(Snapshot { server_id: server_id.into(), hostname, username, os_id: os_id.into(), os_name: os_name.into(), timestamp, status: if nvidia_smi == "available" { "online".into() } else { "warning".into() }, system, gpus, disks, processes, cpu_processes, processes_sampled, nvidia_smi, nvidia_message })
+    Ok(Snapshot { server_id: server_id.into(), hostname, username, os_id: os_id.into(), os_name: os_name.into(), timestamp, status: if nvidia_smi == "available" { "online".into() } else { "warning".into() }, accelerator_vendor, system, gpus, disks, processes, cpu_processes, processes_sampled, nvidia_smi, nvidia_message })
 }
 
 fn parse_disk(line: &str) -> Result<DiskMetric, String> {
@@ -531,7 +605,7 @@ fn validate_run_id(run_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn launch_managed_run(server: &Server, password: Option<&str>, run_id: &str, working_directory: &str, task_command: &str, gpu_indices: &[u32], project_log_path: Option<&str>) -> Result<ManagedRunLaunchResult, String> {
+pub async fn launch_managed_run(server: &Server, password: Option<&str>, run_id: &str, working_directory: &str, task_command: &str, gpu_indices: &[u32], project_log_path: Option<&str>, accelerator_vendor: &str) -> Result<ManagedRunLaunchResult, String> {
     validate_run_id(run_id)?;
     if working_directory.trim().is_empty() { return Err("工作目录不能为空".into()); }
     if task_command.trim().is_empty() { return Err("启动命令不能为空".into()); }
@@ -545,6 +619,7 @@ pub async fn launch_managed_run(server: &Server, password: Option<&str>, run_id:
     let payload = STANDARD.encode(task_command.trim());
     let project_log = STANDARD.encode(project_log_path.unwrap_or("").trim());
     let gpu_csv = gpu_indices.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let visible_devices_variable = if accelerator_vendor == "ascend" { "ASCEND_RT_VISIBLE_DEVICES" } else { "CUDA_VISIBLE_DEVICES" };
     let script = format!(r#"set -eu
 decode_base64() {{ printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | base64 --decode; }}
 workdir="$(decode_base64 '{workdir}')"
@@ -564,7 +639,7 @@ fi
 launch_script="$run_dir/launch.sh"
 {{
   printf '#!/bin/sh\n'
-  printf 'export CUDA_VISIBLE_DEVICES=%s\n' '{gpu_csv}'
+  printf 'export {visible_devices_variable}=%s\n' '{gpu_csv}'
   printf '%s\n' "$task_command"
   printf 'exit_code=$?\nprintf "%%s" "$exit_code" > "$HOME/.racktop/runs/{run_id}/exit-code"\nexit "$exit_code"\n'
 }} > "$launch_script"
@@ -578,7 +653,7 @@ else
 fi
 pid=$!
 printf '%s' "$pid" > "$run_dir/pid"
-sleep 0.15
+sleep 0.8
 if ! kill -0 "$pid" 2>/dev/null; then printf '__RACKTOP_RUN_FAILED__\n'; tail -n 12 "$run_dir/output.log" 2>/dev/null; exit 43; fi
 printf '__RACKTOP_RUN_OK__%s\n' "$pid"
 "#);
@@ -702,6 +777,11 @@ mod tests {
     }
 
     #[test]
+    fn classifies_a_local_ssh_proxy_closing_the_connection() {
+        assert!(classify_ssh_error("Connection closed by 127.0.0.1 port 7897").contains("本机 SSH 代理"));
+    }
+
+    #[test]
     fn excludes_development_and_monitoring_services_from_cpu_tasks() {
         for command in [
             "/usr/bin/python3 /usr/bin/nvitop",
@@ -747,6 +827,51 @@ mod tests {
         assert!(REMOTE_SCRIPT.contains("used_gpu_memory"));
         assert!(REMOTE_SCRIPT.contains("used_memory"));
         assert!(REMOTE_SCRIPT.contains("query_gpu_processes \"-i $gpu_index\""));
+    }
+
+    #[test]
+    fn user_cpu_collection_cannot_be_parsed_as_an_awk_file_redirect() {
+        assert!(REMOTE_SCRIPT.contains("printf \"%.2f\\n\", (n>0?s/n:s+0)"));
+        assert!(!REMOTE_SCRIPT.contains("printf \"%.2f\\n\", n>0?s/n:s+0"));
+    }
+
+    #[test]
+    fn legacy_user_cpu_files_require_exact_content_before_recovery() {
+        assert!(REMOTE_SCRIPT.contains("cleanup_expected=\"${cleanup_cpu_count}.00\""));
+        assert!(REMOTE_SCRIPT.contains("[ \"$(cat \"$cleanup_candidate\" 2>/dev/null)\" = \"$cleanup_expected\" ]"));
+        assert!(REMOTE_SCRIPT.contains("[ ! -L \"$cleanup_candidate\" ]"));
+        assert!(REMOTE_SCRIPT.contains("[ \"$cleanup_links\" = 1 ]"));
+        assert!(REMOTE_SCRIPT.contains("mv \"$cleanup_candidate\" \"$cleanup_recovery/$cleanup_name\""));
+        assert!(!REMOTE_SCRIPT.contains("rm -f \"$cleanup_candidate\""));
+    }
+
+    #[test]
+    fn legacy_user_cpu_recovery_runs_once_without_blocking_collection() {
+        assert!(REMOTE_SCRIPT.contains("mkdir \"$cleanup_lock\" 2>/dev/null"));
+        assert!(REMOTE_SCRIPT.contains(") </dev/null >/dev/null 2>&1 &"));
+        assert!(REMOTE_SCRIPT.contains("renice 19 -p \"$cleanup_pid\""));
+        assert!(REMOTE_SCRIPT.contains("ionice -c 3 -p \"$cleanup_pid\""));
+        assert!(REMOTE_SCRIPT.contains("[ \"$cleanup_complete\" = 1 ] && touch \"$cleanup_marker\""));
+        assert!(REMOTE_SCRIPT.find(") </dev/null >/dev/null 2>&1 &").unwrap()
+            < REMOTE_SCRIPT.find("printf '__RACKTOP_USER__").unwrap());
+    }
+
+    #[test]
+    fn legacy_user_cpu_recovery_marks_an_empty_scan_complete() {
+        let loop_end = REMOTE_SCRIPT.find("[ \"$cleanup_complete\" = 1 ] && touch \"$cleanup_marker\"").unwrap();
+        assert!(REMOTE_SCRIPT[..loop_end].contains("cleanup_complete=1"));
+        assert!(!REMOTE_SCRIPT[..loop_end].contains("cleanup_found"));
+    }
+
+    #[test]
+    fn recognizes_ascend_snapshots_without_changing_gpu_compatibility_fields() {
+        let sample = SAMPLE.replace("__RACKTOP_NVIDIA__", "__RACKTOP_ACCELERATOR__\nascend\n__RACKTOP_NVIDIA__")
+            .replace("NVIDIA GeForce RTX 4090 D, GPU-abc", "Ascend 910B, NPU-0-0");
+        let snapshot = parse_snapshot("server-npu", &sample).unwrap();
+        assert_eq!(snapshot.accelerator_vendor, "ascend");
+        assert_eq!(snapshot.gpus[0].uuid, "NPU-0-0");
+        assert!(REMOTE_SCRIPT.contains("npu-smi info"));
+        assert!(REMOTE_SCRIPT.contains("Ascend"));
     }
 
     #[test]

@@ -1,10 +1,11 @@
 [package]
 name = "racktop"
-version = "1.24.5"
+version = "1.25.2"
 description = "Live GPU & CPU monitoring for every server"
 authors = ["RackTop"]
 edition = "2024"
 default-run = "racktop"
+autobins = false
 
 [lib]
 name = "racktop_lib"
@@ -13,6 +14,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = []
 integration-probe = []
+
+[[bin]]
+name = "racktop"
+path = "src/main.rs"
 
 [[bin]]
 name = "racktop-probe"
