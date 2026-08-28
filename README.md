@@ -35,14 +35,15 @@ RackTop 是面向个人研究者和小型团队的 GPU 服务器桌面工作台�
   <img src="docs/assets/readme/idle-compute.png" alt="空闲算力筛选" width="33%">
 </p>
 
+
 ## 下载
 
-当前稳定版：**v1.25.1**
+当前稳定版：**v1.25.2**
 
 | 平台 | 安装包 | 下载 |
 | --- | --- | --- |
-| macOS Apple Silicon | `RackTop-1.25.1-macos-arm64.dmg` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.1/RackTop-1.25.1-macos-arm64.dmg) |
-| Windows x64 | `RackTop-1.25.1-windows-x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.1/RackTop-1.25.1-windows-x64-setup.exe) |
+| macOS Apple Silicon | `RackTop-1.25.2-macos-arm64.dmg` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.2/RackTop-1.25.2-macos-arm64.dmg) |
+| Windows x64 | `RackTop-1.25.2-windows-x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.2/RackTop-1.25.2-windows-x64-setup.exe) |
 
 更多版本见 [GitHub Releases](https://github.com/Tongzh-SEU/RackTop/releases)。
 macOS版本若首次打开时提示应用来源受限，请前往“系统设置 → 隐私与安全性”，确认允许打开该应用。
