@@ -1945,7 +1945,10 @@ function LogsView({ server, snapshot }: { server: Server; snapshot: Snapshot }) 
 function ServerNotificationSettingsMenu({ settings, onChange }: { settings: ServerNotificationSettings; onChange: (settings: ServerNotificationSettings) => void }) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState(settings)
+  const [menuOverflow, setMenuOverflow] = useState(0)
+  const sectionRef = useRef<HTMLElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
   const items = [
     { key: 'task', title: '我的任务结束' },
     { key: 'zombie', title: '他人的僵尸或卡住进程' },
@@ -1969,6 +1972,20 @@ function ServerNotificationSettingsMenu({ settings, onChange }: { settings: Serv
     document.addEventListener('keydown', escape)
     return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', escape) }
   }, [draft, open])
+  useEffect(() => {
+    if (!open || draft.mode !== 'partial') {
+      setMenuOverflow(0)
+      return
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const section = sectionRef.current
+      const popover = popoverRef.current
+      if (!section || !popover) return
+      setMenuOverflow(Math.max(0, popover.getBoundingClientRect().bottom - section.getBoundingClientRect().bottom))
+      window.requestAnimationFrame(() => popover.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' }))
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [draft.mode, open])
   const chooseMode = (mode: ServerNotificationSettings['mode']) => {
     const next = mode === 'all'
       ? defaultServerNotificationSettings(settings.serverId)
@@ -1982,7 +1999,7 @@ function ServerNotificationSettingsMenu({ settings, onChange }: { settings: Serv
     if (open) closeMenu()
     else { setDraft(settings); setOpen(true) }
   }
-  return <section className="server-notifications" aria-labelledby="server-notifications-title"><div className="server-notifications__copy"><h2 id="server-notifications-title">服务器通知</h2><p>{subtitle}</p></div><div className="notification-menu" ref={menuRef}><button className={`button button--secondary notification-menu__trigger ${settings.mode === 'off' ? 'notification-menu__trigger--off' : ''}`} type="button" aria-haspopup="menu" aria-expanded={open} onClick={toggleMenu}><Bell size={16} /><span>{modeLabel}</span></button>{open && <div className="notification-menu__popover" role="menu" aria-label="服务器通知模式"><div className="notification-menu__modes">{([['all', '打开'], ['off', '关闭'], ['partial', '部分']] as const).map(([value, label]) => <button type="button" role="menuitemradio" aria-checked={draft.mode === value} onClick={() => chooseMode(value)} key={value}><span className="notification-menu__check">{draft.mode === value && <Check size={14} />}</span><span>{label}</span></button>)}</div>{draft.mode === 'partial' && <div className="notification-menu__categories"><p>保留的通知</p>{items.map((item) => { const isLastEnabled = draft[item.key] && enabledCount === 1; return <button type="button" role="menuitemcheckbox" aria-checked={draft[item.key]} disabled={isLastEnabled} title={isLastEnabled ? '部分通知至少保留一项' : undefined} onClick={() => setDraft((current) => ({ ...current, [item.key]: !current[item.key] }))} key={item.key}><span className="notification-menu__check">{draft[item.key] && <Check size={14} />}</span><span>{item.title}</span></button> })}</div>}</div>}</div></section>
+  return <section className="server-notifications" ref={sectionRef} style={menuOverflow ? { marginBottom: menuOverflow } : undefined} aria-labelledby="server-notifications-title"><div className="server-notifications__copy"><h2 id="server-notifications-title">服务器通知</h2><p>{subtitle}</p></div><div className="notification-menu" ref={menuRef}><button className={`button button--secondary notification-menu__trigger ${settings.mode === 'off' ? 'notification-menu__trigger--off' : ''}`} type="button" aria-haspopup="menu" aria-expanded={open} onClick={toggleMenu}><Bell size={16} /><span>{modeLabel}</span></button>{open && <div className="notification-menu__popover" ref={popoverRef} role="menu" aria-label="服务器通知模式"><div className="notification-menu__modes">{([['all', '打开'], ['off', '关闭'], ['partial', '部分']] as const).map(([value, label]) => <button type="button" role="menuitemradio" aria-checked={draft.mode === value} onClick={() => chooseMode(value)} key={value}><span className="notification-menu__check">{draft.mode === value && <Check size={14} />}</span><span>{label}</span></button>)}</div>{draft.mode === 'partial' && <div className="notification-menu__categories"><p>保留的通知</p>{items.map((item) => { const isLastEnabled = draft[item.key] && enabledCount === 1; return <button type="button" role="menuitemcheckbox" aria-checked={draft[item.key]} disabled={isLastEnabled} title={isLastEnabled ? '部分通知至少保留一项' : undefined} onClick={() => setDraft((current) => ({ ...current, [item.key]: !current[item.key] }))} key={item.key}><span className="notification-menu__check">{draft[item.key] && <Check size={14} />}</span><span>{item.title}</span></button> })}</div>}</div>}</div></section>
 }
 
 function ConnectionView({ server, snapshot, nvidiaWarningIgnored, ignoredGpuMemoryStallWarningIds, onRestoreNvidiaWarning, onRestoreGpuMemoryStallWarning, onRefresh, onDelete, onEdit, isRefreshing, notificationSettings, onNotificationSettingsChange }: { server: Server; snapshot: Snapshot; nvidiaWarningIgnored: boolean; ignoredGpuMemoryStallWarningIds: Set<string>; onRestoreNvidiaWarning: () => void; onRestoreGpuMemoryStallWarning: (warningId: string) => void; onRefresh: () => void; onDelete: () => void; onEdit: () => void; isRefreshing: boolean; notificationSettings: ServerNotificationSettings; onNotificationSettingsChange: (settings: ServerNotificationSettings) => void }) {
