@@ -1,4 +1,4 @@
-use crate::models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Project, ProjectDraft, ProjectTarget, Server, ServerDraft, Snapshot, UsageDistribution, UsagePoint, UsageUserAggregate};
+use crate::models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Project, ProjectDraft, ProjectTarget, Server, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution, UsagePoint, UsageUserAggregate};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -504,6 +504,15 @@ impl Database {
                     key TEXT PRIMARY KEY,
                     value_json TEXT NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS server_notification_settings (
+                    server_id TEXT PRIMARY KEY,
+                    mode TEXT NOT NULL DEFAULT 'all',
+                    task INTEGER NOT NULL DEFAULT 1,
+                    zombie INTEGER NOT NULL DEFAULT 1,
+                    memory INTEGER NOT NULL DEFAULT 1,
+                    system INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+                 );
                  CREATE TABLE IF NOT EXISTS idle_reservations (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -705,6 +714,42 @@ impl Database {
             .into_iter()
             .find(|server| server.id == id)
             .ok_or_else(|| format!("找不到服务器 {id}"))
+    }
+
+    pub fn list_server_notification_settings(&self) -> Result<Vec<ServerNotificationSettings>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare(
+            "SELECT servers.id,COALESCE(settings.mode,'all'),COALESCE(settings.task,1),COALESCE(settings.zombie,1),COALESCE(settings.memory,1),COALESCE(settings.system,1)
+             FROM servers LEFT JOIN server_notification_settings settings ON settings.server_id=servers.id ORDER BY servers.sort_order"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement.query_map([], |row| Ok(ServerNotificationSettings {
+            server_id: row.get(0)?, mode: row.get(1)?, task: row.get(2)?, zombie: row.get(3)?, memory: row.get(4)?, system: row.get(5)?,
+        })).map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
+    pub fn save_server_notification_settings(&self, mut settings: ServerNotificationSettings) -> Result<ServerNotificationSettings, String> {
+        if !matches!(settings.mode.as_str(), "all" | "off" | "partial") {
+            return Err("未知的服务器通知模式".into());
+        }
+        let enabled_count = [settings.task, settings.zombie, settings.memory, settings.system].into_iter().filter(|enabled| *enabled).count();
+        if settings.mode == "off" {
+            settings.task = false; settings.zombie = false; settings.memory = false; settings.system = false;
+        } else if settings.mode == "all" || enabled_count == 4 {
+            settings.mode = "all".into();
+            settings.task = true; settings.zombie = true; settings.memory = true; settings.system = true;
+        } else if enabled_count == 0 {
+            return Err("部分通知至少保留一项".into());
+        }
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let exists: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM servers WHERE id=?1)", [&settings.server_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+        if !exists { return Err(format!("找不到服务器 {}", settings.server_id)); }
+        connection.execute(
+            "INSERT INTO server_notification_settings(server_id,mode,task,zombie,memory,system) VALUES(?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(server_id) DO UPDATE SET mode=excluded.mode,task=excluded.task,zombie=excluded.zombie,memory=excluded.memory,system=excluded.system",
+            params![settings.server_id, settings.mode, settings.task, settings.zombie, settings.memory, settings.system],
+        ).map_err(|error| error.to_string())?;
+        Ok(settings)
     }
 
     pub fn save_server(&self, draft: ServerDraft) -> Result<Server, String> {
@@ -940,6 +985,19 @@ impl Database {
         let cutoff = snapshot.timestamp - i64::from(server.history_retention_days) * 86_400;
         transaction.execute("DELETE FROM history_hourly_buckets WHERE server_id=?1 AND timestamp < ?2", params![snapshot.server_id, hour_start(cutoff)]).map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())
+    }
+
+    pub fn list_latest_snapshots(&self) -> Result<Vec<Snapshot>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare(
+            "SELECT current.payload_json FROM snapshots current
+             WHERE current.timestamp=(SELECT MAX(candidate.timestamp) FROM snapshots candidate WHERE candidate.server_id=current.server_id)
+             ORDER BY current.server_id",
+        ).map_err(|error| error.to_string())?;
+        let payloads = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|error| error.to_string())?;
+        Ok(payloads
+            .filter_map(|payload| payload.ok().and_then(|value| serde_json::from_str::<Snapshot>(&value).ok()))
+            .collect())
     }
 
     pub fn remote_history_cursor(&self, server_id: &str, now: i64) -> Result<i64, String> {
@@ -1495,6 +1553,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn server_notification_settings_default_and_normalize_per_server() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("notifications.sqlite")).unwrap();
+        let server = database.save_server(draft("Notifications", 30)).unwrap();
+
+        let defaults = database.list_server_notification_settings().unwrap();
+        assert_eq!(defaults, vec![ServerNotificationSettings {
+            server_id: server.id.clone(), mode: "all".into(), task: true, zombie: true, memory: true, system: true,
+        }]);
+
+        let off = database.save_server_notification_settings(ServerNotificationSettings {
+            server_id: server.id.clone(), mode: "off".into(), task: true, zombie: true, memory: true, system: true,
+        }).unwrap();
+        assert!(!off.task && !off.zombie && !off.memory && !off.system);
+
+        let partial = database.save_server_notification_settings(ServerNotificationSettings {
+            server_id: server.id.clone(), mode: "partial".into(), task: true, zombie: false, memory: true, system: false,
+        }).unwrap();
+        assert_eq!(partial.mode, "partial");
+
+        let all = database.save_server_notification_settings(ServerNotificationSettings {
+            server_id: server.id.clone(), mode: "partial".into(), task: true, zombie: true, memory: true, system: true,
+        }).unwrap();
+        assert_eq!(all.mode, "all");
+
+        let empty = database.save_server_notification_settings(ServerNotificationSettings {
+            server_id: server.id, mode: "partial".into(), task: false, zombie: false, memory: false, system: false,
+        });
+        assert_eq!(empty.unwrap_err(), "部分通知至少保留一项");
+    }
+
     fn snapshot(server_id: &str, timestamp: i64) -> Snapshot {
         Snapshot {
             server_id: server_id.into(),
@@ -1564,6 +1654,23 @@ mod tests {
         assert_eq!(stored, r#"{"GPU-a":true}"#);
         assert!(!stored.contains("alice"));
         assert!(!stored.contains("python"));
+    }
+
+    #[test]
+    fn restores_only_the_latest_snapshot_for_each_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("latest-snapshots.sqlite")).unwrap();
+        let first_server = db.save_server(draft("First", 30)).unwrap();
+        let second_server = db.save_server(ServerDraft { host: "10.0.0.2".into(), ..draft("Second", 30) }).unwrap();
+        db.save_snapshot(&snapshot(&first_server.id, 1_000)).unwrap();
+        db.save_snapshot(&snapshot(&first_server.id, 2_000)).unwrap();
+        db.save_snapshot(&snapshot(&second_server.id, 1_500)).unwrap();
+
+        let restored = db.list_latest_snapshots().unwrap();
+
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored.iter().find(|item| item.server_id == first_server.id).unwrap().timestamp, 2_000);
+        assert_eq!(restored.iter().find(|item| item.server_id == second_server.id).unwrap().timestamp, 1_500);
     }
 
     #[test]

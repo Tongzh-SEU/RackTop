@@ -62,7 +62,10 @@ if [ "${RACKTOP_INCLUDE_DISKS:-1}" = "1" ]; then
   current_user="$(id -un)";
   home_mount="$(df -P -k "$HOME" 2>/dev/null | awk 'NR == 2 {print $6}')";
   home_used="$(du -skx "$HOME" 2>/dev/null | awk '{print $1; exit}')"; home_used="${home_used:-0}";
-  df -P -k -x tmpfs -x devtmpfs 2>/dev/null | awk 'NR > 1 && $2 ~ /^[0-9]+$/ { print $6 "|" $3 "|" $2 "|" $4 }' | while IFS='|' read -r mount used total available; do
+  if ! disk_rows="$(timeout -k 1 3 df -P -k -x tmpfs -x devtmpfs 2>/dev/null)"; then
+    disk_rows="$(df -P -k -l -x tmpfs -x devtmpfs 2>/dev/null)";
+  fi;
+  printf '%s\n' "$disk_rows" | awk 'NR > 1 && $2 ~ /^[0-9]+$/ { print $6 "|" $3 "|" $2 "|" $4 }' | while IFS='|' read -r mount used total available; do
     case "$mount" in /sys|/sys/*|/proc|/proc/*|/dev|/dev/*|/run|/run/*|/boot/efi|/boot/efi/*|/snap/*|/var/lib/docker/*|/var/lib/containers/*|/var/lib/kubelet/*) continue ;; esac
     own=0;
     if [ "$mount" = "$home_mount" ]; then own="$home_used";
@@ -833,6 +836,12 @@ mod tests {
     fn user_cpu_collection_cannot_be_parsed_as_an_awk_file_redirect() {
         assert!(REMOTE_SCRIPT.contains("printf \"%.2f\\n\", (n>0?s/n:s+0)"));
         assert!(!REMOTE_SCRIPT.contains("printf \"%.2f\\n\", n>0?s/n:s+0"));
+    }
+
+    #[test]
+    fn disk_collection_falls_back_to_local_filesystems_when_a_network_mount_stalls() {
+        assert!(REMOTE_SCRIPT.contains("timeout -k 1 3 df -P -k -x tmpfs -x devtmpfs"));
+        assert!(REMOTE_SCRIPT.contains("df -P -k -l -x tmpfs -x devtmpfs"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { ServerForm } from './ServerForm'
+import { parseServerTags, ServerForm, splitServerTagInput } from './ServerForm'
 
 const handlers = { onClose: () => {}, onSave: async () => {} }
 
@@ -54,5 +54,11 @@ describe('ServerForm onboarding', () => {
   it('limits custom server names to keep the sidebar readable', () => {
     const markup = renderToStaticMarkup(<ServerForm {...handlers} showGuide={false} />)
     expect(markup).toContain('maxLength="24"')
+  })
+
+  it('parses multiple server tags separated by English or Chinese commas', () => {
+    expect(parseServerTags('lab, h100，training')).toEqual(['lab', 'h100', 'training'])
+    expect(parseServerTags('  lab，， h100, ')).toEqual(['lab', 'h100'])
+    expect(splitServerTagInput('lab, h100，training')).toEqual({ committed: ['lab', 'h100'], remainder: 'training' })
   })
 })

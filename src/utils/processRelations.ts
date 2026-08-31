@@ -6,6 +6,10 @@ export function currentUserProcessCount(snapshot: Snapshot) {
   return pids.size
 }
 
+export function visibleCurrentUserCpuUtilization(snapshot: Snapshot) {
+  return currentUserProcessCount(snapshot) > 0 ? snapshot.system.currentUserCpuUtilization : 0
+}
+
 export function processTaskRootPid(process: ProcessMetric | CpuProcessMetric, snapshot: Snapshot) {
   const byPid = new Map<number, ProcessMetric | CpuProcessMetric>()
   for (const candidate of [...snapshot.processes, ...snapshot.cpuProcesses]) byPid.set(candidate.pid, candidate)

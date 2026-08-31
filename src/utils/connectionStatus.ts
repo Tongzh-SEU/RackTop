@@ -20,6 +20,6 @@ export function shouldShowConnectingOnAttempt(quiet: boolean, hasSnapshot: boole
   return !quiet || !hasSnapshot || (failureCount > 0 && failureCount < OFFLINE_FAILURE_THRESHOLD)
 }
 
-export function canDisplayServerDetails(status: ServerStatus) {
-  return status === 'online' || status === 'warning'
+export function canDisplayServerDetails(status: ServerStatus, hasSnapshot = false) {
+  return hasSnapshot || status === 'online' || status === 'warning'
 }

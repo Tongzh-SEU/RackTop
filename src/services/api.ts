@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution } from '../types/models'
+import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution } from '../types/models'
 import { clampPercent, gpuMemoryPercent, hasOtherUserGpuWorkload } from '../utils/gpu'
 import { RACKTOP_MANAGED_IDENTITY_PATH } from '../utils/sshSetup'
 import type { ReleaseInfo } from '../utils/updateCheck'
@@ -187,6 +187,7 @@ const ascendSnapshot: Snapshot = {
 }
 
 let browserServers = [...demoServers]
+let browserServerNotificationSettings = new Map<string, ServerNotificationSettings>()
 let browserSettings = { ...defaultSettings }
 let browserReservations: IdleReservation[] = []
 let browserProjects: Project[] = [
@@ -259,6 +260,13 @@ export const api = {
   async listServers(): Promise<Server[]> {
     return isTauri ? invoke('list_servers') : browserServers
   },
+  async listLatestSnapshots(): Promise<Snapshot[]> {
+    if (isTauri) return invoke('list_latest_snapshots')
+    return browserServers.map((server) => {
+      const source = server.id === 'demo-132' ? a100Snapshot : server.id === 'demo-ascend' ? ascendSnapshot : demoSnapshot
+      return { ...source, serverId: server.id }
+    })
+  },
   async saveServer(draft: ServerDraft): Promise<Server> {
     if (isTauri) return invoke('save_server', { draft })
     const server: Server = {
@@ -271,6 +279,15 @@ export const api = {
     }
     browserServers = [...browserServers.filter((item) => item.id !== server.id), server]
     return server
+  },
+  async listServerNotificationSettings(): Promise<ServerNotificationSettings[]> {
+    if (isTauri) return invoke('list_server_notification_settings')
+    return browserServers.map((server) => browserServerNotificationSettings.get(server.id) ?? { serverId: server.id, mode: 'all', task: true, zombie: true, memory: true, system: true })
+  },
+  async saveServerNotificationSettings(settings: ServerNotificationSettings): Promise<ServerNotificationSettings> {
+    if (isTauri) return invoke('save_server_notification_settings', { settings })
+    browserServerNotificationSettings.set(settings.serverId, settings)
+    return settings
   },
   async verifySshSetup(draft: ServerDraft): Promise<void> {
     if (isTauri) return invoke('verify_ssh_setup', { draft })

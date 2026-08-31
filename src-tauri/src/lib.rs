@@ -8,7 +8,7 @@ mod ssh_keys;
 pub mod storage;
 mod terminal;
 
-use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, Snapshot, UsageDistribution};
+use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution};
 use std::collections::HashMap;
 #[cfg(target_os = "windows")]
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -200,6 +200,16 @@ fn save_server(database: State<'_, Database>, draft: ServerDraft) -> Result<Serv
 }
 
 #[tauri::command]
+fn list_server_notification_settings(database: State<'_, Database>) -> Result<Vec<ServerNotificationSettings>, String> {
+    database.list_server_notification_settings()
+}
+
+#[tauri::command]
+fn save_server_notification_settings(database: State<'_, Database>, settings: ServerNotificationSettings) -> Result<ServerNotificationSettings, String> {
+    database.save_server_notification_settings(settings)
+}
+
+#[tauri::command]
 async fn delete_server(database: State<'_, Database>, server_id: String, revoke_ssh_access: bool) -> Result<RemoteCleanupResult, String> {
     let server = database.get_server(&server_id)?;
     let password = if server.auth_method == "password" { database.get_password(&server_id, false).unwrap_or(None) } else { None };
@@ -384,6 +394,11 @@ async fn collect_server(database: State<'_, Database>, logs: State<'_, Interacti
             Err(error)
         }
     }
+}
+
+#[tauri::command]
+fn list_latest_snapshots(database: State<'_, Database>) -> Result<Vec<Snapshot>, String> {
+    database.list_latest_snapshots()
 }
 
 #[tauri::command]
@@ -861,7 +876,7 @@ pub fn run() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, open_setup_terminal, verify_ssh_setup, collect_server, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, list_projects, save_project, delete_project, probe_project_paths, suggest_project_paths, inspect_project, inspect_project_source, sync_project, list_project_sync_progress, cancel_project_sync, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, launch_managed_run, read_managed_run_log, get_managed_run_status, update_tray_summary, window_minimize, window_toggle_maximize, window_close])
+        .invoke_handler(tauri::generate_handler![list_servers, save_server, list_server_notification_settings, save_server_notification_settings, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, open_setup_terminal, verify_ssh_setup, collect_server, list_latest_snapshots, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, list_projects, save_project, delete_project, probe_project_paths, suggest_project_paths, inspect_project, inspect_project_source, sync_project, list_project_sync_progress, cancel_project_sync, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, launch_managed_run, read_managed_run_log, get_managed_run_status, update_tray_summary, window_minimize, window_toggle_maximize, window_close])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }
