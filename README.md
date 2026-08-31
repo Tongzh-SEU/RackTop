@@ -27,7 +27,7 @@ RackTop 是面向个人研究者和小型团队的 GPU 服务器桌面工作台�
   <a href="https://github.com/Tongzh-SEU/RackTop/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-green?style=flat-square" alt="GPL-3.0 License"></a>
 </p>
 
- 
+
 
 <p align="center">
   <img src="docs/assets/readme/fleet-overview.png" alt="全局算力总览" width="33%">

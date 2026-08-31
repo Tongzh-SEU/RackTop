@@ -52,13 +52,7 @@ RW_DMG_PATH=""
 
 cleanup() {
   if [ -n "$MOUNT_DIR" ] && mount | grep -Fq "on $MOUNT_DIR "; then
-    for attempt in 1 2 3 4 5; do
-      hdiutil detach "$MOUNT_DIR" >/dev/null 2>&1 && break
-      sleep 1
-    done
-    if mount | grep -Fq "on $MOUNT_DIR "; then
-      hdiutil detach "$MOUNT_DIR" -force >/dev/null 2>&1 || true
-    fi
+    hdiutil detach "$MOUNT_DIR" >/dev/null || true
   fi
   case "$STAGE_DIR" in
     /private/tmp/racktop-dmg.*) rm -rf "$STAGE_DIR" ;;
@@ -151,15 +145,7 @@ end run
 APPLESCRIPT
 
 sync
-for attempt in 1 2 3 4 5; do
-  if hdiutil detach "$MOUNT_DIR" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-  if [ "$attempt" = 5 ]; then
-    hdiutil detach "$MOUNT_DIR" -force >/dev/null
-  fi
-done
+hdiutil detach "$MOUNT_DIR" >/dev/null
 MOUNT_DIR=""
 hdiutil convert "$RW_DMG_PATH" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH" -ov
 rm -f "$RW_DMG_PATH"

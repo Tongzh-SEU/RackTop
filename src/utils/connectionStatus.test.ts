@@ -13,6 +13,12 @@ describe('connection status', () => {
     expect(shouldShowConnectingOnAttempt(true, true, 3)).toBe(false)
   })
 
+  it('keeps cached server details visible while reconnecting', () => {
+    expect(canDisplayServerDetails('connecting', true)).toBe(true)
+    expect(canDisplayServerDetails('offline', true)).toBe(true)
+    expect(canDisplayServerDetails('connecting')).toBe(false)
+  })
+
   it('keeps a healthy server green during quiet background sampling', () => {
     expect(shouldShowConnectingOnAttempt(true, true, 0)).toBe(false)
     expect(shouldShowConnectingOnAttempt(true, true, 1)).toBe(true)

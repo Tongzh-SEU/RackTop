@@ -7,6 +7,18 @@ import { RACKTOP_MANAGED_IDENTITY_PATH, sshSetupTargetValidationMessage, unixSsh
 
 const MAX_SERVER_NAME_LENGTH = 24
 
+export function parseServerTags(value: string) {
+  return value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean)
+}
+
+export function splitServerTagInput(value: string) {
+  const parts = value.split(/[,，]/)
+  return {
+    committed: parts.slice(0, -1).map((tag) => tag.trim()).filter(Boolean),
+    remainder: parts.at(-1) ?? '',
+  }
+}
+
 interface ServerFormProps {
   initial?: Partial<ServerDraft>
   defaultRemoteHistoryEnabled?: boolean
@@ -34,6 +46,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
     authMethod: initial?.authMethod ?? 'sshAgent',
     savePassword: initial?.savePassword ?? true,
   })
+  const [tagText, setTagText] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [passwordAcknowledged, setPasswordAcknowledged] = useState(false)
@@ -49,6 +62,22 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
   useEffect(() => () => { setupVerificationAttempt.current += 1 }, [])
 
   const set = <K extends keyof ServerDraft>(key: K, value: ServerDraft[K]) => setDraft((current) => ({ ...current, [key]: value }))
+  const commitTagText = () => {
+    const tags = parseServerTags(tagText)
+    if (tags.length > 0) setDraft((current) => ({ ...current, tags: [...current.tags, ...tags] }))
+    setTagText('')
+  }
+  const updateTagText = (value: string) => {
+    const { committed, remainder } = splitServerTagInput(value)
+    if (committed.length > 0) setDraft((current) => ({ ...current, tags: [...current.tags, ...committed] }))
+    setTagText(remainder)
+  }
+  const editLastTag = () => {
+    if (tagText || draft.tags.length === 0) return false
+    setDraft((current) => ({ ...current, tags: current.tags.slice(0, -1) }))
+    setTagText(draft.tags.at(-1) ?? '')
+    return true
+  }
   const selectAuthMethod = (authMethod: ServerDraft['authMethod']) => {
     setDraft((current) => ({
       ...current,
@@ -170,7 +199,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
     setSaving(true)
     setError(null)
     try {
-      await onSave({ ...draft, name: draft.name || draft.sshAlias || draft.host })
+      await onSave({ ...draft, name: draft.name || draft.sshAlias || draft.host, tags: [...draft.tags, ...parseServerTags(tagText)] })
       if (!initial?.id && dismissGuide) onGuideDismiss?.()
     } catch (reason) {
       setError(String(reason))
@@ -280,7 +309,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
             )}
             <div className="form-grid form-grid--2">
               <label>跳板机 ProxyJump<input value={draft.proxyJump ?? ''} onChange={(event) => set('proxyJump', event.target.value)} placeholder="可选" /></label>
-              <label>标签<input value={draft.tags.join(', ')} onChange={(event) => set('tags', event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean))} placeholder="lab, h100" /></label>
+              <label>标签<div className="server-tag-input" onClick={(event) => event.currentTarget.querySelector('input')?.focus()}>{draft.tags.map((tag, index) => <span className="server-tag-input__token" key={`${tag}-${index}`}>{tag}</span>)}<input aria-label="添加服务器标签" value={tagText} onChange={(event) => updateTagText(event.target.value)} onBlur={commitTagText} onKeyDown={(event) => { if ((event.key === 'Backspace' || event.key === 'Delete') && editLastTag()) event.preventDefault() }} placeholder={draft.tags.length === 0 ? 'lab, h100' : ''} /></div></label>
             </div>
             <label className="switch-row remote-history-row"><Database size={18} /><span><strong>服务器远端缓存 30 天</strong><small>固定保留 30 天；RackTop 关闭期间继续采集，重新打开后同步到本机 90 天历史。不保存进程和命令。</small></span><input type="checkbox" checked={draft.remoteHistoryEnabled} onChange={(event) => set('remoteHistoryEnabled', event.target.checked)} /></label>
             {error && <p className="form-error" role="alert">{error}</p>}

@@ -52,6 +52,17 @@ pub struct ServerDraft {
     pub save_password: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerNotificationSettings {
+    pub server_id: String,
+    pub mode: String,
+    pub task: bool,
+    pub zombie: bool,
+    pub memory: bool,
+    pub system: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteCleanupResult {

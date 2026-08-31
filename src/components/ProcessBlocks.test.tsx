@@ -60,6 +60,13 @@ describe('ProcessBlocks', () => {
     expect(markup).toContain('正在结束 PID 21312')
   })
 
+  it('keeps the previous process rows visible while refreshing', () => {
+    const markup = renderToStaticMarkup(<ProcessBlocks snapshot={snapshot} loading />)
+    expect(markup).toContain('正在枚举进程')
+    expect(markup).toContain('当前仍显示上一次采样结果')
+    expect(markup).toContain('python train.py')
+  })
+
   it('hides empty process kinds when requested', () => {
     const markup = renderToStaticMarkup(<ProcessBlocks snapshot={{ ...snapshot, cpuProcesses: [] }} hideEmptyBlocks />)
     expect(markup).toContain('GPU 进程')

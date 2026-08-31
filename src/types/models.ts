@@ -1,5 +1,16 @@
 export type ServerStatus = 'online' | 'offline' | 'connecting' | 'warning' | 'unknown'
 export type AuthMethod = 'sshAgent' | 'privateKey' | 'password' | 'sshConfig'
+export type ServerNotificationMode = 'all' | 'off' | 'partial'
+export type ServerNotificationCategory = 'task' | 'zombie' | 'memory' | 'system'
+
+export interface ServerNotificationSettings {
+  serverId: string
+  mode: ServerNotificationMode
+  task: boolean
+  zombie: boolean
+  memory: boolean
+  system: boolean
+}
 
 export interface Server {
   id: string
