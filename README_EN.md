@@ -35,12 +35,12 @@ Find the right GPU before launching a job, monitor resources and processes while
 
 ## Download
 
-Current stable version: **v1.25.3**
+Current stable version: **v1.25.4**
 
-| Platform              | Package                                   | Download                                                                                                                  |
-| --------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| macOS Apple Silicon   | `RackTop_1.25.3_macos-arm64.dmg`          | [Download macOS version](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.3/RackTop_1.25.3_macos-arm64.dmg)    |
-| Windows x64           | `RackTop_1.25.3_x64-setup.exe`            | [Download Windows version](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.3/RackTop_1.25.3_x64-setup.exe)    |
+| Platform              | Installer                        | Download                                                                                                               |
+| --------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| macOS Apple Silicon   | `RackTop_1.25.4_macos-arm64.dmg` | [Download for macOS](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.4/RackTop_1.25.4_macos-arm64.dmg)     |
+| Windows x64           | `RackTop_1.25.4_x64-setup.exe`   | [Download for Windows](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.4/RackTop_1.25.4_x64-setup.exe)     |
 
 See [GitHub Releases](https://github.com/Tongzh-SEU/RackTop/releases) for additional versions.
 
