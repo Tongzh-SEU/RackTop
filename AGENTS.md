@@ -6,6 +6,7 @@ RackTop 开发 Agent 必须优先使用以下固定路径，不得仅依赖当�
 - GitHub CLI：`/Users/tong_zh/.local/bin/gh`；该用户级安装会跨终端和 Codex 会话保留。
 - 当前 shell 的 `PATH` 可能不包含 `~/.local/bin`。`command -v gh` 没有输出时，必须继续检查 `/Users/tong_zh/.local/bin/gh` 是否为可执行文件；文件存在时直接使用绝对路径，不得误报未安装或重复安装。
 - GitHub CLI 二进制与登录状态相互独立。使用前通过 `/Users/tong_zh/.local/bin/gh auth status` 检查系统钥匙串中的认证；认证失效时只重新登录，不重复安装二进制。
+- 如果受限沙箱内的 `/Users/tong_zh/.local/bin/gh auth status` 报告 token 无效或无法读取认证，不得立即判定登录已失效。必须使用同一绝对路径，在允许访问系统钥匙串的权限下再次执行 `gh auth status`；只有二次检查仍失败时才重新登录。确认认证有效前不得声称已经推送、创建 PR 或发布，也不得重复安装 GitHub CLI。
 
 ## 1 通用开发规范
 
