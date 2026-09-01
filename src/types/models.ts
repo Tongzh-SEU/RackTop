@@ -211,7 +211,7 @@ export interface AppSettings {
 export interface IdleReservationFilters {
   gpuMemoryGb: number
   cpuMemoryGb: number
-  otherUserProcess: 'all' | 'without'
+  otherUserProcess: 'none' | 'withoutOthers' | 'all'
   gpuModel: string
   cpuModel: string
   duration: number

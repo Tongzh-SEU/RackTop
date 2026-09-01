@@ -130,10 +130,12 @@ else
   if [ "$nvidia_state" = available ] || [ "$nvidia_state" = degraded ]; then
     printf '__RACKTOP_GPU__\n';
     if [ "$nvidia_state" = available ]; then
-      nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null || true;
+      nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits 2>/dev/null ||
+        nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null || true;
     else
       printf '%s\n' "$nvidia_list" | sed -n 's/^GPU \([0-9][0-9]*\):.*/\1/p' | while read -r gpu_index; do
-        nvidia-smi -i "$gpu_index" --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null || true;
+        nvidia-smi -i "$gpu_index" --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits 2>/dev/null ||
+          nvidia-smi -i "$gpu_index" --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null || true;
       done;
       printf '%s\n' "$nvidia_list" | awk '
         /^GPU [0-9][0-9]*:/ {
@@ -459,7 +461,8 @@ fn parse_memory(lines: &[String], system: &mut SystemMetric) {
 fn parse_gpu(line: &str) -> Result<GpuMetric, String> {
     let fields: Vec<&str> = line.split(',').map(str::trim).collect();
     if fields.len() < 9 { return Err(format!("无效的 nvidia-smi GPU 输出：{line}")); }
-    Ok(GpuMetric { index: fields[0].parse().map_err(|_| format!("无效 GPU 索引：{}", fields[0]))?, name: fields[1].into(), uuid: fields[2].into(), utilization: parse_number(fields[3]).clamp(0.0, 100.0), memory_utilization: parse_number(fields[4]).clamp(0.0, 100.0), memory_used_mb: parse_number(fields[5]).max(0.0), memory_total_mb: parse_number(fields[6]).max(0.0), temperature_celsius: parse_number(fields[7]), power_watts: parse_number(fields[8]).max(0.0) })
+    let power_limit_watts = fields.get(9).map(|value| parse_number(value)).filter(|value| *value > 0.0);
+    Ok(GpuMetric { index: fields[0].parse().map_err(|_| format!("无效 GPU 索引：{}", fields[0]))?, name: fields[1].into(), uuid: fields[2].into(), utilization: parse_number(fields[3]).clamp(0.0, 100.0), memory_utilization: parse_number(fields[4]).clamp(0.0, 100.0), memory_used_mb: parse_number(fields[5]).max(0.0), memory_total_mb: parse_number(fields[6]).max(0.0), temperature_celsius: parse_number(fields[7]), power_watts: parse_number(fields[8]).max(0.0), power_limit_watts })
 }
 
 #[derive(Default)]
@@ -795,6 +798,10 @@ mod tests {
         assert_eq!(gpu.memory_utilization, 0.0);
         assert_eq!(gpu.memory_used_mb, 0.0);
         assert_eq!(gpu.power_watts, 0.0);
+        assert_eq!(gpu.power_limit_watts, None);
+        let gpu_with_limit = parse_gpu("0, NVIDIA Test, GPU-test, 50, 25, 1024, 40960, 35, 80, 300").unwrap();
+        assert_eq!(gpu_with_limit.power_limit_watts, Some(300.0));
+        assert!(REMOTE_SCRIPT.contains("power.draw,power.limit"));
     }
 
     #[test]

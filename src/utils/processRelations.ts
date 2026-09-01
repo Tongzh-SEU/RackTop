@@ -6,6 +6,10 @@ export function currentUserProcessCount(snapshot: Snapshot) {
   return pids.size
 }
 
+export function currentUserAcceleratorCount(snapshot: Snapshot) {
+  return new Set(snapshot.processes.filter((process) => process.isCurrentUser).map((process) => process.gpuUuid)).size
+}
+
 export function visibleCurrentUserCpuUtilization(snapshot: Snapshot) {
   return currentUserProcessCount(snapshot) > 0 ? snapshot.system.currentUserCpuUtilization : 0
 }

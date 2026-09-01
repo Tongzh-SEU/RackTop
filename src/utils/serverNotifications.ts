@@ -1,5 +1,12 @@
 import type { ServerNotificationCategory, ServerNotificationSettings } from '../types/models'
 
+export const SERVER_NOTIFICATION_CATEGORY_ITEMS: ReadonlyArray<{ key: ServerNotificationCategory; title: string }> = [
+  { key: 'task', title: '我的任务结束' },
+  { key: 'zombie', title: '他人的僵尸或卡住进程' },
+  { key: 'memory', title: '我的显存异常释放' },
+  { key: 'system', title: '设备与连接告警' },
+]
+
 export function defaultServerNotificationSettings(serverId: string): ServerNotificationSettings {
   return { serverId, mode: 'all', task: true, zombie: true, memory: true, system: true }
 }

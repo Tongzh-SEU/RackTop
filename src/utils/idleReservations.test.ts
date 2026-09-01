@@ -5,7 +5,7 @@ import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservati
 const reservation: IdleReservation = {
   id: 'reservation-1',
   name: 'A100 预约',
-  filters: { gpuMemoryGb: 40, cpuMemoryGb: 0, otherUserProcess: 'without', gpuModel: 'all', cpuModel: 'all', duration: 0, tag: 'all' },
+  filters: { gpuMemoryGb: 40, cpuMemoryGb: 0, otherUserProcess: 'none', gpuModel: 'all', cpuModel: 'all', duration: 0, tag: 'all' },
   createdAt: 1_000,
   expiresAt: null,
   notifyMode: 'continuous',

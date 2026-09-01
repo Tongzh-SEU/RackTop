@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
 import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution } from '../types/models'
 import { clampPercent, gpuMemoryPercent, hasOtherUserGpuWorkload } from '../utils/gpu'
+import { normalizeIdleFilters } from '../utils/idleFilters'
 import { RACKTOP_MANAGED_IDENTITY_PATH } from '../utils/sshSetup'
 import type { ReleaseInfo } from '../utils/updateCheck'
 
@@ -435,12 +436,14 @@ export const api = {
     return { importedCount: 0, latestTimestamp: null }
   },
   async listIdleReservations(): Promise<IdleReservation[]> {
-    return isTauri ? invoke('list_idle_reservations') : browserReservations
+    const reservations: IdleReservation[] = isTauri ? await invoke('list_idle_reservations') : browserReservations
+    return reservations.map((reservation) => ({ ...reservation, filters: normalizeIdleFilters(reservation.filters) }))
   },
   async saveIdleReservation(reservation: IdleReservation): Promise<IdleReservation> {
-    if (isTauri) return invoke('save_idle_reservation', { reservation })
-    browserReservations = [reservation, ...browserReservations.filter((item) => item.id !== reservation.id)]
-    return reservation
+    const normalized = { ...reservation, filters: normalizeIdleFilters(reservation.filters) }
+    if (isTauri) return invoke('save_idle_reservation', { reservation: normalized })
+    browserReservations = [normalized, ...browserReservations.filter((item) => item.id !== normalized.id)]
+    return normalized
   },
   async deleteIdleReservation(reservationId: string): Promise<void> {
     if (isTauri) return invoke('delete_idle_reservation', { reservationId })
