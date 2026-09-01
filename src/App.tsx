@@ -101,7 +101,7 @@ import { loadLaunchProfiles, loadManagedRuns } from './utils/managedRuns'
 import { detectAppPlatform } from './utils/platform'
 import { acceleratorDeviceName, acceleratorDriverLabel, acceleratorLabel } from './utils/accelerator'
 import { allowsServerNotification, defaultServerNotificationSettings, normalizeServerNotificationSettings, SERVER_NOTIFICATION_CATEGORY_ITEMS } from './utils/serverNotifications'
-import { isNewerVersion, loadCachedUpdate, loadIgnoredUpdateVersion, saveCachedUpdate, saveIgnoredUpdateVersion, shouldCheckForUpdates, shouldShowUpdateBadge, type ReleaseInfo } from './utils/updateCheck'
+import { isNewerVersion, loadCachedUpdate, loadIgnoredUpdateVersion, saveCachedUpdate, saveIgnoredUpdateVersion, shouldShowUpdateBadge, UPDATE_CHECK_INTERVAL_MS, type ReleaseInfo } from './utils/updateCheck'
 import { applyAppUpdateDownloadEvent, initialAppUpdateState, type AppUpdateState } from './utils/appUpdate'
 import authorAvatar from './assets/tongzh-seu.png'
 import packageInfo from '../package.json'
@@ -303,6 +303,7 @@ function App() {
     return null
   })
   const desktopUpdateRef = useRef<DesktopAppUpdate | null>(null)
+  const startupUpdateCheckStartedRef = useRef(false)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateCheckError, setUpdateCheckError] = useState<string | null>(null)
   const [ignoredUpdateVersion, setIgnoredUpdateVersion] = useState(loadIgnoredUpdateVersion)
@@ -687,9 +688,33 @@ function App() {
   }, [latestRelease?.version])
 
   useEffect(() => {
-    const cached = loadCachedUpdate()
-    if (shouldCheckForUpdates(cached.lastCheckedAt)) void checkForUpdates(false)
-  }, []) // Automatic checks are throttled by the persisted 24-hour timestamp.
+    let interval: number | undefined
+    let timeout: number | undefined
+    const runScheduledCheck = () => {
+      saveCachedUpdate({ lastScheduledCheckAt: Date.now() })
+      void checkForUpdates(false)
+    }
+    const now = Date.now()
+    const lastScheduledCheckAt = loadCachedUpdate().lastScheduledCheckAt
+    const scheduledCheckDue = !lastScheduledCheckAt || now - lastScheduledCheckAt >= UPDATE_CHECK_INTERVAL_MS
+
+    if (!startupUpdateCheckStartedRef.current) {
+      startupUpdateCheckStartedRef.current = true
+      if (scheduledCheckDue) saveCachedUpdate({ lastScheduledCheckAt: now })
+      void checkForUpdates(false)
+    }
+    const nextCheckDelay = scheduledCheckDue
+      ? UPDATE_CHECK_INTERVAL_MS
+      : UPDATE_CHECK_INTERVAL_MS - (now - lastScheduledCheckAt)
+    timeout = window.setTimeout(() => {
+      runScheduledCheck()
+      interval = window.setInterval(runScheduledCheck, UPDATE_CHECK_INTERVAL_MS)
+    }, nextCheckDelay)
+    return () => {
+      window.clearTimeout(timeout)
+      if (interval !== undefined) window.clearInterval(interval)
+    }
+  }, []) // Startup always checks; the persisted 24-hour schedule is not reset by a restart.
 
   useEffect(() => {
     if (!api.isDesktop || (mainView !== 'projects' && busyProjectTargets.size === 0)) return
