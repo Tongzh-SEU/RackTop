@@ -373,6 +373,65 @@ v0.2.0 feat: 增加 GPU 告警规则管理
 
 Release 发布不得夹带或修改工作区中的无关内容。创建标签和 Release 不要求将本地工作区切换到默认分支，但必须通过远程提交或 GitHub 页面确认标签的目标确实位于默认分支。
 
+### GitHub Actions 构建与安装包命名
+
+RackTop 的 macOS、Windows 安装包和自动更新附件统一由 `.github/workflows/build.yml` 构建。开发 Agent 修改构建或发布流程时必须同步维护该工作流，不得只在本机执行一套无法由 GitHub Actions 复现的临时命令。
+
+- 推送 `v*` 标签时必须构建 macOS Apple Silicon 与 Windows x64 两个平台；通过 `workflow_dispatch` 手动触发时，可使用 `build_macos` 和 `build_windows` 选择平台。
+- macOS job 必须运行前端与 Rust 测试，完成 App 签名、可选公证、DMG 校验，并生成 updater 使用的 `.app.tar.gz` 与 `.sig`。
+- Windows job 必须运行前端与 Rust 测试，构建 NSIS `*-setup.exe` 与中文 MSI，随后完成 MSI 解包检查、NSIS 静默安装、App 启动和静默卸载；只有烟雾测试通过后才能上传 Artifact。
+- 每次正式构建必须生成 4 个发布文件：macOS DMG、macOS `.app.tar.gz`、Windows NSIS `setup.exe` 和 Windows MSI。`.sig` 是生成 updater 清单所需的内部签名文件，不计入 4 个 Release 发布文件。
+- GitHub Actions Artifact 是 ZIP 下载容器，容器名不是安装包文件名。容器名必须包含真实版本、平台和包类型，例如 `RackTop_X.Y.Z_x64-setup`；容器内必须保留真实文件名 `RackTop_X.Y.Z_x64-setup.exe`，不得只使用 `nsis`、`windows` 等无法直接判断安装方式的名称。
+- Windows 用户优先验证和下载 `x64-setup` Artifact；`x64_zh-CN-msi` 用于 MSI 部署验证。不得把 MSI 描述为 setup.exe，也不得把 Artifact ZIP 本身描述为安装程序。
+- Actions 中的 `.sig` 用于生成和核对 updater 清单，可保留在工作流 Artifact 中；正式 GitHub Release 不单独上传 `.sig`。
+- 构建完成后必须用 GitHub CLI 或 Actions 页面核对 4 个发布文件的内部文件名、版本和 SHA-256，不得只依据 job 成功状态报告安装包可用。
+- GitHub Actions 只负责生成和验证上述 4 个发布文件，不直接发布 `latest.json`。`latest.json` 中需要使用 Release 的最终下载 URL，因此必须在 Release 附件上传并验证完成后单独写入 `updater` 分支。
+
+### 自动更新 Release 与清单发布流程
+
+启用 Tauri Updater 的版本必须按以下固定顺序发布，避免客户端读取到附件尚未就绪的清单：
+
+1. 确认默认分支包含发布提交，npm、Cargo、Tauri 版本一致，updater 公钥正确，GitHub Actions 中 `TAURI_SIGNING_PRIVATE_KEY` 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 已配置；私钥和密码不得写入 Git、日志、Artifact 或 Release。
+2. 构建并验证 macOS DMG、macOS `.app.tar.gz`、Windows NSIS `setup.exe` 和 Windows MSI；记录四个发布文件的 SHA-256，并保留 `.app.tar.gz.sig` 与 `setup.exe.sig` 供生成清单。
+3. 创建指向默认分支发布提交的 `vX.Y.Z` 标签和 GitHub Release，上传且仅上传用户安装包与 macOS updater 技术附件：DMG、NSIS EXE、MSI、`.app.tar.gz`。不得把 `latest.json` 或任何 `.sig` 作为 Release 附件。
+4. 验证 Release 中四个附件真实可下载，文件名、版本、架构、大小和 SHA-256 与 Actions 产物一致；Release 正文的“下载”模块只列 DMG、EXE 和 MSI，`.app.tar.gz` 可留在 Assets 中但不作为普通用户下载项。
+5. 最后创建或更新独立 `updater` 分支根目录的 `latest.json`；没有该文件或没有当前平台条目时，已安装的 RackTop 无法识别和安装新版本。`darwin-aarch64` 指向 Release 的 `.app.tar.gz`，`windows-x86_64` 指向同一 Release 的 NSIS `setup.exe`，对应 `.sig` 的完整内容内嵌到各平台 `signature` 字段。
+6. 从 GitHub Raw 地址重新读取 `latest.json`，确认 JSON 有效、版本正确、两个平台 URL 可下载且签名字段非空；清单提交与产品 Release 提交相互独立，不得把 updater 分支合并到 `main`。
+7. 使用保留原应用标识和数据目录的上一稳定版 App 实际升级到当前稳定版。macOS 和 Windows 分别验证能通过 `latest.json` 发现更新，并完成下载进度、签名校验、安装、重启、版本变化与原有数据保留；未完成的平台必须明确记录。
+
+`updater` 分支的 `latest.json` 必须使用以下结构；`signature` 直接写入对应 `.sig` 文件的完整内容，不填写 `.sig` 下载地址：
+
+```json
+{
+  "version": "X.Y.Z",
+  "notes": "RackTop vX.Y.Z 稳定版",
+  "pub_date": "YYYY-MM-DDTHH:mm:ssZ",
+  "platforms": {
+    "darwin-aarch64": {
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/vX.Y.Z/RackTop_X.Y.Z_macos-arm64.app.tar.gz",
+      "signature": "<RackTop_X.Y.Z_macos-arm64.app.tar.gz.sig 的完整内容>"
+    },
+    "windows-x86_64": {
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/vX.Y.Z/RackTop_X.Y.Z_x64-setup.exe",
+      "signature": "<RackTop_X.Y.Z_x64-setup.exe.sig 的完整内容>"
+    }
+  }
+}
+```
+
+`latest.json` 的 `version` 必须高于客户端当前版本；平台键必须与 Tauri Updater 使用的 `darwin-aarch64` 和 `windows-x86_64` 完全一致。Release 附件尚未全部上传并验证可下载前，不得提前更新该文件。
+
+自动更新正式 Release 的附件固定为：
+
+```text
+RackTop_X.Y.Z_macos-arm64.dmg
+RackTop_X.Y.Z_x64-setup.exe
+RackTop_X.Y.Z_x64_zh-CN.msi
+RackTop_X.Y.Z_macos-arm64.app.tar.gz
+```
+
+其中 Windows updater 直接复用 NSIS `RackTop_X.Y.Z_x64-setup.exe`，不得另造第二个 Windows 更新包；macOS `.app.tar.gz` 必须在最终 App 签名完成后生成并使用 updater 私钥签名，避免其内容与 DMG 内的 App 签名状态不一致。
+
 #### Release 正文格式
 
 稳定版 Release 的“主要更新”默认只描述当前版本实际交付的用户可见变化，最多使用 5 条，每条只表达一项变化；不得因为标题包含“稳定版”就重复罗列历史版本能力。只有首次稳定版，或用户明确要求发布累计能力概览时，才可以概括从初始版本到当前版本的核心能力。小功能、排版调整和零碎 Bug 修复可以合并为一条简洁的修复说明，但不得编造或遗漏本版本的重要用户可见变化。

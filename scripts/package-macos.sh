@@ -43,6 +43,7 @@ fi
 DMG_PATH="$TARGET_DIR/dmg/RackTop_${APP_VERSION}_macos-${ARCH_LABEL}${DMG_SUFFIX}.dmg"
 CHECKSUM_PATH="$DMG_PATH.sha256"
 SIGNING_INFO_PATH="$DMG_PATH.signing.txt"
+UPDATER_PATH="$TARGET_DIR/macos/RackTop_${APP_VERSION}_macos-${ARCH_LABEL}.app.tar.gz"
 DMG_BACKGROUND_SVG="$ROOT_DIR/src-tauri/dmg-background.svg"
 DMG_BACKGROUND_RENDERER="$ROOT_DIR/scripts/render-dmg-background.swift"
 DMG_VOLUME_NAME="安装 RackTop ${APP_VERSION}"
@@ -69,7 +70,8 @@ trap cleanup EXIT
 cd "$ROOT_DIR"
 if [ "$SKIP_BUILD" != "1" ]; then
   env -u APPLE_SIGNING_IDENTITY -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID \
-    npm run tauri build -- --target "$TARGET" --bundles app
+    npm run tauri build -- --target "$TARGET" --bundles app \
+      --config '{"bundle":{"createUpdaterArtifacts":false}}'
 fi
 
 if [ ! -d "$APP_PATH" ]; then
@@ -89,6 +91,14 @@ else
   SIGNING_MODE="Developer ID: $SIGNING_IDENTITY"
 fi
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]; then
+  rm -f "$UPDATER_PATH" "$UPDATER_PATH.sig"
+  COPYFILE_DISABLE=1 tar -czf "$UPDATER_PATH" -C "$(dirname "$APP_PATH")" "$(basename "$APP_PATH")"
+  npm run tauri -- signer sign "$UPDATER_PATH"
+else
+  printf 'Updater signing key not configured; skipping macOS updater artifact.\n'
+fi
 
 if [ ! -f "$DMG_BACKGROUND_SVG" ]; then
   printf 'DMG background was not found at %s\n' "$DMG_BACKGROUND_SVG" >&2
@@ -188,3 +198,6 @@ shasum -a 256 "$DMG_PATH" | tee "$CHECKSUM_PATH"
   printf 'notarization=%s\n' "$NOTARIZATION_MODE"
 } | tee "$SIGNING_INFO_PATH"
 printf 'DMG=%s\n' "$DMG_PATH"
+if [ -f "$UPDATER_PATH" ]; then
+  printf 'UPDATER=%s\n' "$UPDATER_PATH"
+fi
