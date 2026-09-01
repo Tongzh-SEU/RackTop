@@ -380,7 +380,7 @@ RackTop 的 macOS、Windows 安装包和自动更新附件统一由 `.github/wor
 - 推送 `v*` 标签时必须构建 macOS Apple Silicon 与 Windows x64 两个平台；通过 `workflow_dispatch` 手动触发时，可使用 `build_macos` 和 `build_windows` 选择平台。
 - macOS job 必须运行前端与 Rust 测试，完成 App 签名、可选公证、DMG 校验，并生成 updater 使用的 `.app.tar.gz` 与 `.sig`。
 - Windows job 必须运行前端与 Rust 测试，构建 NSIS `*-setup.exe` 与中文 MSI，随后完成 MSI 解包检查、NSIS 静默安装、App 启动和静默卸载；只有烟雾测试通过后才能上传 Artifact。
-- 每次正式构建必须生成 4 个发布文件：macOS DMG、macOS `.app.tar.gz`、Windows NSIS `setup.exe` 和 Windows MSI。`.sig` 是生成 updater 清单所需的内部签名文件，不计入 4 个 Release 发布文件。
+- 每次正式构建必须生成 4 个发布文件，并分别上传为 4 个独立 Artifact 容器：macOS DMG、macOS `.app.tar.gz`、Windows NSIS `setup.exe` 和 Windows MSI。macOS DMG 与 `.app.tar.gz` 不得合并到同一个 Artifact；`.sig` 是生成 updater 清单所需的内部签名文件，可跟随对应 updater 容器，但不计入 4 个 Release 发布文件。
 - GitHub Actions Artifact 是 ZIP 下载容器，容器名不是安装包文件名。容器名必须包含真实版本、平台和包类型，例如 `RackTop_X.Y.Z_x64-setup`；容器内必须保留真实文件名 `RackTop_X.Y.Z_x64-setup.exe`，不得只使用 `nsis`、`windows` 等无法直接判断安装方式的名称。
 - Windows 用户优先验证和下载 `x64-setup` Artifact；`x64_zh-CN-msi` 用于 MSI 部署验证。不得把 MSI 描述为 setup.exe，也不得把 Artifact ZIP 本身描述为安装程序。
 - Actions 中的 `.sig` 用于生成和核对 updater 清单，可保留在工作流 Artifact 中；正式 GitHub Release 不单独上传 `.sig`。

@@ -104,15 +104,22 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run bundle:macos
 
-      - name: Upload verified macOS package
+      - name: Upload verified macOS DMG
         uses: actions/upload-artifact@v4
         with:
-          name: RackTop_${{ env.RACKTOP_VERSION }}_macos-arm64
+          name: RackTop_${{ env.RACKTOP_VERSION }}_macos-arm64-dmg
           if-no-files-found: error
           path: |
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.sha256
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.signing.txt
+
+      - name: Upload verified macOS updater package
+        uses: actions/upload-artifact@v4
+        with:
+          name: RackTop_${{ env.RACKTOP_VERSION }}_macos-arm64-updater
+          if-no-files-found: error
+          path: |
             src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
             src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
 
