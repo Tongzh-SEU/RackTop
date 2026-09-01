@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "RackTop",
-  "version": "1.25.3",
+  "version": "1.25.4",
   "identifier": "com.racktop.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -28,8 +28,20 @@
       "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost https://api.github.com"
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://raw.githubusercontent.com/Tongzh-SEU/RackTop/updater/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg1NkFGREM4Q0QyN0U2RkYKUldULzVpZk55UDFxaFNWL0VQL1dXNUNtRHJyam5jUDdYSFZJZU5rZnpiMWtEYUpKNGI0YjE4b0IK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",

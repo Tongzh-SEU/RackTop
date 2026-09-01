@@ -1,7 +1,7 @@
 {
   "name": "racktop",
   "private": true,
-  "version": "1.25.3",
+  "version": "1.25.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,6 +17,8 @@
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-notification": "^2.3.0",
     "@tauri-apps/plugin-opener": "^2.5.4",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.11.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "echarts": "^6.0.0",

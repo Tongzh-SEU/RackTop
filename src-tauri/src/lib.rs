@@ -816,6 +816,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_data = app.path().app_data_dir().map_err(|error| Box::<dyn std::error::Error>::from(error))?;
             let database = Database::open(&app_data.join("racktop.sqlite")).map_err(|error| Box::<dyn std::error::Error>::from(std::io::Error::other(error)))?;
@@ -834,6 +836,11 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unmaximize();
                 let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(1320.0, 820.0)));
+            }
+
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
             }
 
             #[cfg(target_os = "macos")]

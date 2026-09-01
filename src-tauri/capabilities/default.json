@@ -8,6 +8,8 @@
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",
     "notification:default",
-    "opener:default"
+    "opener:default",
+    "process:allow-restart",
+    "updater:default"
   ]
 }

@@ -58,10 +58,12 @@ import {
   Zap,
 } from 'lucide-react'
 import { api } from './services/api'
+import { checkDesktopAppUpdate, relaunchUpdatedApp, type DesktopAppUpdate, type DesktopDownloadEvent } from './services/appUpdater'
 import { openExternalUrl } from './services/external'
 import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, LinkedProjectResourcePlan, Project, ProjectDraft, ProjectSyncProgress, RemoteHistorySyncResult, Server, ServerDraft, ServerNotificationCategory, ServerNotificationSettings, Snapshot } from './types/models'
 import { isRackTopManagedIdentity } from './utils/sshSetup'
 import { DeleteServerDialog } from './components/DeleteServerDialog'
+import { AppUpdateDialog } from './components/AppUpdateDialog'
 import { HistoryHeatmaps, StorageWaffleList } from './components/HistoryHeatmap'
 import { MetricBar } from './components/MetricBar'
 import { ManagedProcessView, type ManagedLaunchIntent } from './components/ManagedProcessView'
@@ -95,11 +97,13 @@ import { detectAppPlatform } from './utils/platform'
 import { acceleratorLabel } from './utils/accelerator'
 import { allowsServerNotification, defaultServerNotificationSettings, normalizeServerNotificationSettings } from './utils/serverNotifications'
 import { isNewerVersion, loadCachedUpdate, loadIgnoredUpdateVersion, saveCachedUpdate, saveIgnoredUpdateVersion, shouldCheckForUpdates, shouldShowUpdateBadge, type ReleaseInfo } from './utils/updateCheck'
+import { applyAppUpdateDownloadEvent, initialAppUpdateState, type AppUpdateState } from './utils/appUpdate'
 import authorAvatar from './assets/tongzh-seu.png'
 import packageInfo from '../package.json'
 
 const appPlatform = detectAppPlatform(api.isDesktop, navigator.userAgent)
 const browserPreviewState = api.isDesktop || typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('previewState')
+const releaseUrl = (version: string) => `https://github.com/Tongzh-SEU/RackTop/releases/tag/v${version.replace(/^v/i, '')}`
 
 const ONBOARDING_DISMISSED_KEY = 'racktop.onboardingDismissed.v1'
 
@@ -275,9 +279,16 @@ function App() {
   const [showActivityLog, setShowActivityLog] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
   const [latestRelease, setLatestRelease] = useState<ReleaseInfo | undefined>(() => {
+    if (browserPreviewState === 'update' || browserPreviewState === 'update-error') return { version: '1.25.4', url: releaseUrl('1.25.4') }
     const release = loadCachedUpdate().release
     return release && isNewerVersion(release.version, packageInfo.version) ? release : undefined
   })
+  const [appUpdateState, setAppUpdateState] = useState<AppUpdateState | null>(() => {
+    if (browserPreviewState === 'update') return { phase: 'downloading', version: '1.25.4', downloadedBytes: 6.8 * 1024 ** 2, totalBytes: 11.4 * 1024 ** 2 }
+    if (browserPreviewState === 'update-error') return { phase: 'error', version: '1.25.4', downloadedBytes: 0, totalBytes: null, error: '无法连接 GitHub，请检查网络后重试。' }
+    return null
+  })
+  const desktopUpdateRef = useRef<DesktopAppUpdate | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateCheckError, setUpdateCheckError] = useState<string | null>(null)
   const [ignoredUpdateVersion, setIgnoredUpdateVersion] = useState(loadIgnoredUpdateVersion)
@@ -596,8 +607,16 @@ function App() {
     setCheckingUpdate(true)
     setUpdateCheckError(null)
     try {
-      const release = await api.getLatestRelease()
-      const newer = isNewerVersion(release.version, packageInfo.version) ? release : undefined
+      let newer: ReleaseInfo | undefined
+      if (api.isDesktop) {
+        const update = await checkDesktopAppUpdate()
+        if (desktopUpdateRef.current && desktopUpdateRef.current !== update) void desktopUpdateRef.current.close().catch(() => {})
+        desktopUpdateRef.current = update
+        newer = update ? { version: update.version, url: releaseUrl(update.version), publishedAt: update.date } : undefined
+      } else {
+        const release = await api.getLatestRelease()
+        newer = isNewerVersion(release.version, packageInfo.version) ? release : undefined
+      }
       setLatestRelease(newer)
       saveCachedUpdate({ lastCheckedAt: Date.now(), release: newer })
       if (manual) setToast(newer ? `发现新版本 v${newer.version}` : '当前已是最新版本')
@@ -608,6 +627,42 @@ function App() {
       setCheckingUpdate(false)
     }
   }, [checkingUpdate])
+
+  const startAppUpdate = useCallback(async () => {
+    const requestedVersion = latestRelease?.version ?? '1.25.4'
+    if (!api.isDesktop) {
+      setAppUpdateState({ phase: 'downloading', version: requestedVersion, downloadedBytes: 6.8 * 1024 ** 2, totalBytes: 11.4 * 1024 ** 2 })
+      return
+    }
+    let update = desktopUpdateRef.current
+    try {
+      if (!update) {
+        setAppUpdateState({ phase: 'checking', version: requestedVersion, downloadedBytes: 0, totalBytes: null })
+        update = await checkDesktopAppUpdate()
+        desktopUpdateRef.current = update
+      }
+      if (!update) {
+        setAppUpdateState(null)
+        setLatestRelease(undefined)
+        setToast('当前已是最新版本')
+        return
+      }
+      setAppUpdateState(initialAppUpdateState(update.version))
+      await update.downloadAndInstall((event: DesktopDownloadEvent) => {
+        setAppUpdateState((current) => current ? applyAppUpdateDownloadEvent(current, event) : current)
+      })
+      setAppUpdateState((current) => current ? { ...current, phase: 'installing' } : current)
+      await relaunchUpdatedApp()
+    } catch (error) {
+      setAppUpdateState((current) => ({
+        phase: 'error',
+        version: current?.version ?? update?.version ?? requestedVersion,
+        downloadedBytes: current?.downloadedBytes ?? 0,
+        totalBytes: current?.totalBytes ?? null,
+        error: String(error).replace(/^Error:\s*/, ''),
+      }))
+    }
+  }, [latestRelease?.version])
 
   useEffect(() => {
     const cached = loadCachedUpdate()
@@ -1454,12 +1509,14 @@ function App() {
       <aside className={`sidebar ${api.isDesktop ? 'sidebar--desktop' : ''}`}>
         <div className="sidebar__titlebar" onMouseDown={startWindowDrag} onDoubleClick={(event) => void toggleWindowMaximize(event)}>
           <div className="traffic-spacer" aria-hidden="true" />
-          <button className="brand" onClick={() => { setShowAbout(true); void checkForUpdates(true) }} aria-label="关于 RackTop">
-            <span className="brand__mark"><Activity size={18} strokeWidth={2.4} /></span>
-            <div><strong>RackTop</strong><small>算力监控</small></div>
-            {checkingUpdate && <RefreshCw className="brand__update brand__update--checking spin" size={15} aria-label="正在检查更新" />}
-            {!checkingUpdate && shouldShowUpdateBadge(latestRelease?.version, ignoredUpdateVersion) && <CircleArrowUp className="brand__update" size={16} aria-label={`发现新版本 ${latestRelease?.version}`} />}
-          </button>
+          <div className="brand-row">
+            <button className="brand" onClick={() => { setShowAbout(true); void checkForUpdates(true) }} aria-label="关于 RackTop">
+              <span className="brand__mark"><Activity size={18} strokeWidth={2.4} /></span>
+              <div><strong>RackTop</strong><small>算力监控</small></div>
+            </button>
+            {checkingUpdate && <span className="brand__update brand__update--checking" aria-label="正在检查更新"><RefreshCw className="spin" size={15} /></span>}
+            {!checkingUpdate && shouldShowUpdateBadge(latestRelease?.version, ignoredUpdateVersion) && <button className="brand__update" onClick={() => void startAppUpdate()} aria-label={`下载并安装 RackTop ${latestRelease?.version}`} title={`更新到 RackTop ${latestRelease?.version}`}><CircleArrowUp size={16} /></button>}
+          </div>
         </div>
         <nav className="primary-nav" aria-label="主导航">
           <button className={mainView === 'fleet' ? 'is-active' : ''} onClick={() => setMainView('fleet')}><LayoutDashboard size={17} />总览 <span className="nav-count">{totals.gpus}</span></button>
@@ -1574,6 +1631,12 @@ function App() {
       {showSettings && settings && <SettingsSheet settings={settings} onboardingVisible={!onboardingDismissed} onClose={() => setShowSettings(false)} onSave={async (value, showOnboarding) => { setSettings(await api.saveSettings(value)); if (showOnboarding) { localStorage.removeItem(ONBOARDING_DISMISSED_KEY); setOnboardingDismissed(false); setOnboardingUseActualState(true); setOnboardingCollapsed(false); if (onboardingDismissed) setMainView('fleet') } else { localStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true'); setOnboardingDismissed(true) } setShowSettings(false); setToast('设置已保存') }} />}
       {showActivityLog && <ActivityLogSheet servers={servers} snapshots={snapshots} onClose={() => setShowActivityLog(false)} />}
       {showAbout && <AboutSheet latestRelease={latestRelease} checkingUpdate={checkingUpdate} updateError={updateCheckError} ignoredVersion={ignoredUpdateVersion} onIgnoreUpdate={(version) => { saveIgnoredUpdateVersion(version); setIgnoredUpdateVersion(version); setToast(`已忽略 v${version} 的更新提示`) }} onCheckUpdate={() => void checkForUpdates(true)} onClose={() => setShowAbout(false)} onNotice={setToast} />}
+      {appUpdateState && <AppUpdateDialog state={appUpdateState} onClose={() => setAppUpdateState(null)} onRetry={() => {
+        const previous = desktopUpdateRef.current
+        desktopUpdateRef.current = null
+        if (previous) void previous.close().catch(() => {})
+        void startAppUpdate()
+      }} onManualDownload={() => void openExternalUrl(latestRelease?.url ?? releaseUrl(appUpdateState.version)).catch((error) => setToast(`无法打开默认浏览器：${String(error)}`))} />}
       {importDrafts && <SshImportSheet drafts={importDrafts} servers={servers} onClose={() => setImportDrafts(null)} onImport={async (selected) => { for (const draft of selected) await api.saveServer(draft); setServers(await api.listServers()); setImportDrafts(null); setToast(`已导入 ${selected.length} 台服务器`) }} />}
       {pendingHostKey && <HostKeyDialog info={pendingHostKey} onClose={() => setPendingHostKey(null)} onTrust={async () => { const serverId = pendingHostKey.serverId; await api.trustHostKey(pendingHostKey); setPendingHostKey(null); setToast('已信任服务器指纹'); await refreshServer(serverId) }} />}
       {serverPendingDelete && <DeleteServerDialog server={serverPendingDelete} onClose={() => setServerPendingDelete(null)} onDelete={(revokeSshAccess) => removeServer(serverPendingDelete, revokeSshAccess)} />}
