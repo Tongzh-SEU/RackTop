@@ -1,15 +1,15 @@
 {
-  "version": "1.25.3",
-  "notes": "RackTop v1.25.3 稳定版",
-  "pub_date": "2026-08-31T11:42:17Z",
+  "version": "1.25.4",
+  "notes": "RackTop v1.25.4 稳定版",
+  "pub_date": "2026-09-01T18:44:53Z",
   "platforms": {
     "darwin-aarch64": {
-      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.3/RackTop_1.25.3_macos-arm64.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaFRrMWxZK2tOZUsvaXFDelNSUDI3UDhnQ3RaQlI3eElHdTJzMHRnV29qR3prWncyNGVua2QxT0UvVk9HNDV2QzY4T2Q1MW5hNWllM0ZqVDN4ZUtKVndVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4MjQ4NjQ5CWZpbGU6UmFja1RvcF8xLjI1LjNfbWFjb3MtYXJtNjQuYXBwLnRhci5negpoY2JJdmtpNFBoZXAzUVlVbEZhZ2dTM01zZ3M5TFUwNDY4V3BhY2pManpUTnd2MzlRN2dqdnJpeUNlZ29TNnUrM2ZxMFNvQkhNYms4WDVQWnRGZHFEZz09Cg=="
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.4/RackTop_1.25.4_macos-arm64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaFQ3eFFoOTVObklodXB1NEVCUUdiQVVKZmN3YzhwNmFCSnpRamdUb1RTUC9OaXRqckxvb2FxMU5yQ1BVU3dTcXZ4YjNIRzVEcFp4ZmhHNWxjOFU1WGdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4Mjg2NzkyCWZpbGU6UmFja1RvcF8xLjI1LjRfbWFjb3MtYXJtNjQuYXBwLnRhci5negpJZlVyS0tXczIzTG9McXB1eEFKUUNSVkcxekVVWFlhVm9PYVFtR3N0WFFsaFF2U2NnaXhzN1NadU1UeUFFVVlGZGVZNkluS2NsZUx6YjlrZS9ud2JDUT09Cg=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.3/RackTop_1.25.3_x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaGZTVEoxWkdBQ3BMd2hia1JZQ3NyaVdqNHZHdGNuaEhhN21xMlRSRHJzZ2x6TjU1aDAwNjdSVVFGb1U5REdKdTYwbXF0SEh5TVM0TjBVOUZGRzRjM0FBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4MjUzODAyCWZpbGU6UmFja1RvcF8xLjI1LjNfeDY0LXNldHVwLmV4ZQpqaHRtOUhOZHF1aDhXK1JjY29qUllyR3RTOW5zekZ2NEFkczIybUxRQk4zZ2owT3lTVFlBcE12RGU5MWNpTEovZWI4YzlyT2NZcGlrdi9HS0RiSjBCZz09Cg=="
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.4/RackTop_1.25.4_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaFdxUnpKZGx0YW1POEt1UXBTMWRWNTNWQXNhUjdsT2d5VW11QVAxZFlRUlhEWWtsZnl1RGVaVnh2Yldta0Z6bnBJQW9rOUhNaDFXL0xEdjhmQnFML2dBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4Mjg3MjM0CWZpbGU6UmFja1RvcF8xLjI1LjRfeDY0LXNldHVwLmV4ZQpWSmZuVmFaSU5KRjVxZzRXMk16c1dJYmtDbytRWFR1M0F4cTcyQU03bkpXQWNJLzA5M1Z1Qnd5eHd1eHQwVHB0QzdvblV0TE5vWHlmY3JJQ3I2eklBQT09Cg=="
     }
   }
 }
