@@ -1644,7 +1644,7 @@ mod tests {
         let db = Database::open(&dir.path().join("occupancy.sqlite")).unwrap();
         let server = db.save_server(draft("Occupancy", 30)).unwrap();
         let mut sample = snapshot(&server.id, 10_000);
-        sample.gpus = vec![GpuMetric { index: 0, name: "GPU 0".into(), uuid: "GPU-a".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 2_000.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None }];
+        sample.gpus = vec![GpuMetric { index: 0, name: "GPU 0".into(), uuid: "GPU-a".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 2_000.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None, ..Default::default() }];
         sample.processes = vec![ProcessMetric { is_current_user: false, ..gpu_process("GPU-a", "alice", "python train.py", 2_000.0) }];
         db.save_snapshot(&sample).unwrap();
 
@@ -1681,7 +1681,7 @@ mod tests {
             let db = Database::open(&path).unwrap();
             let server = db.save_server(draft("Legacy occupancy", 30)).unwrap();
             let mut sample = snapshot(&server.id, 10_000);
-            sample.gpus = vec![GpuMetric { index: 0, name: "GPU 0".into(), uuid: "GPU-a".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 2_000.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None }];
+            sample.gpus = vec![GpuMetric { index: 0, name: "GPU 0".into(), uuid: "GPU-a".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 2_000.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None, ..Default::default() }];
             sample.processes = vec![ProcessMetric { is_current_user: false, ..gpu_process("GPU-a", "alice", "python train.py", 2_000.0) }];
             db.save_snapshot(&sample).unwrap();
             db.connection.lock().unwrap().execute("ALTER TABLE snapshots DROP COLUMN gpu_other_user_occupancy_json", []).unwrap();
@@ -1788,11 +1788,11 @@ mod tests {
         let mut first = snapshot(&server.id, 21_600 + 300);
         first.system.cpu_utilization = 20.0;
         first.system.memory_used_bytes = 256;
-        first.gpus.push(GpuMetric { index: 0, name: "NVIDIA Test".into(), uuid: "GPU-heatmap".into(), utilization: 40.0, memory_utilization: 0.0, memory_used_mb: 10_240.0, memory_total_mb: 40_960.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None });
+        first.gpus.push(GpuMetric { index: 0, name: "NVIDIA Test".into(), uuid: "GPU-heatmap".into(), utilization: 40.0, memory_utilization: 0.0, memory_used_mb: 10_240.0, memory_total_mb: 40_960.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None, ..Default::default() });
         let mut second = snapshot(&server.id, 21_600 + 7_200);
         second.system.cpu_utilization = 60.0;
         second.system.memory_used_bytes = 768;
-        second.gpus.push(GpuMetric { index: 0, name: "NVIDIA Test".into(), uuid: "GPU-heatmap".into(), utilization: 80.0, memory_utilization: 0.0, memory_used_mb: 30_720.0, memory_total_mb: 40_960.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None });
+        second.gpus.push(GpuMetric { index: 0, name: "NVIDIA Test".into(), uuid: "GPU-heatmap".into(), utilization: 80.0, memory_utilization: 0.0, memory_used_mb: 30_720.0, memory_total_mb: 40_960.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None, ..Default::default() });
         db.save_snapshot(&first).unwrap();
         db.save_snapshot(&second).unwrap();
 
@@ -1813,7 +1813,7 @@ mod tests {
         let server = db.save_server(draft("Replace", 30)).unwrap();
         let mut sample = snapshot(&server.id, 21_900);
         sample.system.cpu_utilization = 20.0;
-        sample.gpus.push(GpuMetric { index: 0, name: "NVIDIA Test".into(), uuid: "GPU-replace".into(), utilization: 25.0, memory_utilization: 0.0, memory_used_mb: 10_240.0, memory_total_mb: 40_960.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None });
+        sample.gpus.push(GpuMetric { index: 0, name: "NVIDIA Test".into(), uuid: "GPU-replace".into(), utilization: 25.0, memory_utilization: 0.0, memory_used_mb: 10_240.0, memory_total_mb: 40_960.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None, ..Default::default() });
         db.save_snapshot(&sample).unwrap();
         sample.system.cpu_utilization = 80.0;
         sample.gpus[0].utilization = 75.0;
@@ -1930,8 +1930,8 @@ mod tests {
         let server = db.save_server(draft("Usage", 30)).unwrap();
         let mut sample = snapshot(&server.id, 1_000_019);
         sample.gpus = vec![
-            GpuMetric { index: 0, name: "GPU 0".into(), uuid: "GPU-a".into(), utilization: 50.0, memory_utilization: 0.0, memory_used_mb: 0.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None },
-            GpuMetric { index: 1, name: "GPU 1".into(), uuid: "GPU-b".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 0.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None },
+            GpuMetric { index: 0, name: "GPU 0".into(), uuid: "GPU-a".into(), utilization: 50.0, memory_utilization: 0.0, memory_used_mb: 0.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None, ..Default::default() },
+            GpuMetric { index: 1, name: "GPU 1".into(), uuid: "GPU-b".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 0.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None, ..Default::default() },
         ];
         sample.processes = vec![
             gpu_process("GPU-a", "alice", "python train.py", 2_000.0),
@@ -1960,7 +1960,7 @@ mod tests {
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
         let server = db.save_server(draft("Usage retention", 30)).unwrap();
         let mut old = snapshot(&server.id, 1_000_000);
-        old.gpus.push(GpuMetric { index: 0, name: "GPU".into(), uuid: "GPU-a".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 0.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None });
+        old.gpus.push(GpuMetric { index: 0, name: "GPU".into(), uuid: "GPU-a".into(), utilization: 0.0, memory_utilization: 0.0, memory_used_mb: 0.0, memory_total_mb: 40_000.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None, ..Default::default() });
         db.save_local_usage(&old).unwrap();
         let mut current = old.clone();
         current.timestamp += 91 * 86_400;
@@ -2041,7 +2041,7 @@ mod tests {
         let mut sample = snapshot(&server.id, 1_000_000);
         sample.system.swap_used_bytes = 512;
         sample.system.swap_total_bytes = 2048;
-        sample.gpus.push(GpuMetric { index: 0, name: "NVIDIA Test".into(), uuid: "GPU-memory".into(), utilization: 40.0, memory_utilization: 20.0, memory_used_mb: 10_240.0, memory_total_mb: 40_960.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None });
+        sample.gpus.push(GpuMetric { index: 0, name: "NVIDIA Test".into(), uuid: "GPU-memory".into(), utilization: 40.0, memory_utilization: 20.0, memory_used_mb: 10_240.0, memory_total_mb: 40_960.0, temperature_celsius: 40.0, power_watts: 80.0, power_limit_watts: None, ..Default::default() });
         db.save_snapshot(&sample).unwrap();
 
         let history = db.get_history(&server.id, 0).unwrap();

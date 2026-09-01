@@ -231,7 +231,7 @@ pub struct ManagedRunRemoteStatus {
     pub exit_code: Option<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GpuMetric {
     pub index: u32,
@@ -245,6 +245,26 @@ pub struct GpuMetric {
     pub power_watts: f64,
     #[serde(default)]
     pub power_limit_watts: Option<f64>,
+    #[serde(default)]
+    pub sm_clock_mhz: Option<f64>,
+    #[serde(default)]
+    pub memory_clock_mhz: Option<f64>,
+    #[serde(default)]
+    pub performance_state: Option<String>,
+    #[serde(default)]
+    pub fan_speed_percent: Option<f64>,
+    #[serde(default)]
+    pub throttle_reason: Option<String>,
+    #[serde(default)]
+    pub ecc_errors: Option<u64>,
+    #[serde(default)]
+    pub health_status: Option<String>,
+    #[serde(default)]
+    pub bus_id: Option<String>,
+    #[serde(default)]
+    pub chip_id: Option<String>,
+    #[serde(default)]
+    pub hugepages_usage: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

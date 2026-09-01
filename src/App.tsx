@@ -1976,14 +1976,14 @@ function CpuOverviewCard({ snapshot, memoryPercent, onOpen }: { snapshot: Snapsh
   )
 }
 
-function GpuDetail({ snapshot, points, selectedGpuUuid, animateChart }: { snapshot: Snapshot; points: HistoryPoint[]; selectedGpuUuid: string | null; onSelectGpu: (gpuUuid: string) => void; animateChart: boolean }) {
+export function GpuDetail({ snapshot, points, selectedGpuUuid, animateChart }: { snapshot: Snapshot; points: HistoryPoint[]; selectedGpuUuid: string | null; onSelectGpu: (gpuUuid: string) => void; animateChart: boolean }) {
   const accelerator = acceleratorLabel(snapshot)
   const orderedGpus = snapshot.gpus
   const [expanded, setExpanded] = useState<{ uuid: string; mode: 'sm' | 'processes' } | null>(() => selectedGpuUuid ? { uuid: selectedGpuUuid, mode: 'sm' } : null)
-  const [hiddenHardwareDetails, setHiddenHardwareDetails] = useState<Set<string>>(new Set())
+  const [visibleHardwareDetails, setVisibleHardwareDetails] = useState<Set<string>>(new Set())
   useEffect(() => { if (selectedGpuUuid) setExpanded({ uuid: selectedGpuUuid, mode: 'sm' }) }, [selectedGpuUuid])
   const toggleExpanded = (uuid: string, mode: 'sm' | 'processes') => setExpanded((current) => current?.uuid === uuid && current.mode === mode ? null : { uuid, mode })
-  const toggleHardwareDetails = (uuid: string) => setHiddenHardwareDetails((current) => {
+  const toggleHardwareDetails = (uuid: string) => setVisibleHardwareDetails((current) => {
     const next = new Set(current)
     if (next.has(uuid)) next.delete(uuid)
     else next.add(uuid)
@@ -1999,27 +1999,45 @@ function GpuDetail({ snapshot, points, selectedGpuUuid, animateChart }: { snapsh
       const hasUnattributedMemory = unattributedMemoryMb >= 256
       const ownMemoryMb = gpuProcesses.filter((process) => process.isCurrentUser).reduce((sum, process) => sum + process.memoryUsedMb, 0)
       const totalSmUtilization = aggregateGpuSmUtilization(gpuProcesses)
+      const isNvidia = (snapshot.acceleratorVendor ?? 'nvidia') === 'nvidia'
+      const isAscend = snapshot.acceleratorVendor === 'ascend'
       const memory = gpuMemoryPercent(gpu)
       const isExpanded = expanded?.uuid === gpu.uuid
-      const hardwareDetailsVisible = !hiddenHardwareDetails.has(gpu.uuid)
-      return <article className={`panel gpu-detail gpu-detail--${gpuMemoryLevel(memory)} ${isExpanded ? 'is-selected' : ''}`} key={gpu.uuid}>
+      const hardwareDetailsVisible = visibleHardwareDetails.has(gpu.uuid)
+      return <article className={`panel gpu-detail gpu-detail--${gpuMemoryLevel(memory)} ${isExpanded ? 'is-selected' : ''} ${hardwareDetailsVisible ? '' : 'is-hardware-collapsed'}`} key={gpu.uuid}>
         <div className="gpu-detail__title"><div><span>{accelerator} {gpu.index}{isExpanded ? ' · 已展开' : ''}</span><h3>{gpu.name}</h3><small>{gpu.uuid}</small></div><strong>{displayedGpuMemoryPercent(memory)}%<small> MEM</small></strong></div>
         <div className="gpu-detail__meters"><MetricBar label="MEM" value={displayedGpuMemoryPercent(memory)} detail={`${(gpu.memoryUsedMb / 1024).toFixed(1)} / ${(gpu.memoryTotalMb / 1024).toFixed(1)} GB`} accent="purple" /><MetricBar label="UTL" value={gpu.utilization} accent={gpuLoadAccent(gpu.utilization)} /></div>
-        <div className="stat-row stat-row--gpu"><span><small>MBW</small><strong>{clampPercent(gpu.memoryUtilization).toFixed(0)}%</strong></span><span><small>温度</small><strong>{gpu.temperatureCelsius}°C</strong></span><span><small>功耗</small><strong>{gpu.powerWatts.toFixed(1)} W</strong></span><button type="button" className={expanded?.uuid === gpu.uuid && expanded.mode === 'processes' ? 'is-active' : ''} aria-expanded={expanded?.uuid === gpu.uuid && expanded.mode === 'processes'} onClick={() => toggleExpanded(gpu.uuid, 'processes')}><small>进程</small><strong>{gpuProcesses.length}</strong></button><button type="button" className={expanded?.uuid === gpu.uuid && expanded.mode === 'sm' ? 'is-active' : ''} aria-expanded={expanded?.uuid === gpu.uuid && expanded.mode === 'sm'} onClick={() => toggleExpanded(gpu.uuid, 'sm')}><small>SM</small><strong>{totalSmUtilization.toFixed(0)}%</strong></button></div>
+        <div className="stat-row stat-row--gpu"><span><small>MBW</small><strong>{clampPercent(gpu.memoryUtilization).toFixed(0)}%</strong></span><span><small>温度</small><strong>{gpu.temperatureCelsius}°C</strong></span><span><small>功耗</small><strong>{gpu.powerWatts.toFixed(1)} W</strong></span><button type="button" className={expanded?.uuid === gpu.uuid && expanded.mode === 'processes' ? 'is-active' : ''} aria-expanded={expanded?.uuid === gpu.uuid && expanded.mode === 'processes'} onClick={() => toggleExpanded(gpu.uuid, 'processes')}><small>进程</small><strong>{gpuProcesses.length}</strong></button>{isNvidia ? <button type="button" className={expanded?.uuid === gpu.uuid && expanded.mode === 'sm' ? 'is-active' : ''} aria-expanded={expanded?.uuid === gpu.uuid && expanded.mode === 'sm'} onClick={() => toggleExpanded(gpu.uuid, 'sm')}><small>SM</small><strong>{totalSmUtilization.toFixed(0)}%</strong></button> : <span><small>{isAscend ? 'AI Core' : 'PPU'}</small><strong>{clampPercent(gpu.utilization).toFixed(0)}%</strong></span>}</div>
         <div className={`gpu-detail__hardware${hardwareDetailsVisible ? '' : ' is-collapsed'}`}>
           <div className="gpu-detail__hardware-bar">
             {ownMemoryMb > 0 && <div className="gpu-detail__own"><UserRound size={13} /><strong>你的任务</strong><span>占用 {(ownMemoryMb / 1024).toFixed(1)} GB 显存</span></div>}
             <button type="button" className="gpu-detail__hardware-toggle" aria-expanded={hardwareDetailsVisible} aria-label={hardwareDetailsVisible ? '隐藏设备详情' : '展开设备详情'} title={hardwareDetailsVisible ? '隐藏设备详情' : '展开设备详情'} onClick={() => toggleHardwareDetails(gpu.uuid)}>{hardwareDetailsVisible ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button>
           </div>
-          {hardwareDetailsVisible && <TelemetryGrid items={[
+          {hardwareDetailsVisible && <TelemetryGrid items={isNvidia ? [
             { label: '可用显存', value: `${(Math.max(0, gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024).toFixed(1)} GB` },
-            gpu.powerLimitWatts !== undefined && gpu.powerLimitWatts > 0 && { label: '功率上限', value: `${gpu.powerLimitWatts.toFixed(0)} W` },
-            gpu.smClockMhz !== undefined && gpu.smClockMhz > 0 && { label: 'SM 频率', value: formatClock(gpu.smClockMhz) },
-            gpu.memoryClockMhz !== undefined && gpu.memoryClockMhz > 0 && { label: '显存频率', value: formatClock(gpu.memoryClockMhz) },
+            gpu.powerLimitWatts != null && gpu.powerLimitWatts > 0 && { label: '功率上限', value: `${gpu.powerLimitWatts.toFixed(0)} W` },
+            gpu.smClockMhz != null && gpu.smClockMhz > 0 && { label: 'SM 频率', value: formatClock(gpu.smClockMhz) },
+            gpu.memoryClockMhz != null && gpu.memoryClockMhz > 0 && { label: '显存频率', value: formatClock(gpu.memoryClockMhz) },
             Boolean(gpu.performanceState) && { label: 'P-State', value: gpu.performanceState! },
-            gpu.fanSpeedPercent !== undefined && { label: '风扇', value: `${gpu.fanSpeedPercent.toFixed(0)}%` },
+            gpu.fanSpeedPercent != null && { label: '风扇', value: `${gpu.fanSpeedPercent.toFixed(0)}%` },
             Boolean(gpu.throttleReason) && { label: '限频状态', value: gpu.throttleReason!, tone: gpu.throttleReason === '正常' || gpu.throttleReason === '空闲' ? 'normal' : 'warning' },
-            gpu.eccErrors !== undefined && { label: 'ECC 错误', value: `${gpu.eccErrors}`, tone: gpu.eccErrors > 0 ? 'critical' : 'normal' },
+            gpu.eccErrors != null && { label: 'ECC 错误', value: `${gpu.eccErrors}`, tone: gpu.eccErrors > 0 ? 'critical' : 'normal' },
+          ] : isAscend ? [
+            { label: '可用 HBM', value: `${(Math.max(0, gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024).toFixed(1)} GB` },
+            Boolean(gpu.healthStatus) && { label: '健康状态', value: gpu.healthStatus!, tone: gpu.healthStatus === 'OK' ? 'normal' : 'warning' },
+            Boolean(gpu.busId) && { label: 'PCIe Bus', value: gpu.busId! },
+            Boolean(gpu.chipId) && { label: 'Chip ID', value: gpu.chipId! },
+            Boolean(gpu.hugepagesUsage) && { label: '大页内存', value: gpu.hugepagesUsage! },
+            { label: 'AI Core', value: `${clampPercent(gpu.utilization).toFixed(0)}%` },
+            { label: 'HBM 占用', value: `${(gpu.memoryUsedMb / 1024).toFixed(1)} / ${(gpu.memoryTotalMb / 1024).toFixed(1)} GB` },
+          ] : [
+            { label: '可用 HBM', value: `${(Math.max(0, gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024).toFixed(1)} GB` },
+            { label: 'PPU 利用率', value: `${clampPercent(gpu.utilization).toFixed(0)}%` },
+            { label: '显存带宽', value: `${clampPercent(gpu.memoryUtilization).toFixed(0)}%` },
+            { label: 'HBM 容量', value: `${(gpu.memoryTotalMb / 1024).toFixed(1)} GB` },
+            { label: '当前功耗', value: `${gpu.powerWatts.toFixed(1)} W` },
+            { label: '芯片温度', value: `${gpu.temperatureCelsius.toFixed(0)}°C` },
+            { label: '设备标识', value: gpu.uuid },
           ]} />}
         </div>
         {isExpanded && <div className="gpu-detail__processes"><header><strong>{expanded.mode === 'sm' ? '进程 SM 活跃率' : `${accelerator} ${gpu.index} 进程`}</strong><small>{expanded.mode === 'sm' ? '单次 pmon 采样，不代表算法效率' : `${gpuProcesses.length} 个计算进程`}</small></header>{gpuProcesses.length ? gpuProcesses.map((process) => <div key={process.pid}><code>PID {process.pid}</code><span title={process.command}>{process.command}</span><strong>{expanded.mode === 'sm' ? `SM ${clampPercent(process.smUtilization ?? 0).toFixed(0)}%` : `${(process.memoryUsedMb / 1024).toFixed(1)} GB`}</strong></div>) : <p className="gpu-detail__empty">{hasUnattributedMemory ? `检测到 ${(unattributedMemoryMb / 1024).toFixed(1)} GB 显存占用，但 ${acceleratorDriverLabel(snapshot)}未返回可映射的 PID` : `当前没有 ${accelerator} 计算进程`}</p>}</div>}

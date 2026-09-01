@@ -182,11 +182,11 @@ const ascendSnapshot: Snapshot = {
   acceleratorVendor: 'ascend',
   system: { ...demoSnapshot.system, cpuModel: 'Kunpeng 920', cpuUtilization: 21.6, currentUserCpuUtilization: 12.4 },
   gpus: [
-    { index: 0, uuid: 'NPU-0-0', name: 'Ascend 910B', utilization: 72, memoryUtilization: 58, memoryUsedMb: 37_980, memoryTotalMb: 65_536, temperatureCelsius: 61, powerWatts: 286 },
-    { index: 1, uuid: 'NPU-1-0', name: 'Ascend 910B', utilization: 0, memoryUtilization: 0, memoryUsedMb: 24, memoryTotalMb: 65_536, temperatureCelsius: 42, powerWatts: 46 },
+    { index: 0, uuid: 'NPU-0-0', name: 'Ascend 910B', utilization: 72, memoryUtilization: 58, memoryUsedMb: 37_980, memoryTotalMb: 65_536, temperatureCelsius: 61, powerWatts: 286, healthStatus: 'OK', busId: '0000:C1:00.0', chipId: '0', hugepagesUsage: '0 / 0' },
+    { index: 1, uuid: 'NPU-1-0', name: 'Ascend 910B', utilization: 0, memoryUtilization: 0, memoryUsedMb: 24, memoryTotalMb: 65_536, temperatureCelsius: 42, powerWatts: 46, healthStatus: 'OK', busId: '0000:C2:00.0', chipId: '0', hugepagesUsage: '0 / 0' },
   ],
   processes: [
-    { gpuUuid: 'NPU-0-0', gpuIndex: 0, pid: 31284, parentPid: 1, username: 'tongzh', command: 'python train.py --device npu:0', memoryUsedMb: 37_888, smUtilization: 70, cpuPercent: 24.1, elapsed: '00:48:12', isCurrentUser: true, isGroupLeader: true },
+    { gpuUuid: 'NPU-0-0', gpuIndex: 0, pid: 31284, parentPid: 1, username: 'tongzh', command: 'python train.py --device npu:0', memoryUsedMb: 37_888, smUtilization: null, cpuPercent: 24.1, elapsed: '00:48:12', isCurrentUser: true, isGroupLeader: true },
   ],
 }
 
@@ -201,7 +201,7 @@ const ppuSnapshot: Snapshot = {
     { index: 1, uuid: 'PPU-b27e', name: 'Zhenwu PPU', utilization: 0, memoryUtilization: 0, memoryUsedMb: 32, memoryTotalMb: 65_536, temperatureCelsius: 43, powerWatts: 51 },
   ],
   processes: [
-    { gpuUuid: 'PPU-a16f', gpuIndex: 0, pid: 28640, parentPid: 1, username: 'tongzh', command: 'python train.py --devices 0', memoryUsedMb: 44_512, smUtilization: 82, cpuPercent: 21.8, elapsed: '01:12:36', isCurrentUser: true, isGroupLeader: true },
+    { gpuUuid: 'PPU-a16f', gpuIndex: 0, pid: 28640, parentPid: 1, username: 'tongzh', command: 'python train.py --devices 0', memoryUsedMb: 44_512, smUtilization: null, cpuPercent: 21.8, elapsed: '01:12:36', isCurrentUser: true, isGroupLeader: true },
   ],
 }
 
