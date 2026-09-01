@@ -432,6 +432,7 @@ button.gpu-card:active { transform: scale(.99); }
 .resource-telemetry--compact > span { min-height: 38px; padding-top: 2px; padding-bottom: 2px; }
 .gpu-detail-list { contain: inline-size; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); overflow: hidden; min-width: 0; width: 100%; max-width: 100%; gap: 10px; align-items: start; }
 .gpu-detail { width: 100%; padding: 16px; color: inherit; background: var(--surface); text-align: left; cursor: default; }
+.gpu-detail.is-hardware-collapsed { padding-bottom: 10px; }
 .gpu-detail.is-selected { border-color: color-mix(in srgb, var(--blue) 42%, var(--border)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 11%, transparent), var(--shadow); }
 .gpu-detail__title { display: flex; justify-content: space-between; }
 .gpu-detail__title span, .gpu-detail__title small { color: var(--text-tertiary); font-size: calc(10px + var(--font-adjust, 0px)); }
@@ -440,10 +441,12 @@ button.gpu-card:active { transform: scale(.99); }
 .gpu-detail--active .gpu-detail__title > strong { color: var(--blue); }.gpu-detail--high .gpu-detail__title > strong { color: var(--orange); }.gpu-detail--critical { border-color: color-mix(in srgb, var(--red) 10%, var(--border)); background: color-mix(in srgb, var(--red) 2%, var(--surface)); }.gpu-detail--critical .gpu-detail__title > strong { color: var(--red); }
 .gpu-detail__meters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 13px; }.gpu-detail__meters .metric-bar { margin: 0; }
 .gpu-detail__hardware { display: grid; margin-top: 8px; }
-.gpu-detail__hardware.is-collapsed { margin-top: 6px; }
+.gpu-detail__hardware.is-collapsed { margin-top: 2px; }
 .gpu-detail__hardware .resource-telemetry { margin-top: 2px; padding-top: 0; border-top: 0; }
 .gpu-detail__hardware-bar { position: relative; display: flex; align-items: center; min-height: 24px; }
+.gpu-detail__hardware.is-collapsed .gpu-detail__hardware-bar { min-height: 16px; }
 .gpu-detail__hardware-toggle { position: absolute; left: 50%; display: grid; place-items: center; width: 32px; height: 20px; padding: 0; border: 0; border-radius: 0; color: var(--text-tertiary); background: transparent; box-shadow: none; cursor: default; transform: translateX(-50%); transition: color 120ms ease, transform 100ms var(--ease-out); }
+.gpu-detail__hardware.is-collapsed .gpu-detail__hardware-toggle { height: 16px; }
 .gpu-detail__hardware-toggle:hover { color: var(--text-secondary); }
 .gpu-detail__hardware-toggle:active { transform: translateX(-50%) scale(.92); }
 .gpu-detail__hardware-toggle:focus-visible { outline: 0; color: var(--blue); }

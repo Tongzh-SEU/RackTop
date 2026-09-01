@@ -92,12 +92,12 @@ if ! command -v nvidia-smi >/dev/null 2>&1 && command -v npu-smi >/dev/null 2>&1
       /^\|/ {
         for (i=2; i<NF; i++) field[i]=trim($i)
         if (field[2] ~ /^[0-9]+$/ && field[4] ~ /^(OK|Warning|Alarm|Failure)$/) {
-          device=field[2]; name=field[3]; power=field[5]+0; temperature=field[6]+0; next
+          device=field[2]; name=field[3]; health=field[4]; power=field[5]+0; temperature=field[6]+0; hugepages=field[7]; next
         }
         if (device != "" && field[2] ~ /^[0-9]+$/ && field[3] ~ /^[0-9]+$/ && field[4] ~ /:/) {
           split(field[7], memory, "/"); used=trim(memory[1])+0; total=trim(memory[2])+0;
           memory_percent=(total > 0 ? used/total*100 : 0);
-          printf "%s, Ascend %s, NPU-%s-%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n", device, name, device, field[2], field[5]+0, memory_percent, used, total, temperature, power
+          printf "%s, Ascend %s, NPU-%s-%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, , , , , , , , %s, %s, %s, %s\n", device, name, device, field[2], field[5]+0, memory_percent, used, total, temperature, power, health, field[4], field[2], hugepages
         }
       }';
   elif printf '%s\n' "$ascend_info" | grep -qi 'permission denied'; then printf 'permissionDenied\n%s\n' "$ascend_info";
@@ -129,13 +129,20 @@ else
   if [ "$nvidia_state" != available ]; then printf '%s\n' "$nvidia_list"; fi;
   if [ "$nvidia_state" = available ] || [ "$nvidia_state" = degraded ]; then
     printf '__RACKTOP_GPU__\n';
+    query_nvidia_gpus() {
+      base_query='index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,power.limit';
+      detail_query='clocks.current.sm,clocks.current.memory,pstate,fan.speed';
+      nvidia-smi "$@" --query-gpu="$base_query,$detail_query,clocks_event_reasons.active,ecc.errors.uncorrected.aggregate.total" --format=csv,noheader,nounits 2>/dev/null ||
+        nvidia-smi "$@" --query-gpu="$base_query,$detail_query,clocks_throttle_reasons.active,ecc.errors.uncorrected.aggregate.total" --format=csv,noheader,nounits 2>/dev/null ||
+        nvidia-smi "$@" --query-gpu="$base_query,$detail_query" --format=csv,noheader,nounits 2>/dev/null ||
+        nvidia-smi "$@" --query-gpu="$base_query" --format=csv,noheader,nounits 2>/dev/null ||
+        nvidia-smi "$@" --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null;
+    }
     if [ "$nvidia_state" = available ]; then
-      nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits 2>/dev/null ||
-        nvidia-smi --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null || true;
+      query_nvidia_gpus || true;
     else
       printf '%s\n' "$nvidia_list" | sed -n 's/^GPU \([0-9][0-9]*\):.*/\1/p' | while read -r gpu_index; do
-        nvidia-smi -i "$gpu_index" --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits 2>/dev/null ||
-          nvidia-smi -i "$gpu_index" --query-gpu=index,name,uuid,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null || true;
+        query_nvidia_gpus -i "$gpu_index" || true;
       done;
       printf '%s\n' "$nvidia_list" | awk '
         /^GPU [0-9][0-9]*:/ {
@@ -458,11 +465,64 @@ fn parse_memory(lines: &[String], system: &mut SystemMetric) {
     system.swap_used_bytes = system.swap_total_bytes.saturating_sub(*values.get("SwapFree").unwrap_or(&0));
 }
 
+fn format_throttle_reason(value: String) -> String {
+    let Ok(active) = u64::from_str_radix(value.trim_start_matches("0x"), 16) else {
+        return format!("受限 ({value})");
+    };
+    if active == 0 {
+        return "正常".into();
+    }
+    let reasons = [
+        (0x001, "空闲"),
+        (0x002, "应用时钟"),
+        (0x004, "功率限制"),
+        (0x008, "硬件降频"),
+        (0x010, "同步加速"),
+        (0x020, "温度限制"),
+        (0x040, "硬件温度限制"),
+        (0x080, "外部功率制动"),
+        (0x100, "显示时钟限制"),
+    ]
+    .into_iter()
+    .filter_map(|(mask, label)| (active & mask != 0).then_some(label))
+    .collect::<Vec<_>>();
+    if reasons.is_empty() {
+        format!("受限 ({value})")
+    } else {
+        reasons.join("、")
+    }
+}
+
 fn parse_gpu(line: &str) -> Result<GpuMetric, String> {
     let fields: Vec<&str> = line.split(',').map(str::trim).collect();
     if fields.len() < 9 { return Err(format!("无效的 nvidia-smi GPU 输出：{line}")); }
-    let power_limit_watts = fields.get(9).map(|value| parse_number(value)).filter(|value| *value > 0.0);
-    Ok(GpuMetric { index: fields[0].parse().map_err(|_| format!("无效 GPU 索引：{}", fields[0]))?, name: fields[1].into(), uuid: fields[2].into(), utilization: parse_number(fields[3]).clamp(0.0, 100.0), memory_utilization: parse_number(fields[4]).clamp(0.0, 100.0), memory_used_mb: parse_number(fields[5]).max(0.0), memory_total_mb: parse_number(fields[6]).max(0.0), temperature_celsius: parse_number(fields[7]), power_watts: parse_number(fields[8]).max(0.0), power_limit_watts })
+    let optional_number = |index: usize| fields.get(index).and_then(|value| value.parse::<f64>().ok()).filter(|value| value.is_finite());
+    let optional_text = |index: usize| fields.get(index).map(|value| value.trim()).filter(|value| {
+        !value.is_empty() && !matches!(value.to_ascii_lowercase().as_str(), "n/a" | "[n/a]" | "not supported" | "[not supported]" | "unknown error")
+    }).map(str::to_string);
+    let throttle_reason = optional_text(14).map(format_throttle_reason);
+    Ok(GpuMetric {
+        index: fields[0].parse().map_err(|_| format!("无效 GPU 索引：{}", fields[0]))?,
+        name: fields[1].into(),
+        uuid: fields[2].into(),
+        utilization: parse_number(fields[3]).clamp(0.0, 100.0),
+        memory_utilization: parse_number(fields[4]).clamp(0.0, 100.0),
+        memory_used_mb: parse_number(fields[5]).max(0.0),
+        memory_total_mb: parse_number(fields[6]).max(0.0),
+        temperature_celsius: parse_number(fields[7]),
+        power_watts: parse_number(fields[8]).max(0.0),
+        power_limit_watts: optional_number(9).filter(|value| *value > 0.0),
+        sm_clock_mhz: optional_number(10).filter(|value| *value > 0.0),
+        memory_clock_mhz: optional_number(11).filter(|value| *value > 0.0),
+        performance_state: optional_text(12),
+        fan_speed_percent: optional_number(13).map(|value| value.clamp(0.0, 100.0)),
+        throttle_reason,
+        ecc_errors: optional_number(15).filter(|value| *value >= 0.0).map(|value| value as u64),
+        health_status: optional_text(16),
+        bus_id: optional_text(17),
+        chip_id: optional_text(18),
+        hugepages_usage: optional_text(19),
+    })
 }
 
 #[derive(Default)]
@@ -801,7 +861,24 @@ mod tests {
         assert_eq!(gpu.power_limit_watts, None);
         let gpu_with_limit = parse_gpu("0, NVIDIA Test, GPU-test, 50, 25, 1024, 40960, 35, 80, 300").unwrap();
         assert_eq!(gpu_with_limit.power_limit_watts, Some(300.0));
+        let detailed_gpu = parse_gpu("0, NVIDIA A100, GPU-test, 50, 25, 1024, 40960, 35, 80, 300, 1410, 1215, P0, N/A, 0x0000000000000000, 0").unwrap();
+        assert_eq!(detailed_gpu.sm_clock_mhz, Some(1410.0));
+        assert_eq!(detailed_gpu.memory_clock_mhz, Some(1215.0));
+        assert_eq!(detailed_gpu.performance_state.as_deref(), Some("P0"));
+        assert_eq!(detailed_gpu.fan_speed_percent, None);
+        assert_eq!(detailed_gpu.throttle_reason.as_deref(), Some("正常"));
+        assert_eq!(detailed_gpu.ecc_errors, Some(0));
+        let npu = parse_gpu("0, Ascend 910B3, NPU-0-0, 72, 58, 37980, 65536, 61, 286, , , , , , , , OK, 0000:C1:00.0, 0, 0 / 0").unwrap();
+        assert_eq!(npu.health_status.as_deref(), Some("OK"));
+        assert_eq!(npu.bus_id.as_deref(), Some("0000:C1:00.0"));
+        assert_eq!(npu.chip_id.as_deref(), Some("0"));
+        assert_eq!(npu.hugepages_usage.as_deref(), Some("0 / 0"));
+        assert_eq!(parse_gpu("0, NVIDIA A100, GPU-test, 0, 0, 0, 40960, 35, 40, 300, 210, 1215, P0, N/A, 0x0000000000000001, 0").unwrap().throttle_reason.as_deref(), Some("空闲"));
+        assert_eq!(parse_gpu("0, NVIDIA A100, GPU-test, 100, 80, 40000, 40960, 70, 250, 300, 1410, 1215, P0, N/A, 0x0000000000000004, 0").unwrap().throttle_reason.as_deref(), Some("功率限制"));
         assert!(REMOTE_SCRIPT.contains("power.draw,power.limit"));
+        assert!(REMOTE_SCRIPT.contains("clocks.current.sm,clocks.current.memory,pstate,fan.speed"));
+        assert!(REMOTE_SCRIPT.contains("clocks_event_reasons.active,ecc.errors.uncorrected.aggregate.total"));
+        assert!(REMOTE_SCRIPT.contains("clocks_throttle_reasons.active,ecc.errors.uncorrected.aggregate.total"));
     }
 
     #[test]

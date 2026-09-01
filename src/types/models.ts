@@ -44,13 +44,17 @@ export interface GpuMetric {
   memoryTotalMb: number
   temperatureCelsius: number
   powerWatts: number
-  powerLimitWatts?: number
-  smClockMhz?: number
-  memoryClockMhz?: number
-  performanceState?: string
-  fanSpeedPercent?: number
-  throttleReason?: string
-  eccErrors?: number
+  powerLimitWatts?: number | null
+  smClockMhz?: number | null
+  memoryClockMhz?: number | null
+  performanceState?: string | null
+  fanSpeedPercent?: number | null
+  throttleReason?: string | null
+  eccErrors?: number | null
+  healthStatus?: string | null
+  busId?: string | null
+  chipId?: string | null
+  hugepagesUsage?: string | null
 }
 
 export interface ProcessMetric {
