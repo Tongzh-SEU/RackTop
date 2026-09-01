@@ -113,7 +113,7 @@ export interface Snapshot {
   osName: string
   timestamp: number
   status: ServerStatus
-  acceleratorVendor?: 'nvidia' | 'ascend'
+  acceleratorVendor?: 'nvidia' | 'ascend' | 'ppu'
   system: SystemMetric
   gpus: GpuMetric[]
   disks?: DiskMetric[]
@@ -242,6 +242,7 @@ export interface GpuMemoryStallWarning {
   gpuUuid: string
   gpuIndex: number
   gpuName: string
+  acceleratorVendor?: Snapshot['acceleratorVendor']
   usernames: string[]
   defunctProcesses: Array<{ pid: number; username: string }>
   memoryUsedMb: number

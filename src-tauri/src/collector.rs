@@ -80,7 +80,7 @@ if [ "${RACKTOP_INCLUDE_DISKS:-1}" = "1" ]; then
 fi;
 printf '__RACKTOP_USERCPU__\n'; ps -u "$(id -un)" -o pcpu= 2>/dev/null | awk -v n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)" '{s+=$1} END {printf "%.2f\n", (n>0?s/n:s+0)}';
 printf '__RACKTOP_ACCELERATOR__\n';
-if command -v nvidia-smi >/dev/null 2>&1; then printf 'nvidia\n'; elif command -v npu-smi >/dev/null 2>&1; then printf 'ascend\n'; else printf 'nvidia\n'; fi;
+if command -v nvidia-smi >/dev/null 2>&1; then printf 'nvidia\n'; elif command -v npu-smi >/dev/null 2>&1; then printf 'ascend\n'; elif command -v ppu-smi >/dev/null 2>&1; then printf 'ppu\n'; else printf 'nvidia\n'; fi;
 printf '__RACKTOP_NVIDIA__\n';
 if ! command -v nvidia-smi >/dev/null 2>&1 && command -v npu-smi >/dev/null 2>&1; then
   ascend_info="$(npu-smi info 2>&1)"; ascend_status=$?;
@@ -102,6 +102,21 @@ if ! command -v nvidia-smi >/dev/null 2>&1 && command -v npu-smi >/dev/null 2>&1
       }';
   elif printf '%s\n' "$ascend_info" | grep -qi 'permission denied'; then printf 'permissionDenied\n%s\n' "$ascend_info";
   else printf 'failed\n%s\n' "$ascend_info"; fi;
+elif ! command -v nvidia-smi >/dev/null 2>&1 && command -v ppu-smi >/dev/null 2>&1; then
+  ppu_info="$(ppu-smi --query-ppu=index,name,uuid,utilization.ppu,utilization.memory,memory.used,memory.total,temperature.ppu,power.draw --format=csv,noheader,nounits 2>&1)"; ppu_status=$?;
+  if [ "$ppu_status" -eq 0 ]; then
+    printf 'available\n';
+    printf '__RACKTOP_GPU__\n';
+    printf '%s\n' "$ppu_info";
+  elif ppu_basic="$(ppu-smi --query-ppu=index,name,uuid,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null)"; then
+    printf 'available\n';
+    printf '__RACKTOP_GPU__\n';
+    printf '%s\n' "$ppu_basic" | awk -F ',' '
+      function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value }
+      NF >= 5 { used=trim($4)+0; total=trim($5)+0; memory_percent=(total > 0 ? used/total*100 : 0); printf "%s, %s, %s, 0, %.2f, %.2f, %.2f, 0, 0\n", trim($1), trim($2), trim($3), memory_percent, used, total }
+    ';
+  elif printf '%s\n' "$ppu_info" | grep -qi 'permission denied'; then printf 'permissionDenied\n%s\n' "$ppu_info";
+  else printf 'failed\n%s\n' "$ppu_info"; fi;
 elif ! command -v nvidia-smi >/dev/null 2>&1; then
   printf 'missing\n';
 else
@@ -160,6 +175,9 @@ if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = "1" ]; then
         /^\|/ { for (i=2; i<NF; i++) field[i]=trim($i); if (field[2] ~ /^[0-9]+$/ && field[3] ~ /^[0-9]+$/ && field[4] ~ /^[0-9]+$/) printf "NPU-%s-%s, %s, %s, %.2f\n", field[2], field[3], field[4], field[5], field[6]+0 }
       '
     done)";
+    printf '%s\n' "$gpu_proc";
+  elif command -v ppu-smi >/dev/null 2>&1; then
+    gpu_proc="$(ppu-smi --query-compute-apps=uuid,pid,process_name,used_ppu_memory --format=csv,noheader,nounits 2>/dev/null || true)";
     printf '%s\n' "$gpu_proc";
   fi;
   printf '__RACKTOP_GPUPMON__\n';
@@ -361,13 +379,14 @@ pub fn parse_snapshot(server_id: &str, output: &str) -> Result<Snapshot, String>
     system.current_user_cpu_utilization = first_line(&sections, "USERCPU").map(parse_number).unwrap_or_default();
     let disks = sections.get("DISK").map(|lines| lines.iter().filter_map(|line| parse_disk(line).ok()).collect()).unwrap_or_default();
 
-    let accelerator_vendor = first_line(&sections, "ACCELERATOR").filter(|value| *value == "ascend").unwrap_or("nvidia").to_string();
+    let accelerator_vendor = first_line(&sections, "ACCELERATOR").filter(|value| matches!(*value, "ascend" | "ppu")).unwrap_or("nvidia").to_string();
     let nvidia_lines = sections.get("NVIDIA").cloned().unwrap_or_default();
     let nvidia_smi = nvidia_lines.first().map(String::as_str).unwrap_or("missing").to_string();
+    let accelerator_tool = match accelerator_vendor.as_str() { "ascend" => "npu-smi", "ppu" => "ppu-smi", _ => "nvidia-smi" };
     let nvidia_message = match nvidia_smi.as_str() {
         "available" => None,
-        "missing" => Some("服务器未检测到 nvidia-smi 或 npu-smi；可能没有受支持的加速卡，或驱动工具未安装/不在 PATH 中。".into()),
-        _ => Some(nvidia_lines.iter().skip(1).cloned().collect::<Vec<_>>().join("\n").trim().to_string()).filter(|value| !value.is_empty()).or_else(|| Some("nvidia-smi 存在但无法执行，请检查驱动和权限。".into())),
+        "missing" => Some("服务器未检测到 nvidia-smi、npu-smi 或 ppu-smi；可能没有受支持的加速卡，或驱动工具未安装/不在 PATH 中。".into()),
+        _ => Some(nvidia_lines.iter().skip(1).cloned().collect::<Vec<_>>().join("\n").trim().to_string()).filter(|value| !value.is_empty()).or_else(|| Some(format!("{accelerator_tool} 存在但无法执行，请检查驱动和权限。"))),
     };
     let gpus: Vec<GpuMetric> = sections
         .get("GPU")
@@ -608,6 +627,10 @@ fn validate_run_id(run_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn visible_devices_variable(accelerator_vendor: &str) -> &'static str {
+    if accelerator_vendor == "ascend" { "ASCEND_RT_VISIBLE_DEVICES" } else { "CUDA_VISIBLE_DEVICES" }
+}
+
 pub async fn launch_managed_run(server: &Server, password: Option<&str>, run_id: &str, working_directory: &str, task_command: &str, gpu_indices: &[u32], project_log_path: Option<&str>, accelerator_vendor: &str) -> Result<ManagedRunLaunchResult, String> {
     validate_run_id(run_id)?;
     if working_directory.trim().is_empty() { return Err("工作目录不能为空".into()); }
@@ -622,7 +645,7 @@ pub async fn launch_managed_run(server: &Server, password: Option<&str>, run_id:
     let payload = STANDARD.encode(task_command.trim());
     let project_log = STANDARD.encode(project_log_path.unwrap_or("").trim());
     let gpu_csv = gpu_indices.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-    let visible_devices_variable = if accelerator_vendor == "ascend" { "ASCEND_RT_VISIBLE_DEVICES" } else { "CUDA_VISIBLE_DEVICES" };
+    let visible_devices_variable = visible_devices_variable(accelerator_vendor);
     let script = format!(r#"set -eu
 decode_base64() {{ printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | base64 --decode; }}
 workdir="$(decode_base64 '{workdir}')"
@@ -881,6 +904,21 @@ mod tests {
         assert_eq!(snapshot.gpus[0].uuid, "NPU-0-0");
         assert!(REMOTE_SCRIPT.contains("npu-smi info"));
         assert!(REMOTE_SCRIPT.contains("Ascend"));
+    }
+
+    #[test]
+    fn recognizes_ppu_snapshots_without_a_separate_metric_model() {
+        let sample = SAMPLE.replace("__RACKTOP_NVIDIA__", "__RACKTOP_ACCELERATOR__\nppu\n__RACKTOP_NVIDIA__")
+            .replace("NVIDIA GeForce RTX 4090 D", "Zhenwu PPU")
+            .replace("GPU-abc", "PPU-abc");
+        let snapshot = parse_snapshot("server-ppu", &sample).unwrap();
+        assert_eq!(snapshot.accelerator_vendor, "ppu");
+        assert_eq!(snapshot.gpus[0].uuid, "PPU-abc");
+        assert_eq!(snapshot.processes[0].gpu_uuid, "PPU-abc");
+        assert!(REMOTE_SCRIPT.contains("--query-ppu=index,name,uuid"));
+        assert!(REMOTE_SCRIPT.contains("--query-compute-apps=uuid,pid,process_name,used_ppu_memory"));
+        assert_eq!(visible_devices_variable("ppu"), "CUDA_VISIBLE_DEVICES");
+        assert_eq!(visible_devices_variable("ascend"), "ASCEND_RT_VISIBLE_DEVICES");
     }
 
     #[test]

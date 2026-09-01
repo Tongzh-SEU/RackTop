@@ -1,4 +1,5 @@
 import type { Server, Snapshot } from '../types/models'
+import { acceleratorLabel } from './accelerator'
 
 export type InteractionVisualStatus = 'normal' | 'running' | 'error'
 
@@ -19,6 +20,7 @@ export interface AcquiredDataItem {
 
 export function acquiredDataItems(server: Server | undefined, snapshot: Snapshot | undefined): AcquiredDataItem[] {
   if (!snapshot) return [{ label: '状态数据', value: '等待首次成功采集' }]
+  const accelerator = acceleratorLabel(snapshot)
   const mainCpuProcesses = snapshot.cpuProcesses.filter((process) => process.isGroupLeader).length
   const syncText = !server?.remoteHistoryEnabled
     ? '未启用远端持续保存'
@@ -26,9 +28,9 @@ export function acquiredDataItems(server: Server | undefined, snapshot: Snapshot
       ? `已启用 · 最近同步 ${new Date(server.remoteHistoryLastSyncAt * 1_000).toLocaleString('zh-CN', { hour12: false })}`
       : '已启用 · 等待首次同步'
   return [
-    { label: 'GPU 状态', value: `${snapshot.gpus.length} 张 GPU · UTL、MEM、SM、温度、功率` },
+    { label: `${accelerator} 状态`, value: `${snapshot.gpus.length} 张 ${accelerator} · UTL、MEM、SM、温度、功率` },
     { label: '系统状态', value: 'CPU、内存、Swap、负载' },
-    { label: '进程信息', value: `${snapshot.processes.length} 个 GPU 进程 · ${mainCpuProcesses} 个 CPU 主进程` },
+    { label: '进程信息', value: `${snapshot.processes.length} 个 ${accelerator} 进程 · ${mainCpuProcesses} 个 CPU 主进程` },
     { label: '磁盘空间', value: `${snapshot.disks?.length ?? 0} 个有效磁盘` },
     { label: '远端历史', value: syncText },
   ]

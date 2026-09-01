@@ -40,6 +40,12 @@ describe('HistoryHeatmaps', () => {
     expect(nvidiaMarkup).toContain('GPU 0 MEM 每 3 小时平均值热力图')
   })
 
+  it('uses PPU labels in the shared heatmap component', () => {
+    const markup = renderToStaticMarkup(<HistoryHeatmaps snapshot={{ ...snapshot, acceleratorVendor: 'ppu' }} points={points} retentionDays={2} />)
+    expect(markup).toContain('PPU 0 MEM 每 3 小时平均值热力图')
+    expect(markup).not.toContain('GPU 0 MEM 每 3 小时平均值热力图')
+  })
+
   it('uses a full-width responsive grid while preserving minimum cell size', () => {
     const markup = renderToStaticMarkup(<HistoryHeatmaps snapshot={snapshot} points={points} retentionDays={30} />)
     expect(markup).toContain('data-columns="30" data-rows="8"')

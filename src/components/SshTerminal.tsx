@@ -10,7 +10,7 @@ import { bracketTerminalPaste, isMultilineTerminalPaste, normalizeTerminalPaste 
 
 interface TerminalEvent { sessionId: string; data?: string }
 
-export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor = 'nvidia', onNotice }: { serverId: string; serverName: string; gpuIndex?: number; acceleratorVendor?: 'nvidia' | 'ascend'; onNotice?: (message: string) => void }) {
+export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor = 'nvidia', onNotice }: { serverId: string; serverName: string; gpuIndex?: number; acceleratorVendor?: 'nvidia' | 'ascend' | 'ppu'; onNotice?: (message: string) => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<string | null>(null)
   const lineRef = useRef('')

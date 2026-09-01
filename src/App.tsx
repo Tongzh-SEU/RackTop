@@ -94,7 +94,7 @@ import { updateSharedGpuWarnings, type MineProcessWarning, type SharedGpuWatchMa
 import { gpuContextName, serverDisplayName } from './utils/serverName'
 import { loadLaunchProfiles, loadManagedRuns } from './utils/managedRuns'
 import { detectAppPlatform } from './utils/platform'
-import { acceleratorLabel } from './utils/accelerator'
+import { acceleratorDeviceName, acceleratorDriverLabel, acceleratorLabel } from './utils/accelerator'
 import { allowsServerNotification, defaultServerNotificationSettings, normalizeServerNotificationSettings } from './utils/serverNotifications'
 import { isNewerVersion, loadCachedUpdate, loadIgnoredUpdateVersion, saveCachedUpdate, saveIgnoredUpdateVersion, shouldCheckForUpdates, shouldShowUpdateBadge, type ReleaseInfo } from './utils/updateCheck'
 import { applyAppUpdateDownloadEvent, initialAppUpdateState, type AppUpdateState } from './utils/appUpdate'
@@ -442,7 +442,7 @@ function App() {
       const serverName = serverDisplayName(serverConfig?.name ?? snapshot.hostname)
       const sharedWarnings = updateSharedGpuWarnings(serverName, snapshot, sharedGpuWatchesRef.current)
       const nextServerWarnings: MineProcessWarning[] = [
-        ...exited.map((process) => ({ id: `exit:${serverId}:${process.pid}`, serverId, message: `${serverName} · 你的 GPU 进程意外退出：PID ${process.pid}`, tone: 'warning' as const })),
+        ...exited.map((process) => ({ id: `exit:${serverId}:${process.pid}`, serverId, message: `${serverName} · 你的 ${acceleratorLabel(snapshot)} 进程意外退出：PID ${process.pid}`, tone: 'warning' as const })),
         ...sharedWarnings,
       ]
       const activeWarningIds = new Set(nextServerWarnings.map((warning) => warning.id))
@@ -1004,7 +1004,7 @@ function App() {
       const defunct = warning.defunctProcesses[0]
       const accelerator = snapshots[warning.serverId] ? acceleratorLabel(snapshots[warning.serverId]) : 'GPU'
       void api.notify(
-        `${warning.serverName} · ${accelerator} ${warning.gpuIndex} · ${warning.gpuName.replace('NVIDIA ', '')} 显存占用预警`,
+        `${warning.serverName} · ${accelerator} ${warning.gpuIndex} · ${acceleratorDeviceName(warning.gpuName)} 显存占用预警`,
         defunct
           ? `${accelerator} ${warning.gpuIndex} 的 ${defunct.username}（PID ${defunct.pid}）已成为僵尸进程，仍占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} GB`
           : `${accelerator} ${warning.gpuIndex} 占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} GB，但 UTL 持续为 0`,
@@ -1656,7 +1656,7 @@ export function EmptyState({ onboarding, onAdd, onImport }: { onboarding?: React
       <div className="empty-state">
         <span className="empty-state__icon"><ServerIcon size={28} /></span>
         <h2>连接第一台服务器</h2>
-        <p>添加 SSH 主机或导入现有 OpenSSH Config，RackTop 会自动采集 GPU / NPU、CPU、内存和进程指标。</p>
+        <p>添加 SSH 主机或导入现有 OpenSSH Config，RackTop 会自动采集 GPU / NPU / PPU、CPU、内存和进程指标。</p>
         <div><button className="button button--primary" onClick={onAdd}><Plus size={17} />添加服务器</button><button className="button button--secondary" onClick={onImport}><Download size={17} />导入配置</button></div>
       </div>
     </div>
@@ -1717,7 +1717,7 @@ function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid
         {tabs.map((item) => <button key={item.value} role="tab" aria-selected={tab === item.value} className={tab === item.value ? 'is-active' : ''} onClick={() => onTab(item.value)}>{item.value === 'gpu' ? acceleratorLabel(snapshot) : item.label}</button>)}
       </div>
       <div className="detail-content">
-        {snapshot.acceleratorVendor !== 'ascend' && snapshot.nvidiaSmi !== 'available' && !nvidiaWarningIgnored && <NvidiaWarning snapshot={snapshot} onRefresh={onRefresh} onIgnore={onIgnoreNvidiaWarning} />}
+        {(snapshot.acceleratorVendor ?? 'nvidia') === 'nvidia' && snapshot.nvidiaSmi !== 'available' && !nvidiaWarningIgnored && <NvidiaWarning snapshot={snapshot} onRefresh={onRefresh} onIgnore={onIgnoreNvidiaWarning} />}
         {tab === 'overview' && <ServerOverview snapshot={snapshot} points={points} idleThreshold={settings?.idleGpuThreshold ?? 10} onSelectGpu={onSelectGpu} onOpenCpu={() => onTab('cpu')} onRequestTerminate={onRequestTerminate} terminatingPid={terminatingPid} animateCharts={animateCharts} gpuMemoryWarnings={gpuMemoryWarnings} isRefreshing={isRefreshing} />}
         {tab === 'gpu' && <GpuDetail snapshot={snapshot} points={points} selectedGpuUuid={selectedGpuUuid} onSelectGpu={onSelectGpu} animateChart={animateCharts} />}
         {tab === 'cpu' && <CpuDetail snapshot={snapshot} points={points} animateChart={animateCharts} />}
@@ -1808,7 +1808,7 @@ function GpuCard({ gpu, accelerator, processes, warning, onOpen }: { gpu: Snapsh
   return (
     <article className={`panel gpu-card gpu-card--${memoryLevel}${warning ? ' gpu-card--warning' : ''}`}>
       <button type="button" className="gpu-card__open" onClick={onOpen} aria-label={`查看 ${accelerator} ${gpu.index} 详情`} />
-      <PanelHeader title={`${accelerator} ${gpu.index}`} subtitle={gpu.name.replace('NVIDIA ', '')} action={<span className="gpu-card__header-actions">{warning && <button ref={warningButtonRef} type="button" className="gpu-card__warning" aria-label={`查看 ${accelerator} ${gpu.index} 异常详情`} title="查看具体问题" onClick={() => setShowWarning(true)}><AlertCircle size={17} /></button>}<ChevronRight size={16} aria-hidden="true" /></span>} />
+      <PanelHeader title={`${accelerator} ${gpu.index}`} subtitle={acceleratorDeviceName(gpu.name)} action={<span className="gpu-card__header-actions">{warning && <button ref={warningButtonRef} type="button" className="gpu-card__warning" aria-label={`查看 ${accelerator} ${gpu.index} 异常详情`} title="查看具体问题" onClick={() => setShowWarning(true)}><AlertCircle size={17} /></button>}<ChevronRight size={16} aria-hidden="true" /></span>} />
       <MetricBar label="MEM" value={displayedMemoryPercent} detail={`${(gpu.memoryUsedMb / 1024).toFixed(1)} / ${(gpu.memoryTotalMb / 1024).toFixed(0)} GB`} accent="purple" currentUserValue={ownMemoryPercent} currentUserDetail={`${(ownMemoryMb / 1024).toFixed(1)} GB`} />
       <MetricBar label="UTL" value={clampPercent(gpu.utilization)} accent={gpuLoadAccent(gpu.utilization)} />
       <TelemetryGrid compact items={[
@@ -1839,12 +1839,12 @@ function GpuMemoryWarningDialog({ warning, accelerator, onClose }: { warning: Gp
   return (
     <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="sheet gpu-warning-sheet" role="dialog" aria-modal="true" aria-labelledby="gpu-warning-title">
-        <header className="sheet__header"><div><p className="eyebrow">{accelerator} 异常</p><h2 id="gpu-warning-title">{warning.serverName} · {accelerator} {warning.gpuIndex} · {warning.gpuName.replace('NVIDIA ', '')}</h2></div><button autoFocus className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
+        <header className="sheet__header"><div><p className="eyebrow">{accelerator} 异常</p><h2 id="gpu-warning-title">{warning.serverName} · {accelerator} {warning.gpuIndex} · {acceleratorDeviceName(warning.gpuName)}</h2></div><button autoFocus className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
         <div className="gpu-warning-body">
           <span className="gpu-warning-body__icon"><AlertCircle size={23} /></span>
           <div><strong>{hasDefunctProcesses ? '检测到僵尸进程占用显存' : `显存持续占用，但 ${accelerator} 利用率为 0`}</strong><p>{hasDefunctProcesses ? '进程已经退出但仍残留显存占用，建议检查并清理对应父进程。' : '任务可能正在等待数据、排队或已经停止计算，请核对进程状态。'}</p></div>
           <dl>
-            <div><dt>{accelerator}</dt><dd>{warning.gpuName.replace('NVIDIA ', '')}</dd></div>
+            <div><dt>{accelerator}</dt><dd>{acceleratorDeviceName(warning.gpuName)}</dd></div>
             <div><dt>显存</dt><dd>{(warning.memoryUsedMb / 1024).toFixed(1)} / {(warning.memoryTotalMb / 1024).toFixed(1)} GB</dd></div>
             <div><dt>持续时间</dt><dd>{duration}</dd></div>
             <div><dt>涉及用户</dt><dd>{warning.usernames.length ? warning.usernames.join('、') : '未识别'}</dd></div>
@@ -1887,7 +1887,7 @@ function GpuDetail({ snapshot, points, selectedGpuUuid, animateChart }: { snapsh
   useEffect(() => { if (selectedGpuUuid) setExpanded({ uuid: selectedGpuUuid, mode: 'sm' }) }, [selectedGpuUuid])
   const toggleExpanded = (uuid: string, mode: 'sm' | 'processes') => setExpanded((current) => current?.uuid === uuid && current.mode === mode ? null : { uuid, mode })
   return <div className="content-stack">
-    <section className="resource-trend-grid">{orderedGpus.filter(isGpuAvailable).map((gpu) => <ResourceTrend key={gpu.uuid} snapshot={snapshot} kind="gpu" gpuUuid={gpu.uuid} title={`${accelerator} ${gpu.index} · ${gpu.name.replace('NVIDIA ', '')}`} animate={animateChart} />)}</section>
+    <section className="resource-trend-grid">{orderedGpus.filter(isGpuAvailable).map((gpu) => <ResourceTrend key={gpu.uuid} snapshot={snapshot} kind="gpu" gpuUuid={gpu.uuid} title={`${accelerator} ${gpu.index} · ${acceleratorDeviceName(gpu.name)}`} animate={animateChart} />)}</section>
     <section className="gpu-detail-list">{orderedGpus.map((gpu) => {
       if (!isGpuAvailable(gpu)) return <article className="panel gpu-detail gpu-detail--unavailable" key={gpu.uuid}><div className="gpu-detail__title"><div><span>{accelerator} {gpu.index}</span><h3>{gpu.name}</h3><small>{gpu.uuid.replace('unavailable-', '').replaceAll('_', ':')}</small></div><strong>无法读取</strong></div><div className="gpu-unavailable"><AlertCircle size={19} /><div><strong>监控数据不可用</strong><p>健康 {accelerator} 仍会继续采集；此卡不参与利用率汇总、空闲判断和预约。</p></div></div></article>
       const gpuProcesses = snapshot.processes.filter((process) => process.gpuUuid === gpu.uuid)
@@ -1912,7 +1912,7 @@ function GpuDetail({ snapshot, points, selectedGpuUuid, animateChart }: { snapsh
           Boolean(gpu.throttleReason) && { label: '限频状态', value: gpu.throttleReason!, tone: gpu.throttleReason === '正常' || gpu.throttleReason === '空闲' ? 'normal' : 'warning' },
           gpu.eccErrors !== undefined && { label: 'ECC 错误', value: `${gpu.eccErrors}`, tone: gpu.eccErrors > 0 ? 'critical' : 'normal' },
         ]} />
-        {isExpanded && <div className="gpu-detail__processes"><header><strong>{expanded.mode === 'sm' ? '进程 SM 活跃率' : `${accelerator} ${gpu.index} 进程`}</strong><small>{expanded.mode === 'sm' ? '单次 pmon 采样，不代表算法效率' : `${gpuProcesses.length} 个计算进程`}</small></header>{gpuProcesses.length ? gpuProcesses.map((process) => <div key={process.pid}><code>PID {process.pid}</code><span title={process.command}>{process.command}</span><strong>{expanded.mode === 'sm' ? `SM ${clampPercent(process.smUtilization ?? 0).toFixed(0)}%` : `${(process.memoryUsedMb / 1024).toFixed(1)} GB`}</strong></div>) : <p className="gpu-detail__empty">{hasUnattributedMemory ? `检测到 ${(unattributedMemoryMb / 1024).toFixed(1)} GB 显存占用，但 ${accelerator === 'NPU' ? 'NPU 驱动' : 'NVIDIA 驱动'}未返回可映射的 PID` : `当前没有 ${accelerator} 计算进程`}</p>}</div>}
+        {isExpanded && <div className="gpu-detail__processes"><header><strong>{expanded.mode === 'sm' ? '进程 SM 活跃率' : `${accelerator} ${gpu.index} 进程`}</strong><small>{expanded.mode === 'sm' ? '单次 pmon 采样，不代表算法效率' : `${gpuProcesses.length} 个计算进程`}</small></header>{gpuProcesses.length ? gpuProcesses.map((process) => <div key={process.pid}><code>PID {process.pid}</code><span title={process.command}>{process.command}</span><strong>{expanded.mode === 'sm' ? `SM ${clampPercent(process.smUtilization ?? 0).toFixed(0)}%` : `${(process.memoryUsedMb / 1024).toFixed(1)} GB`}</strong></div>) : <p className="gpu-detail__empty">{hasUnattributedMemory ? `检测到 ${(unattributedMemoryMb / 1024).toFixed(1)} GB 显存占用，但 ${acceleratorDriverLabel(snapshot)}未返回可映射的 PID` : `当前没有 ${accelerator} 计算进程`}</p>}</div>}
         {ownMemoryMb > 0 && <div className="gpu-detail__own"><UserRound size={13} /><strong>你的任务</strong><span>占用 {(ownMemoryMb / 1024).toFixed(1)} GB 显存</span></div>}
       </article>
     })}</section>
@@ -2183,7 +2183,7 @@ function FleetOverview({ onboarding, servers, snapshots, settings, totals, sort,
                 const loadLevel = gpuLoadLevel(gpu.utilization)
                 const memoryLevel = gpuMemoryLevel(memory)
                 return <button className={`fleet-gpu-row fleet-gpu-row--${memoryLevel}`} style={{ '--memory-fill': `${displayedMemory}%` } as React.CSSProperties} key={gpu.uuid} onClick={() => onSelect(server.id, 'gpu', gpu.uuid)}>
-                  <span><strong>{accelerator} {gpu.index}</strong><small>{gpu.name.replace('NVIDIA ', '').replace('GeForce ', '')}</small></span>
+                  <span><strong>{accelerator} {gpu.index}</strong><small>{acceleratorDeviceName(gpu.name).replace('GeForce ', '')}</small></span>
                   <span>{displayedMemory}%<small>{(gpu.memoryUsedMb / 1024).toFixed(1)}G</small></span>
                   <span className={`fleet-gpu-row__load fleet-gpu-row__load--${loadLevel}`}>{clampPercent(gpu.utilization).toFixed(0)}%</span>
                   {ownProcess && <em title="有你的任务"><UserRound size={11} />你</em>}
@@ -2209,7 +2209,7 @@ function MineProcessView({ servers, snapshots, warnings, terminatingProcess, onD
   const mineCount = mineServers.reduce((sum, item) => sum + currentUserProcessCount(item.snapshot), 0)
   const successNotices = warnings.filter((warning) => warning.tone === 'info')
   const persistentWarnings = warnings.filter((warning) => warning.tone === 'warning')
-  return <div className="detail-page mine-process-page">{successNotices.length > 0 && <section className="mine-process-successes" aria-live="polite" aria-label="进程状态">{successNotices.map((notice) => <div className="mine-process-success" role="status" key={notice.id}><CheckCircle2 size={16} /><span>{notice.message}</span></div>)}</section>}{mineServers.length > 0 && <section className="mine-process-summary" aria-label="我的进程摘要"><span>{mineServers.length} 台服务器</span><strong>{mineCount} 个进程</strong></section>}{persistentWarnings.length > 0 && <section className="mine-process-warnings" aria-live="polite">{persistentWarnings.map((warning) => <div className="mine-process-warning mine-process-warning--warning" key={warning.id}><AlertCircle size={17} /><span>{warning.message}</span><button type="button" className="mine-process-warning__dismiss" onClick={() => onDismissWarning(warning.id)} aria-label="忽略这条提示" title="忽略"><X size={13} /></button></div>)}</section>}{mineServers.length > 0 ? <div className="mine-process-list">{mineServers.map(({ server, snapshot }) => <section className="mine-process-server" key={server.id}><PanelHeader icon={<ServerIcon />} title={server.name} subtitle={`${server.host} · 最近采集 ${relativeTime(snapshot.timestamp)}`} action={<button className="icon-button" aria-label={`打开 ${server.name} 终端`} title="打开终端" onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={16} /></button>} /><ProcessBlocks snapshot={snapshot} hideEmptyBlocks terminatingPid={terminatingProcess?.serverId === server.id ? terminatingProcess.pid : undefined} onRequestTerminate={(target) => onRequestTerminate(server.id, target)} /></section>)}</div> : <div className="mine-process-empty" role="status"><UserRound size={28} /><strong>没有我的进程</strong><p>当前已连接的服务器上没有检测到你的 GPU、NPU 或 CPU 进程。</p></div>}</div>
+  return <div className="detail-page mine-process-page">{successNotices.length > 0 && <section className="mine-process-successes" aria-live="polite" aria-label="进程状态">{successNotices.map((notice) => <div className="mine-process-success" role="status" key={notice.id}><CheckCircle2 size={16} /><span>{notice.message}</span></div>)}</section>}{mineServers.length > 0 && <section className="mine-process-summary" aria-label="我的进程摘要"><span>{mineServers.length} 台服务器</span><strong>{mineCount} 个进程</strong></section>}{persistentWarnings.length > 0 && <section className="mine-process-warnings" aria-live="polite">{persistentWarnings.map((warning) => <div className="mine-process-warning mine-process-warning--warning" key={warning.id}><AlertCircle size={17} /><span>{warning.message}</span><button type="button" className="mine-process-warning__dismiss" onClick={() => onDismissWarning(warning.id)} aria-label="忽略这条提示" title="忽略"><X size={13} /></button></div>)}</section>}{mineServers.length > 0 ? <div className="mine-process-list">{mineServers.map(({ server, snapshot }) => <section className="mine-process-server" key={server.id}><PanelHeader icon={<ServerIcon />} title={server.name} subtitle={`${server.host} · 最近采集 ${relativeTime(snapshot.timestamp)}`} action={<button className="icon-button" aria-label={`打开 ${server.name} 终端`} title="打开终端" onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={16} /></button>} /><ProcessBlocks snapshot={snapshot} hideEmptyBlocks terminatingPid={terminatingProcess?.serverId === server.id ? terminatingProcess.pid : undefined} onRequestTerminate={(target) => onRequestTerminate(server.id, target)} /></section>)}</div> : <div className="mine-process-empty" role="status"><UserRound size={28} /><strong>没有我的进程</strong><p>当前已连接的服务器上没有检测到你的 GPU、NPU、PPU 或 CPU 进程。</p></div>}</div>
 }
 
 function IdleGpuView({ servers, snapshots, items: rankedItems, filters, currentReservation, onFiltersChange, onReserve, sortRevision, onLaunch, onQuickTerminal, onSelect, onReserveGpu }: { servers: Server[]; snapshots: Record<string, Snapshot>; items: IdleGpuItem[]; filters: IdleFilters; currentReservation?: IdleReservation; onFiltersChange: (filters: IdleFilters) => void; onReserve: () => void; sortRevision: number; onLaunch: (server: Server, gpu: Snapshot['gpus'][number]) => void; onQuickTerminal: (server: Server, gpu: Snapshot['gpus'][number]) => void; onSelect: (serverId: string, gpuUuid: string) => void; onReserveGpu: (server: Server, gpu: Snapshot['gpus'][number]) => void }) {
@@ -2364,11 +2364,11 @@ function IdleReservationCenter({ reservations, warnings, onClose, onEdit, onStat
     <section className="sheet reservation-center-sheet" role="dialog" aria-modal="true" aria-labelledby="reservation-center-title">
       <header className="sheet__header"><div><p className="eyebrow">预约与通知</p><h2 id="reservation-center-title">{activeCount} 个预约正在监测{warnings.length ? ` · ${warnings.length} 个预警` : ''}</h2></div></header>
       <div className="reservation-list">
-        {warnings.map((warning) => <div className="reservation-row reservation-row--warning" key={warning.id}>
+        {warnings.map((warning) => { const accelerator = acceleratorLabel(warning); return <div className="reservation-row reservation-row--warning" key={warning.id}>
           <span className="reservation-row__status reservation-row__status--warning"><AlertCircle size={15} /></span>
-          <div className="reservation-row__content"><div><strong>{gpuContextName(warning.serverName, warning.gpuIndex, warning.gpuName)}</strong><em>显存占用预警</em></div><p>{warning.defunctProcesses.length ? `检测到僵尸 GPU 进程，仍占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} / ${(warning.memoryTotalMb / 1024).toFixed(1)} GB 显存` : `GPU MEM 已占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} / ${(warning.memoryTotalMb / 1024).toFixed(1)} GB，但 UTL 为 0，已持续 ${Math.floor(warning.durationSeconds / 3600)} 小时`}</p><small>{warning.defunctProcesses.length ? `进程：${warning.defunctProcesses.map((process) => `${process.username}（PID ${process.pid}）`).join('、')}` : warning.usernames.length ? `用户：${warning.usernames.join('、')}` : '未识别到对应进程'}</small></div>
+          <div className="reservation-row__content"><div><strong>{gpuContextName(warning.serverName, warning.gpuIndex, warning.gpuName, accelerator)}</strong><em>显存占用预警</em></div><p>{warning.defunctProcesses.length ? `检测到僵尸 ${accelerator} 进程，仍占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} / ${(warning.memoryTotalMb / 1024).toFixed(1)} GB 显存` : `${accelerator} MEM 已占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} / ${(warning.memoryTotalMb / 1024).toFixed(1)} GB，但 UTL 为 0，已持续 ${Math.floor(warning.durationSeconds / 3600)} 小时`}</p><small>{warning.defunctProcesses.length ? `进程：${warning.defunctProcesses.map((process) => `${process.username}（PID ${process.pid}）`).join('、')}` : warning.usernames.length ? `用户：${warning.usernames.join('、')}` : '未识别到对应进程'}</small></div>
           <div className="reservation-row__actions"><button className="button button--secondary button--small" onClick={() => onIgnoreWarning(warning)}>忽略</button></div>
-        </div>)}
+        </div> })}
         {reservations.map((reservation) => <div className="reservation-row" key={reservation.id}>
           <span className={`reservation-row__status reservation-row__status--${reservation.status}`}><Bell size={15} /></span>
           <div className="reservation-row__content"><div><strong>{reservation.name}</strong><em>{reservationStatusLabel[reservation.status]}</em></div><p>{idleReservationSummary(reservation.filters)}</p><small>{formatReservationExpiry(reservation.expiresAt)} · {reservation.notifyMode === 'once' ? '通知一次' : '持续监测'}{reservation.currentAvailableGpuKeys?.length ? ` · 当前可用 ${reservation.currentAvailableGpuKeys.length}` : ''}{reservation.pendingConfirmationGpuKeys?.length ? ` · 待确认 ${reservation.pendingConfirmationGpuKeys.length}` : ''}</small></div>

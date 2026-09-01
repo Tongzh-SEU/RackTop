@@ -55,6 +55,12 @@ describe('TrendChart series identity', () => {
     expect(series?.name).toBe('NPU 0')
   })
 
+  it('labels PPU series through the same chart implementation', () => {
+    renderToStaticMarkup(<TrendChart points={points} snapshot={{ ...snapshot, acceleratorVendor: 'ppu' }} mode="gpu" />)
+    const series = captured.option?.series.find((item) => item.id === 'gpu-utilization:GPU-a')
+    expect(series?.name).toBe('PPU 0')
+  })
+
   it('supports ten percent transparency for overview GPU lines', () => {
     renderToStaticMarkup(<TrendChart points={points} snapshot={snapshot} mode="gpu" seriesOpacity={0.9} />)
     expect(captured.option?.series.find((series) => series.id === 'gpu-utilization:GPU-a')?.lineStyle?.opacity).toBe(0.9)

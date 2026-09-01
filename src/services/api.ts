@@ -52,6 +52,9 @@ const demoServers: Server[] = [
   {
   id: 'demo-ascend', name: '昇腾训练节点', location: '智算中心 · N3 机架', host: '10.201.37.260', port: 22, username: 'tongzh', tags: ['lab', 'Ascend 910B'], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, sortOrder: 4, authMethod: 'sshAgent', status: 'online', lastSeenAt: now,
   },
+  {
+  id: 'demo-ppu', name: '真武 PPU 训练节点', location: '智算中心 · P2 机架', host: '10.201.37.270', port: 22, username: 'tongzh', tags: ['lab', 'PPU'], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, sortOrder: 5, authMethod: 'sshAgent', status: 'online', lastSeenAt: now,
+  },
 ]
 
 const defaultSettings: AppSettings = {
@@ -186,6 +189,28 @@ const ascendSnapshot: Snapshot = {
   ],
 }
 
+const ppuSnapshot: Snapshot = {
+  ...demoSnapshot,
+  serverId: 'demo-ppu',
+  hostname: 'ppu-training-node',
+  acceleratorVendor: 'ppu',
+  system: { ...demoSnapshot.system, cpuModel: 'Hygon C86 7390', cpuUtilization: 18.2, currentUserCpuUtilization: 9.6 },
+  gpus: [
+    { index: 0, uuid: 'PPU-a16f', name: 'Zhenwu PPU', utilization: 84, memoryUtilization: 68, memoryUsedMb: 44_564, memoryTotalMb: 65_536, temperatureCelsius: 64, powerWatts: 292 },
+    { index: 1, uuid: 'PPU-b27e', name: 'Zhenwu PPU', utilization: 0, memoryUtilization: 0, memoryUsedMb: 32, memoryTotalMb: 65_536, temperatureCelsius: 43, powerWatts: 51 },
+  ],
+  processes: [
+    { gpuUuid: 'PPU-a16f', gpuIndex: 0, pid: 28640, parentPid: 1, username: 'tongzh', command: 'python train.py --devices 0', memoryUsedMb: 44_512, smUtilization: 82, cpuPercent: 21.8, elapsed: '01:12:36', isCurrentUser: true, isGroupLeader: true },
+  ],
+}
+
+function browserSnapshotFor(serverId: string) {
+  if (serverId === 'demo-132') return a100Snapshot
+  if (serverId === 'demo-ascend') return ascendSnapshot
+  if (serverId === 'demo-ppu') return ppuSnapshot
+  return demoSnapshot
+}
+
 let browserServers = [...demoServers]
 let browserServerNotificationSettings = new Map<string, ServerNotificationSettings>()
 let browserSettings = { ...defaultSettings }
@@ -263,7 +288,7 @@ export const api = {
   async listLatestSnapshots(): Promise<Snapshot[]> {
     if (isTauri) return invoke('list_latest_snapshots')
     return browserServers.map((server) => {
-      const source = server.id === 'demo-132' ? a100Snapshot : server.id === 'demo-ascend' ? ascendSnapshot : demoSnapshot
+      const source = browserSnapshotFor(server.id)
       return { ...source, serverId: server.id }
     })
   },
@@ -347,7 +372,7 @@ export const api = {
     browserInteractionSummary.sentBytes += sentBytes
     browserInteractionSummary.servers = [...browserInteractionSummary.servers.filter((item) => item.serverId !== serverId), entry].sort((left, right) => left.serverName.localeCompare(right.serverName, 'zh-CN'))
     await new Promise((resolve) => setTimeout(resolve, 450))
-    const source = serverId === 'demo-132' ? a100Snapshot : serverId === 'demo-ascend' ? ascendSnapshot : demoSnapshot
+    const source = browserSnapshotFor(serverId)
     const snapshot = { ...source, serverId, timestamp: Math.floor(Date.now() / 1000), processesSampled: includeProcesses, disks: includeDisks ? source.disks : [] }
     const responseBytes = new TextEncoder().encode(JSON.stringify(snapshot)).length
     const storedBytes = recordHistory ? responseBytes : 0
@@ -365,7 +390,7 @@ export const api = {
     if (cached && cached.expiresAt > Date.now()) return cached.request
     const request = (async () => {
       if (isTauri) return invoke<HistoryPoint[]>('get_history', { serverId, fromTimestamp, bucketSeconds: bucketSeconds ?? null })
-      const source = serverId === 'demo-132' ? a100Snapshot : demoSnapshot
+      const source = browserSnapshotFor(serverId)
       const points = rollingHistory({ ...source, serverId })
       if (!bucketSeconds) return points
       return Object.values(points.reduce<Record<number, HistoryPoint>>((buckets, point) => {

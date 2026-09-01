@@ -1,4 +1,4 @@
-use crate::{collector::explicit_identity_file, models::Server};
+use crate::{collector::{explicit_identity_file, visible_devices_variable}, models::Server};
 use crate::ssh_keys::expand_identity_path;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -57,7 +57,7 @@ impl TerminalManager {
 
         let mut command = configured_ssh_command(server, password)?;
         if let Some(index) = gpu_index {
-            let variable = if accelerator_vendor == "ascend" { "ASCEND_RT_VISIBLE_DEVICES" } else { "CUDA_VISIBLE_DEVICES" };
+            let variable = visible_devices_variable(accelerator_vendor);
             command.arg(format!("export {variable}={index}; exec \"${{SHELL:-/bin/sh}}\" -l"));
         }
         let child = pair.slave.spawn_command(command).map_err(|error| format!("无法启动 SSH 终端：{error}"))?;
