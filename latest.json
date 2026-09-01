@@ -1,0 +1,11 @@
+{
+  "version": "1.25.3",
+  "notes": "RackTop v1.25.3 稳定版",
+  "pub_date": "2026-08-31T11:42:17Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.3/RackTop_1.25.3_macos-arm64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaFRrMWxZK2tOZUsvaXFDelNSUDI3UDhnQ3RaQlI3eElHdTJzMHRnV29qR3prWncyNGVua2QxT0UvVk9HNDV2QzY4T2Q1MW5hNWllM0ZqVDN4ZUtKVndVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4MjQ4NjQ5CWZpbGU6UmFja1RvcF8xLjI1LjNfbWFjb3MtYXJtNjQuYXBwLnRhci5negpoY2JJdmtpNFBoZXAzUVlVbEZhZ2dTM01zZ3M5TFUwNDY4V3BhY2pManpUTnd2MzlRN2dqdnJpeUNlZ29TNnUrM2ZxMFNvQkhNYms4WDVQWnRGZHFEZz09Cg=="
+    }
+  }
+}
