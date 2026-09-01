@@ -368,7 +368,7 @@ v0.2.0 feat: 增加 GPU 告警规则管理
 4. GitHub 页面顶部显示的作者、发布时间、Latest、版本标签、目标提交和“自此版本以来的提交数量”由 GitHub 自动生成，不得重复写入 Release 正文。
 5. Release 正文只允许“主要更新”和“下载”两个模块，不加入验证、测试数量、开发过程、提交记录和内部实现细节。
 6. 上传实际构建并验证过的发布产物。macOS 应优先上传可直接下载的 `.dmg`；暂时无法生成 `.dmg` 时，可上传保留签名结构的 `.zip`。Windows 应上传实际验证过的安装程序，不得用源码压缩包冒充安装包。
-7. 每个上传产物必须使用清楚的版本、平台和架构命名，例如 `RackTop-1.24.1-macos-arm64.zip`，并在 Release 说明中提供 SHA-256 校验值。
+7. 每个上传产物必须使用清楚的版本、平台和架构命名，例如 `RackTop_1.24.1_macos-arm64.dmg`。发布前应核对 GitHub Assets 自动生成的 Digest，但不得在 Release 正文中手动重复 SHA-256。
 8. 发布后重新打开 Release 页面，核对标签、目标提交、Latest/Pre-release 状态、说明正文和所有附件均真实可见且可下载。
 9. 如果安装包构建、签名、公证、上传、标签创建或 Release 发布失败，必须明确报告为未完成，不得只提供本地 App 路径并声称版本已经发布。
 
@@ -395,7 +395,7 @@ RackTop 的 macOS、Windows 安装包和自动更新附件统一由 `.github/wor
 1. 确认默认分支包含发布提交，npm、Cargo、Tauri 版本一致，updater 公钥正确，GitHub Actions 中 `TAURI_SIGNING_PRIVATE_KEY` 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 已配置；私钥和密码不得写入 Git、日志、Artifact 或 Release。
 2. 构建并验证 macOS DMG、macOS `.app.tar.gz`、Windows NSIS `setup.exe` 和 Windows MSI；记录四个发布文件的 SHA-256，并保留 `.app.tar.gz.sig` 与 `setup.exe.sig` 供生成清单。
 3. 创建指向默认分支发布提交的 `vX.Y.Z` 标签和 GitHub Release，上传且仅上传用户安装包与 macOS updater 技术附件：DMG、NSIS EXE、MSI、`.app.tar.gz`。不得把 `latest.json` 或任何 `.sig` 作为 Release 附件。
-4. 验证 Release 中四个附件真实可下载，文件名、版本、架构、大小和 SHA-256 与 Actions 产物一致；Release 正文的“下载”模块只列 DMG、EXE 和 MSI，`.app.tar.gz` 可留在 Assets 中但不作为普通用户下载项。
+4. 验证 Release 中四个附件真实可下载，文件名、版本、架构、大小和 SHA-256 与 Actions 产物一致；Release 正文的“下载”模块必须列出 DMG、`.app.tar.gz`、EXE 和 MSI 四个文件，但不得手动列出 SHA-256，校验值以 GitHub Assets 自动显示的 Digest 为准。
 5. 最后创建或更新独立 `updater` 分支根目录的 `latest.json`；没有该文件或没有当前平台条目时，已安装的 RackTop 无法识别和安装新版本。`darwin-aarch64` 指向 Release 的 `.app.tar.gz`，`windows-x86_64` 指向同一 Release 的 NSIS `setup.exe`，对应 `.sig` 的完整内容内嵌到各平台 `signature` 字段。
 6. 从 GitHub Raw 地址重新读取 `latest.json`，确认 JSON 有效、版本正确、两个平台 URL 可下载且签名字段非空；清单提交与产品 Release 提交相互独立，不得把 updater 分支合并到 `main`。
 7. 使用保留原应用标识和数据目录的上一稳定版 App 实际升级到当前稳定版。macOS 和 Windows 分别验证能通过 `latest.json` 发现更新，并完成下载进度、签名校验、安装、重启、版本变化与原有数据保留；未完成的平台必须明确记录。
@@ -437,7 +437,7 @@ RackTop_X.Y.Z_macos-arm64.app.tar.gz
 
 稳定版 Release 的“主要更新”默认只描述当前版本实际交付的用户可见变化，最多使用 5 条，每条只表达一项变化；不得因为标题包含“稳定版”就重复罗列历史版本能力。只有首次稳定版，或用户明确要求发布累计能力概览时，才可以概括从初始版本到当前版本的核心能力。小功能、排版调整和零碎 Bug 修复可以合并为一条简洁的修复说明，但不得编造或遗漏本版本的重要用户可见变化。
 
-“下载”必须列出实际上传的安装包文件名、平台、架构和 SHA-256。macOS 非公证版本应保留首次打开时的系统安全提示。Release 正文统一使用以下模板：
+“下载”必须列出实际上传的 DMG、`.app.tar.gz`、EXE 和 MSI 四个文件，并说明对应平台、架构与用途。Release 正文不得手动给出 SHA-256，因为 GitHub Assets 已自动提供每个附件的 Digest。macOS 非公证版本应保留首次打开时的系统安全提示。Release 正文统一使用以下模板：
 
 ```markdown
 > 发布类型：稳定版
@@ -452,8 +452,10 @@ RackTop_X.Y.Z_macos-arm64.app.tar.gz
 
 ## 下载
 
-- `RackTop-X.Y.Z-macos-arm64.zip`：Apple Silicon macOS 版本
-- SHA-256：`<安装包 SHA-256>`
+- `RackTop_X.Y.Z_macos-arm64.dmg`：Apple Silicon macOS 安装镜像
+- `RackTop_X.Y.Z_macos-arm64.app.tar.gz`：Apple Silicon macOS 应用程序
+- `RackTop_X.Y.Z_x64-setup.exe`：Windows x64 安装程序
+- `RackTop_X.Y.Z_x64_zh-CN.msi`：Windows x64 MSI 安装包
 
 首次打开若 macOS 提示来源限制，请在“系统设置 → 隐私与安全性”中确认打开。
 ```
@@ -470,7 +472,7 @@ RackTop_X.Y.Z_macos-arm64.app.tar.gz
 - 推送的远程仓库与远程分支；
 - Pull Request 地址或直接推送结果；
 - GitHub Release 地址、版本标签与目标提交；
-- 已上传安装包的文件名、平台、架构与 SHA-256；
+- 已上传安装包的文件名、平台、架构，以及 GitHub Assets Digest 核验结果；
 - 已执行的测试、检查和构建；
 - 未执行的验证及原因；
 - 仍然存在的阻塞或已知事项。
