@@ -6,6 +6,10 @@
     "darwin-aarch64": {
       "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.3/RackTop_1.25.3_macos-arm64.app.tar.gz",
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaFRrMWxZK2tOZUsvaXFDelNSUDI3UDhnQ3RaQlI3eElHdTJzMHRnV29qR3prWncyNGVua2QxT0UvVk9HNDV2QzY4T2Q1MW5hNWllM0ZqVDN4ZUtKVndVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4MjQ4NjQ5CWZpbGU6UmFja1RvcF8xLjI1LjNfbWFjb3MtYXJtNjQuYXBwLnRhci5negpoY2JJdmtpNFBoZXAzUVlVbEZhZ2dTM01zZ3M5TFUwNDY4V3BhY2pManpUTnd2MzlRN2dqdnJpeUNlZ29TNnUrM2ZxMFNvQkhNYms4WDVQWnRGZHFEZz09Cg=="
+    },
+    "windows-x86_64": {
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.3/RackTop_1.25.3_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaGZTVEoxWkdBQ3BMd2hia1JZQ3NyaVdqNHZHdGNuaEhhN21xMlRSRHJzZ2x6TjU1aDAwNjdSVVFGb1U5REdKdTYwbXF0SEh5TVM0TjBVOUZGRzRjM0FBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4MjUzODAyCWZpbGU6UmFja1RvcF8xLjI1LjNfeDY0LXNldHVwLmV4ZQpqaHRtOUhOZHF1aDhXK1JjY29qUllyR3RTOW5zekZ2NEFkczIybUxRQk4zZ2owT3lTVFlBcE12RGU5MWNpTEovZWI4YzlyT2NZcGlrdi9HS0RiSjBCZz09Cg=="
     }
   }
 }
