@@ -21,7 +21,7 @@ export function idleReservationFiltersEqual(left: IdleReservationFilters, right:
 export function idleReservationSummary(filters: IdleReservationFilters): string {
   if (filters.targetServerId && filters.targetGpuUuid) return `指定 GPU · ${filters.targetGpuUuid}`
   const parts = [`GPU MEM ≥ ${filters.gpuMemoryGb} GB`, `CPU MEM ≥ ${filters.cpuMemoryGb} GB`]
-  parts.push(filters.otherUserProcess === 'all' ? '进程不限' : '无人占用')
+  parts.push(filters.otherUserProcess === 'all' ? '进程不限' : filters.otherUserProcess === 'withoutOthers' ? '无他人占用' : '无人占用')
   if (filters.gpuModel !== 'all') parts.push(filters.gpuModel.replace('NVIDIA ', ''))
   if (filters.cpuModel !== 'all') parts.push(filters.cpuModel)
   if (filters.tag !== 'all') parts.push(filters.tag)

@@ -243,6 +243,8 @@ pub struct GpuMetric {
     pub memory_total_mb: f64,
     pub temperature_celsius: f64,
     pub power_watts: f64,
+    #[serde(default)]
+    pub power_limit_watts: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

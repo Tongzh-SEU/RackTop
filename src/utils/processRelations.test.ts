@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Snapshot } from '../types/models'
-import { cpuChildrenOfGpu, cpuProcessRelation, currentUserProcessCount, gpuProcessRelation, processTaskRootPid, visibleCurrentUserCpuUtilization } from './processRelations'
+import { cpuChildrenOfGpu, cpuProcessRelation, currentUserAcceleratorCount, currentUserProcessCount, gpuProcessRelation, processTaskRootPid, visibleCurrentUserCpuUtilization } from './processRelations'
 
 const snapshot: Snapshot = {
   serverId: 'server-1', hostname: 'gpu-box', username: 'tongzh', osId: 'ubuntu', osName: 'Ubuntu', timestamp: 1, status: 'online', processesSampled: true, nvidiaSmi: 'available',
@@ -29,6 +29,7 @@ describe('process relationships', () => {
     const duplicateGpu = { ...snapshot.processes[0], gpuUuid: 'gpu-1', gpuIndex: 1 }
     const duplicateCpu = { ...snapshot.cpuProcesses[0], pid: snapshot.processes[0].pid, isGroupLeader: true }
     expect(currentUserProcessCount({ ...snapshot, processes: [...snapshot.processes, duplicateGpu], cpuProcesses: [...snapshot.cpuProcesses, duplicateCpu] })).toBe(3)
+    expect(currentUserAcceleratorCount({ ...snapshot, processes: [...snapshot.processes, duplicateGpu] })).toBe(2)
   })
 
   it('hides background account CPU usage when no RackTop task is attributed to the current user', () => {

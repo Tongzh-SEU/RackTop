@@ -43,6 +43,7 @@ export function deriveGpuMemoryStallWarnings(
         gpuUuid: gpu.uuid,
         gpuIndex: gpu.index,
         gpuName: gpu.name,
+        acceleratorVendor: snapshot.acceleratorVendor,
         usernames: [...new Set(gpuProcesses.map((process) => process.username))],
         defunctProcesses: defunctProcesses.map((process) => ({ pid: process.pid, username: process.username })),
         memoryUsedMb: gpu.memoryUsedMb,

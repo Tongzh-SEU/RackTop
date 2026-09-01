@@ -26,6 +26,13 @@ describe('ProcessBlocks', () => {
     expect(markup).not.toContain('当前 GPU 进程')
   })
 
+  it('uses PPU labels without a separate process component', () => {
+    const markup = renderToStaticMarkup(<ProcessBlocks snapshot={{ ...snapshot, acceleratorVendor: 'ppu' }} compact currentLabels />)
+    expect(markup).toContain('当前 PPU 进程')
+    expect(markup).toContain('<th>PPU</th><th>PID</th>')
+    expect(markup).toContain('PPU 0')
+  })
+
   it('renders the CPU block below the GPU block with matching task markers', () => {
     const markup = renderToStaticMarkup(<ProcessBlocks snapshot={snapshot} compact currentLabels onRequestTerminate={() => {}} />)
     expect(markup).toContain('当前 GPU 进程')

@@ -20,4 +20,11 @@ describe('interaction log presentation', () => {
     expect(items.find((item) => item.label === '磁盘空间')?.value).toBe('3 个有效磁盘')
     expect(items.find((item) => item.label === '远端历史')?.value).toBe('未启用远端持续保存')
   })
+
+  it('uses the shared PPU terminology in collection logs', () => {
+    const snapshot = { acceleratorVendor: 'ppu', gpus: [{}, {}], processes: [{}], cpuProcesses: [], disks: [] } as unknown as Snapshot
+    const items = acquiredDataItems(undefined, snapshot)
+    expect(items.find((item) => item.label === 'PPU 状态')?.value).toContain('2 张 PPU')
+    expect(items.find((item) => item.label === '进程信息')?.value).toBe('1 个 PPU 进程 · 0 个 CPU 主进程')
+  })
 })
