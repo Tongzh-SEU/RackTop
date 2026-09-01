@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   macos:
+    if: false # This temporary branch only builds the Windows 1.25.2 updater test package.
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
