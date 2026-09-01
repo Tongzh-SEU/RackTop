@@ -67,4 +67,41 @@ describe('App startup update check', () => {
     expect(getLatestRelease).toHaveBeenCalledTimes(2)
     expect(loadCachedUpdate().lastScheduledCheckAt).toBe(now)
   })
+
+  it('opens the current release notes from the About update row', async () => {
+    vi.spyOn(api, 'getLatestRelease').mockResolvedValue({
+      version: '1.25.4',
+      url: 'https://github.com/Tongzh-SEU/RackTop/releases/tag/v1.25.4',
+    })
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    const container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<App />)
+      await Promise.resolve()
+    })
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="关于 RackTop"]')?.click()
+    })
+    const releaseNotes = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === '版本说明')
+    expect(releaseNotes).toBeDefined()
+    await act(async () => releaseNotes?.click())
+    expect(open).toHaveBeenCalledWith(
+      'https://github.com/Tongzh-SEU/RackTop/releases/tag/v1.25.4',
+      '_blank',
+      'noopener,noreferrer',
+    )
+    const xiaohongshu = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes('小红书'))
+    expect(xiaohongshu).toBeDefined()
+    await act(async () => xiaohongshu?.click())
+    expect(open).toHaveBeenLastCalledWith(
+      'https://xhslink.cn/o/AsgFqJMZfR5',
+      '_blank',
+      'noopener,noreferrer',
+    )
+  })
 })
