@@ -3,7 +3,8 @@ import { listen } from '@tauri-apps/api/event'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
-import { AlertCircle, RefreshCw, SquareTerminal, X } from 'lucide-react'
+import { AlertCircle, RefreshCw, X } from 'lucide-react'
+import { createTerminalPreview } from '../utils/terminalPreview'
 import { api } from '../services/api'
 import { analyzeCudaCommand } from '../utils/cudaCommand'
 import { bracketTerminalPaste, isMultilineTerminalPaste, normalizeTerminalPaste } from '../utils/terminalPaste'
@@ -15,13 +16,13 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
   const sessionRef = useRef<string | null>(null)
   const lineRef = useRef('')
   const pendingEnterRef = useRef(false)
-  const [status, setStatus] = useState<'connecting' | 'connected' | 'closed' | 'error'>(api.isDesktop ? 'connecting' : 'closed')
+  const [status, setStatus] = useState<'connecting' | 'connected' | 'closed' | 'error'>('connecting')
   const [error, setError] = useState<string | null>(null)
   const [restart, setRestart] = useState(0)
   const [confirmation, setConfirmation] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!api.isDesktop || !containerRef.current) return
+    if (!containerRef.current) return
     let disposed = false
     const terminal = new Terminal({ cursorBlink: true, convertEol: false, fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, monospace', fontSize: 12, lineHeight: 1.3, scrollback: 5000, theme: { background: '#101114', foreground: '#e7e8ea', cursor: '#79aaff', selectionBackground: '#45658a88' } })
     const fit = new FitAddon()
@@ -29,6 +30,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
     terminal.open(containerRef.current)
     fit.fit()
     terminal.focus()
+    const previewInput = api.isDesktop ? null : createTerminalPreview((data) => terminal.write(data), () => terminal)
     let fitFrame: number | null = null
 
     const fitAndResize = () => {
@@ -41,20 +43,17 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
         if (id) void api.resizeTerminal(id, terminal.cols, terminal.rows)
       })
     }
-    // Sheets finish their grid/layout pass after the terminal mounts. Fit once
-    // more after that pass so rows cover the entire visible canvas.
-    const delayedFit = window.setTimeout(fitAndResize, 180)
     const fontFit = document.fonts?.ready.then(() => fitAndResize())
 
     const decode = (value: string) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0))
-    const outputListener = listen<TerminalEvent>('terminal-output', ({ payload }) => {
+    const outputListener = api.isDesktop ? listen<TerminalEvent>('terminal-output', ({ payload }) => {
       if (payload.sessionId === sessionRef.current && payload.data) terminal.write(decode(payload.data))
-    })
-    const exitListener = listen<TerminalEvent>('terminal-exit', ({ payload }) => {
+    }) : Promise.resolve(() => {})
+    const exitListener = api.isDesktop ? listen<TerminalEvent>('terminal-exit', ({ payload }) => {
       if (payload.sessionId === sessionRef.current) { setStatus('closed'); terminal.write('\r\n\x1b[90m[会话已断开]\x1b[0m\r\n') }
-    })
+    }) : Promise.resolve(() => {})
 
-    const send = (data: string) => { const id = sessionRef.current; if (id) void api.writeTerminal(id, data).catch((reason) => setError(String(reason))) }
+    const send = (data: string) => { if (previewInput) { previewInput(data); return }; const id = sessionRef.current; if (id) void api.writeTerminal(id, data).catch((reason) => setError(String(reason))) }
     const handlePaste = (event: ClipboardEvent) => {
       const pasted = event.clipboardData?.getData('text/plain') ?? ''
       if (!isMultilineTerminalPaste(pasted)) return
@@ -76,6 +75,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
     containerRef.current.addEventListener('paste', handlePaste, true)
     containerRef.current.addEventListener('contextmenu', handleContextMenu, true)
     const dataDisposable = terminal.onData((data) => {
+      if (previewInput) { previewInput(data); return }
       if (pendingEnterRef.current) return
       if (gpuIndex !== undefined && (data === '\r' || data === '\n')) {
         const analysis = analyzeCudaCommand(lineRef.current, gpuIndex)
@@ -90,20 +90,13 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
 
     const resize = new ResizeObserver(fitAndResize)
     resize.observe(containerRef.current)
-    // The terminal lives in a nested grid whose final height can change
-    // without changing the canvas node's own content box (window resize,
-    // sheet/grid reflow). Observe the shell and viewport as well so rows are
-    // recalculated whenever either layer changes.
-    const shell = containerRef.current.closest<HTMLElement>('.terminal-shell')
-    if (shell && shell !== containerRef.current) resize.observe(shell)
-    const viewport = containerRef.current.parentElement
-    if (viewport && viewport !== shell) resize.observe(viewport)
-    void api.startTerminal(serverId, terminal.cols, terminal.rows, gpuIndex, acceleratorVendor).then((id) => {
-      if (disposed) { void api.closeTerminal(id); return }
+    const started = api.isDesktop ? api.startTerminal(serverId, terminal.cols, terminal.rows, gpuIndex, acceleratorVendor) : Promise.resolve(null)
+    void started.then((id) => {
+      if (disposed) { if (id) void api.closeTerminal(id); return }
       sessionRef.current = id
       setStatus('connected')
       fit.fit()
-      void api.resizeTerminal(id, terminal.cols, terminal.rows)
+      if (id) void api.resizeTerminal(id, terminal.cols, terminal.rows)
       fitAndResize()
       terminal.focus()
     }).catch((reason) => { setStatus('error'); setError(String(reason)) })
@@ -111,7 +104,6 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
     return () => {
       disposed = true
       if (fitFrame !== null) cancelAnimationFrame(fitFrame)
-      window.clearTimeout(delayedFit)
       void fontFit
       resize.disconnect()
       containerRef.current?.removeEventListener('paste', handlePaste, true)
@@ -132,9 +124,8 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
     if (sendEnter && sessionRef.current) void api.writeTerminal(sessionRef.current, '\r')
   }
 
-  if (!api.isDesktop) return <section className="panel terminal-unavailable"><SquareTerminal size={28} /><h3>终端在桌面 App 中可用</h3><p>网页演示不会建立或伪造 SSH 会话。</p></section>
   return <section className="terminal-shell" aria-label={`${serverName} SSH 终端`}>
-    <header><span className={`terminal-status terminal-status--${status}`} /><strong>{gpuIndex === undefined ? serverName : `${serverName} · GPU ${gpuIndex}`}</strong><small>{status === 'connecting' ? '正在连接' : status === 'connected' ? '已连接' : status === 'error' ? '连接失败' : '已断开'}</small><button className="icon-button" aria-label="重新连接终端" title="重新连接" onClick={() => { setError(null); setStatus('connecting'); setRestart((value) => value + 1) }}><RefreshCw size={14} /></button></header>
+    <header><span className={`terminal-status terminal-status--${status}`} /><strong>{gpuIndex === undefined ? serverName : `${serverName} · GPU ${gpuIndex}`}</strong><small>{!api.isDesktop ? '本地模拟 · 无 SSH 连接' : status === 'connecting' ? '正在连接' : status === 'connected' ? '已连接' : status === 'error' ? '连接失败' : '已断开'}</small><button className="icon-button" aria-label="重新连接终端" title="重新连接" onClick={() => { setError(null); setStatus('connecting'); setRestart((value) => value + 1) }}><RefreshCw size={14} /></button></header>
     {error && <div className="terminal-error" role="alert"><AlertCircle size={15} /><span>{error}</span><button onClick={() => setError(null)} aria-label="关闭错误"><X size={13} /></button></div>}
     <div className="terminal-canvas" ref={containerRef} />
     {confirmation && <div className="terminal-confirm" role="alertdialog" aria-modal="true"><div><strong>确认 GPU 绑定</strong><p>{confirmation}。命令仍停留在远端输入行，尚未执行。</p></div><button className="button button--secondary button--small" onClick={() => confirmPending(false)}>暂不执行</button><button className="button button--primary button--small" onClick={() => confirmPending(true)}>仍然执行</button></div>}
