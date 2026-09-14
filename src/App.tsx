@@ -2120,7 +2120,7 @@ function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot 
       .then((points) => { if (!cancelled) { setHeatmapPoints(points); setHeatmapError(null) } })
       .catch((historyError) => { if (!cancelled) setHeatmapError(String(historyError)) })
     void loadHeatmap()
-    const interval = window.setInterval(() => { void loadHeatmap() }, 60_000)
+    const interval = window.setInterval(() => { void loadHeatmap() }, 3_600_000)
     return () => { cancelled = true; window.clearInterval(interval) }
   }, [gpuUuidKey, server.historyRetentionDays, server.id])
 
@@ -2135,7 +2135,7 @@ function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot 
         .catch((reason) => { if (!cancelled) setUsageError(String(reason)) })
     }
     loadUsage()
-    const interval = window.setInterval(loadUsage, 60_000)
+    const interval = window.setInterval(loadUsage, 3_600_000)
     return () => { cancelled = true; window.clearInterval(interval) }
   }, [server.id, usageDays])
 
