@@ -2099,7 +2099,25 @@ function CpuDetail({ snapshot, points, animateChart }: { snapshot: Snapshot; poi
   ]} /></section></div>
 }
 
-function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot }) {
+export function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot }) {
+  const [maintenance, setMaintenance] = useState<boolean | null>(null)
+  const [maintenanceError, setMaintenanceError] = useState(false)
+  useEffect(() => {
+    let active = true
+    let timer: ReturnType<typeof window.setTimeout>
+    const check = async () => {
+      try {
+        const value = await api.isStorageMaintenanceActive()
+        if (active) { setMaintenance(value); setMaintenanceError(false) }
+      } catch {
+        if (active) { setMaintenance(null); setMaintenanceError(true) }
+      } finally {
+        if (active) timer = window.setTimeout(check, 1000)
+      }
+    }
+    void check()
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [])
   const accelerator = acceleratorLabel(snapshot)
   const [usageDays, setUsageDays] = useState<7 | 15 | 30 | 90>(30)
   const [usage, setUsage] = useState<import('./types/models').UsageDistribution | null>(null)
@@ -2109,6 +2127,7 @@ function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot 
   const gpuUuidKey = snapshot.gpus.map((gpu) => gpu.uuid).join('\n')
 
   useEffect(() => {
+    if (maintenance !== false) return
     let cancelled = false
     const firstDay = new Date(snapshot.timestamp * 1000)
     firstDay.setHours(0, 0, 0, 0)
@@ -2122,9 +2141,10 @@ function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot 
     void loadHeatmap()
     const interval = window.setInterval(() => { void loadHeatmap() }, 3_600_000)
     return () => { cancelled = true; window.clearInterval(interval) }
-  }, [gpuUuidKey, server.historyRetentionDays, server.id])
+  }, [gpuUuidKey, server.historyRetentionDays, server.id, maintenance])
 
   useEffect(() => {
+    if (maintenance !== false) return
     let cancelled = false
     setUsage(null)
     setUsageError(null)
@@ -2137,10 +2157,11 @@ function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot 
     loadUsage()
     const interval = window.setInterval(loadUsage, 3_600_000)
     return () => { cancelled = true; window.clearInterval(interval) }
-  }, [server.id, usageDays])
+  }, [server.id, usageDays, maintenance])
 
   const displayedUsage = usage ?? { users: [], coveredDays: 0, requestedDays: usageDays, coverageGpuSeconds: 0 }
 
+  if (maintenance !== false) return <div className="history-page-loading history-maintenance" role="status" aria-live="polite"><LoaderCircle className="spin" size={24} aria-hidden="true" /><div><strong>{maintenanceError ? '暂时无法确认维护状态' : maintenance ? '历史数据维护中，请稍等' : '正在检查历史数据状态'}</strong><p>{maintenanceError ? '正在自动重试，确认后将恢复趋势数据读取。' : maintenance ? '正在整理历史数据以减少占用空间，同时保持趋势统计结果不变。' : '确认维护状态后将自动读取趋势数据。'}</p></div></div>
   return <div className="history-page">
     <section className="history-section"><header className="history-page__header"><div><History size={18} /><span><h2>资源热力图</h2><p>每列 1 天，每格汇总连续 3 小时的平均使用率</p></span></div><small>最近 {Math.min(90, Math.max(1, server.historyRetentionDays))} 天</small></header>{heatmapError ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />资源历史读取失败：{heatmapError}</div> : heatmapPoints.length === 0 ? <div className="history-page__state" role="status"><LoaderCircle className="spin" size={16} />正在读取资源趋势…</div> : <HistoryHeatmaps snapshot={snapshot} points={heatmapPoints} retentionDays={server.historyRetentionDays} />}</section>
     <section className="history-section"><header className="history-page__header"><div><History size={18} /><span><h2>{accelerator} 使用分布</h2><p>按 Unix 用户聚合活跃时间与显存积分</p></span></div><div className="usage-range" aria-label="使用分布时间范围">{([7, 15, 30, 90] as const).map((days) => <button key={days} aria-pressed={usageDays === days} onClick={() => setUsageDays(days)}>{days === 7 ? '1 周' : days === 15 ? '半个月' : days === 30 ? '1 个月' : '3 个月'}</button>)}</div></header>{usageError ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />使用分布读取失败：{usageError}</div> : usage === null ? <div className="history-page__state" role="status"><LoaderCircle className="spin" size={16} />正在统计使用分布…</div> : <UsageDistribution snapshot={snapshot} data={displayedUsage} />}</section>
