@@ -137,6 +137,12 @@ export interface DiskMetric {
 }
 
 export interface HistoryPoint {
+  gpuTemperatureMins?: Record<string, number>
+  gpuTemperatureMaxes?: Record<string, number>
+  gpuPowerMins?: Record<string, number>
+  gpuPowerMaxes?: Record<string, number>
+  gpuFanMins?: Record<string, number>
+  gpuFanMaxes?: Record<string, number>
   timestamp: number
   isCompacted?: boolean
   cpuUtilization: number
@@ -144,6 +150,9 @@ export interface HistoryPoint {
   swapUtilization: number
   gpuUtilizations: Record<string, number>
   gpuMemoryUtilizations: Record<string, number>
+  gpuTemperaturesCelsius?: Record<string, number>
+  gpuPowerWatts?: Record<string, number>
+  gpuFanSpeedsPercent?: Record<string, number | null>
   gpuOtherUserOccupancies?: Record<string, boolean>
   cpuMin?: number
   cpuMax?: number

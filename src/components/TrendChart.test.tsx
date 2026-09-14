@@ -39,6 +39,19 @@ function renderSeriesIds(mode: 'cpu' | 'systemMemory' | 'gpu' | 'gpuMemory') {
 describe('TrendChart series identity', () => {
   beforeEach(() => { captured.option = null })
 
+  it.each([
+    ['gpuTemperature', 'gpuTemperaturesCelsius', 'gpuTemperatureMins', 'gpuTemperatureMaxes', 60, 40, 80],
+    ['gpuPower', 'gpuPowerWatts', 'gpuPowerMins', 'gpuPowerMaxes', 300, 120, 450],
+    ['gpuFan', 'gpuFanSpeedsPercent', 'gpuFanMins', 'gpuFanMaxes', 45, 20, 70],
+  ] as const)('draws correct %s bounds without using utilization bounds', (mode, values, mins, maxes, average, min, max) => {
+    const point = { ...points[0], isCompacted: true, [values]: { 'GPU-a': average }, [mins]: { 'GPU-a': min }, [maxes]: { 'GPU-a': max }, gpuMins: { 'GPU-a': 0 }, gpuMaxes: { 'GPU-a': 100 } }
+    renderToStaticMarkup(<TrendChart points={[point]} snapshot={snapshot} mode={mode} />)
+    expect(captured.option?.series.find(series => series.id?.endsWith(':range-min'))?.data).toEqual([[1000, min]])
+    expect(captured.option?.series.find(series => series.id?.endsWith(':range-span'))?.data).toEqual([[1000, max - min]])
+    renderToStaticMarkup(<TrendChart points={[{ ...point, [mins]: {}, [maxes]: {} }]} snapshot={snapshot} mode={mode} />)
+    expect(captured.option?.series.find(series => series.id?.endsWith(':range-span'))?.data).toEqual([[1000, null]])
+  })
+
   it('keeps CPU, system memory, and swap identities stable', () => {
     expect(renderSeriesIds('cpu')).toEqual(['cpu-utilization'])
     expect(renderSeriesIds('systemMemory')).toEqual(['system-memory-utilization', 'swap-utilization'])

@@ -99,7 +99,28 @@ temporary="$history_file.tmp.$$"
 awk -F '|' -v cutoff="$cutoff" '($1 == "v1" || $1 == "v2") && $2 >= cutoff' "$history_file" > "$temporary"
 mv "$temporary" "$history_file"
 if [ -r "$usage_file" ]; then
-  usage_temporary="$usage_file.tmp.$$"
-  awk -F '|' -v cutoff="$cutoff" '$1 == "v1" && $2 >= cutoff' "$usage_file" > "$usage_temporary"
-  mv "$usage_temporary" "$usage_file"
+  compact_before=$((now - 7200))
+  compact_before=$((compact_before - compact_before % 3600))
+  usage_compact_marker="$state_dir/.usage-compacted-through-v2"
+  compacted_through="$(cat "$usage_compact_marker" 2>/dev/null || printf 0)"
+  case "$compacted_through" in *[!0-9]*|'') compacted_through=0 ;; esac
+  if [ "$compacted_through" -lt "$compact_before" ]; then
+    usage_temporary="$usage_file.tmp.$$"
+    awk -F '|' -v cutoff="$cutoff" -v compact_before="$compact_before" '
+      ($1 == "v1" || $1 == "v2") && $2 >= cutoff {
+        if ($2 < compact_before) {
+          hour=$2-$2%3600; key=hour FS $3 FS $4
+          active[key]+=$5; memory[key]+=$6; coverage[key]+=$7
+        } else print
+      }
+      END {
+        for (key in active) {
+          split(key,a,FS)
+          printf "v2|%d|%s|%s|%d|%.2f|%d\n",a[1],a[2],a[3],active[key],memory[key],coverage[key]
+        }
+      }
+    ' "$usage_file" > "$usage_temporary"
+    mv "$usage_temporary" "$usage_file"
+    printf '%s\n' "$compact_before" > "$usage_compact_marker"
+  fi
 fi

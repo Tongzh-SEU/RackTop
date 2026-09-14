@@ -36,7 +36,7 @@ function gapThreshold(previous: HistoryPoint | undefined, point: HistoryPoint | 
   return previous?.isCompacted || point?.isCompacted ? thresholds.compacted : thresholds.raw
 }
 
-export function trendSeriesData(points: HistoryPoint[], valueOf: (point: HistoryPoint) => number | null, thresholds = gapThresholds(points)) {
+export function trendSeriesData(points: HistoryPoint[], valueOf: (point: HistoryPoint) => number | null, thresholds = gapThresholds(points), clampValues = true) {
   const data: Array<[number, number | null]> = []
   points.forEach((point, index) => {
     const timestamp = point.timestamp * 1000
@@ -45,7 +45,7 @@ export function trendSeriesData(points: HistoryPoint[], valueOf: (point: History
       data.push([Math.floor((timestamp + previous.timestamp * 1000) / 2), null])
     }
     const value = valueOf(point)
-    data.push([timestamp, value === null ? null : clampPercent(value)])
+    data.push([timestamp, value === null ? null : clampValues ? clampPercent(value) : value])
   })
   return data
 }
@@ -64,9 +64,15 @@ export function missingTimeRanges(points: HistoryPoint[], thresholds = gapThresh
   return data
 }
 
-function peakRangeSeries(id: string, points: HistoryPoint[], averageOf: (point: HistoryPoint) => number | null, minOf: (point: HistoryPoint) => number | null, maxOf: (point: HistoryPoint) => number | null, color: string, thresholds: GapThresholds) {
+function peakRangeSeries(id: string, points: HistoryPoint[], averageOf: (point: HistoryPoint) => number | null, minOf: (point: HistoryPoint) => number | null, maxOf: (point: HistoryPoint) => number | null, color: string, thresholds: GapThresholds, percent = true) {
   const stack = `${id}:range`
-  return [{ id: `${id}:range-min`, type: 'line', stack, silent: true, showSymbol: false, connectNulls: false, data: trendSeriesData(points, (point) => minOf(point) ?? averageOf(point), thresholds), lineStyle: { width: 0, opacity: 0 }, areaStyle: { opacity: 0 }, tooltip: { show: false } }, { id: `${id}:range-span`, type: 'line', stack, silent: true, showSymbol: false, connectNulls: false, data: trendSeriesData(points, (point) => { const average = averageOf(point); const min = minOf(point) ?? average; const max = maxOf(point) ?? average; return min == null || max == null ? null : Math.max(0, max - min) }, thresholds), lineStyle: { width: 0, opacity: 0 }, areaStyle: { color, opacity: 0.1 }, tooltip: { show: false } }]
+  const bounds = (point: HistoryPoint) => {
+    const fallback = percent ? averageOf(point) : null
+    const min = minOf(point) ?? fallback
+    const max = maxOf(point) ?? fallback
+    return min == null || max == null || !Number.isFinite(min) || !Number.isFinite(max) || min > max ? null : { min, max }
+  }
+  return [{ id: `${id}:range-min`, type: 'line', stack, silent: true, showSymbol: false, connectNulls: false, data: trendSeriesData(points, (point) => bounds(point)?.min ?? null, thresholds, percent), lineStyle: { width: 0, opacity: 0 }, areaStyle: { opacity: 0 }, tooltip: { show: false } }, { id: `${id}:range-span`, type: 'line', stack, silent: true, showSymbol: false, connectNulls: false, data: trendSeriesData(points, (point) => { const range = bounds(point); return range ? range.max - range.min : null }, thresholds, percent), lineStyle: { width: 0, opacity: 0 }, areaStyle: { color, opacity: 0.1 }, tooltip: { show: false } }]
 }
 
 function percentTooltip(value: number) {
@@ -88,10 +94,15 @@ function timeAxisInterval(timestamps: number[]) {
   return 12 * 60 * MINUTE_MS
 }
 
+function temperatureAxisMax(points: HistoryPoint[]) {
+  const peak = Math.max(0, ...points.flatMap((point) => [...Object.values(point.gpuTemperaturesCelsius ?? {}), ...Object.values(point.gpuTemperatureMaxes ?? {})]))
+  return Math.max(100, Math.ceil((peak + 5) / 5) * 5)
+}
+
 interface TrendChartProps {
   points: HistoryPoint[]
   snapshot?: Snapshot
-  mode?: 'all' | 'cpu' | 'gpu' | 'systemMemory' | 'gpuMemory'
+  mode?: 'all' | 'cpu' | 'gpu' | 'systemMemory' | 'gpuMemory' | 'gpuTemperature' | 'gpuPower' | 'gpuFan' | 'gpuTelemetry'
   height?: number
   animate?: boolean
   gpuUuid?: string
@@ -161,26 +172,27 @@ function TrendChartComponent({ points, snapshot, mode = 'all', height = 260, ani
       areaStyle: { color: 'rgba(255, 159, 10, 0.05)' },
     })
   }
-  if (mode === 'all' || mode === 'gpu' || mode === 'gpuMemory') {
+  if (mode === 'all' || mode === 'gpu' || mode === 'gpuMemory' || mode === 'gpuTemperature' || mode === 'gpuPower' || mode === 'gpuFan' || mode === 'gpuTelemetry') {
     snapshot?.gpus.filter((gpu) => !gpuUuid || gpu.uuid === gpuUuid).forEach((gpu, index) => {
       const colors = ['#30d158', '#bf5af2', '#ff9f0a', '#64d2ff']
       const isMemory = mode === 'gpuMemory'
+      const telemetry = mode === 'gpuTemperature' ? 'temperature' : mode === 'gpuPower' ? 'power' : mode === 'gpuFan' ? 'fan' : mode === 'gpuTelemetry' ? 'telemetry' : null
       const id = `${isMemory ? 'gpu-memory' : 'gpu-utilization'}:${gpu.uuid}`
-      const color = colors[index % colors.length]
-      const valueOf = (point: HistoryPoint) => isMemory ? point.gpuMemoryUtilizations?.[gpu.uuid] ?? null : point.gpuUtilizations[gpu.uuid] ?? null
-      const minOf = (point: HistoryPoint) => isMemory ? point.gpuMemoryMins?.[gpu.uuid] ?? null : point.gpuMins?.[gpu.uuid] ?? null
-      const maxOf = (point: HistoryPoint) => isMemory ? point.gpuMemoryMaxes?.[gpu.uuid] ?? null : point.gpuMaxes?.[gpu.uuid] ?? null
-      series.push(...peakRangeSeries(id, points, valueOf, minOf, maxOf, color, thresholds))
+      const color = telemetry === 'temperature' ? '#0a84ff' : telemetry === 'power' ? '#ff9f0a' : telemetry === 'fan' ? '#64d2ff' : colors[index % colors.length]
+      const valueOf = (point: HistoryPoint) => telemetry === 'temperature' ? point.gpuTemperaturesCelsius?.[gpu.uuid] ?? null : telemetry === 'power' ? point.gpuPowerWatts?.[gpu.uuid] ?? null : telemetry === 'fan' ? point.gpuFanSpeedsPercent?.[gpu.uuid] ?? null : isMemory ? point.gpuMemoryUtilizations?.[gpu.uuid] ?? null : point.gpuUtilizations[gpu.uuid] ?? null
+      const minOf = (point: HistoryPoint) => (telemetry === 'temperature' ? point.gpuTemperatureMins : telemetry === 'power' ? point.gpuPowerMins : telemetry === 'fan' ? point.gpuFanMins : isMemory ? point.gpuMemoryMins : point.gpuMins)?.[gpu.uuid] ?? null
+      const maxOf = (point: HistoryPoint) => (telemetry === 'temperature' ? point.gpuTemperatureMaxes : telemetry === 'power' ? point.gpuPowerMaxes : telemetry === 'fan' ? point.gpuFanMaxes : isMemory ? point.gpuMemoryMaxes : point.gpuMaxes)?.[gpu.uuid] ?? null
+      series.push(...peakRangeSeries(id, points, valueOf, minOf, maxOf, color, thresholds, telemetry === null))
       series.push({
         id,
-        name: `${accelerator} ${gpu.index}`,
+        name: `${accelerator} ${gpu.index}${telemetry === 'temperature' ? ' 温度' : telemetry === 'power' ? ' 功耗' : telemetry === 'fan' ? ' 风扇' : ''}`,
         type: 'line',
         showSymbol: false,
         smooth: false,
         clip: true,
         connectNulls: false,
-        data: trendSeriesData(points, valueOf, thresholds),
-        tooltip: { valueFormatter: isMemory ? (value: number) => capacityTooltip(value, gpu.memoryTotalMb / 1024) : percentTooltip },
+        data: trendSeriesData(points, valueOf, thresholds, telemetry === null),
+        tooltip: { valueFormatter: telemetry === 'temperature' ? (value: number) => `${value.toFixed(0)}°C` : telemetry === 'power' ? (value: number) => `${value.toFixed(1)} W` : isMemory ? (value: number) => capacityTooltip(value, gpu.memoryTotalMb / 1024) : percentTooltip },
         lineStyle: { width: 2, color, opacity },
         itemStyle: { color, opacity },
         markArea: index === 0 ? missingArea : undefined,
@@ -216,8 +228,8 @@ function TrendChartComponent({ points, snapshot, mode = 'all', height = 260, ani
         yAxis: {
           type: 'value',
           min: 0,
-          max: 100,
-          axisLabel: { formatter: '{value}%', color: '#8e9198', fontSize: 10 },
+          max: mode === 'gpuTemperature' ? temperatureAxisMax(points) : mode === 'gpuPower' ? undefined : 100,
+          axisLabel: { formatter: mode === 'gpuTemperature' ? '{value}°C' : mode === 'gpuPower' ? '{value} W' : '{value}%', color: '#8e9198', fontSize: 10 },
           splitLine: { lineStyle: { color: 'rgba(127, 127, 127, 0.12)' } },
         },
         series,

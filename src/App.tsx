@@ -220,6 +220,7 @@ function serverToDraft(server: Server): Partial<ServerDraft> {
 }
 
 function evaluateAlerts(server: Server | undefined, snapshot: Snapshot, previous: Snapshot | undefined, settings: AppSettings, notificationSettings: ServerNotificationSettings | undefined, since: Record<string, number>, notified: Set<string>) {
+  if (settings.idleNotificationsEnabled === false) return
   const serverName = serverDisplayName(server?.name ?? snapshot.hostname)
   const accelerator = acceleratorLabel(snapshot)
   const now = snapshot.timestamp
@@ -276,7 +277,7 @@ function App() {
   const [idleHistoryLoadedMinutes, setIdleHistoryLoadedMinutes] = useState(0)
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null)
-  const [selectedTab, setSelectedTab] = useState<DetailTab>(() => browserPreviewState === 'notifications' ? 'connection' : 'overview')
+  const [selectedTab, setSelectedTab] = useState<DetailTab>(() => browserPreviewState === 'terminal' ? 'terminal' : browserPreviewState === 'notifications' ? 'connection' : 'overview')
   const [selectedGpuUuid, setSelectedGpuUuid] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [draggedServerId, setDraggedServerId] = useState<string | null>(null)
@@ -309,7 +310,7 @@ function App() {
   const [ignoredUpdateVersion, setIgnoredUpdateVersion] = useState(loadIgnoredUpdateVersion)
   const [importingConfig, setImportingConfig] = useState(false)
   const [importDrafts, setImportDrafts] = useState<ServerDraft[] | null>(null)
-  const [mainView, setMainView] = useState<'server' | 'fleet' | 'idle' | 'mine' | 'projects'>(() => browserPreviewState === 'reconnecting' || browserPreviewState === 'notifications' ? 'server' : 'fleet')
+  const [mainView, setMainView] = useState<'server' | 'fleet' | 'idle' | 'mine' | 'projects'>(() => browserPreviewState === 'terminal' || browserPreviewState === 'reconnecting' || browserPreviewState === 'notifications' ? 'server' : 'fleet')
   const [projects, setProjects] = useState<Project[]>([])
   const [projectEditor, setProjectEditor] = useState<Project | null | 'new'>(null)
   const [projectPendingDelete, setProjectPendingDelete] = useState<Project | null>(null)
@@ -343,6 +344,8 @@ function App() {
   const [manualRefreshingServers, setManualRefreshingServers] = useState<Set<string>>(new Set())
   const [paused, setPaused] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
+  const [zoomNotice, setZoomNotice] = useState<number | null>(null)
+  const zoomAdjustRef = useRef<(delta: number) => void>(() => {})
   const [remoteSyncStatus, setRemoteSyncStatus] = useState<RemoteSyncStatusState | null>(null)
   const [initialCollectionComplete, setInitialCollectionComplete] = useState(false)
   const [remoteSyncRetryRevision, setRemoteSyncRetryRevision] = useState(0)
@@ -409,7 +412,10 @@ function App() {
   useEffect(() => { projectSyncProgressRef.current = projectSyncProgress }, [projectSyncProgress])
   useEffect(() => {
     if (!api.isDesktop) return
-    const preventWebViewContextMenu = (event: globalThis.MouseEvent) => event.preventDefault()
+    const preventWebViewContextMenu = (event: globalThis.MouseEvent) => {
+      if ((event.target as Element | null)?.closest('.terminal-canvas')) return
+      event.preventDefault()
+    }
     document.addEventListener('contextmenu', preventWebViewContextMenu)
     return () => document.removeEventListener('contextmenu', preventWebViewContextMenu)
   }, [])
@@ -939,6 +945,36 @@ function App() {
     document.documentElement.dataset.reduceMotion = settings.reduceMotion ? 'true' : 'false'
     document.documentElement.style.setProperty('--own-accent', settings.currentUserAccent)
   }, [settings])
+
+  useEffect(() => {
+    if (!api.isDesktop) return
+    const root = document.querySelector<HTMLElement>('.app-shell')
+    if (!root) return
+    let zoom = Math.min(2, Math.max(0.5, Number(localStorage.getItem('racktop.uiZoom') ?? '1') || 1))
+    const applyZoom = () => {
+      // Keep layout geometry stable while scaling the application surface. CSS zoom
+      // changes grid measurement and causes masonry cards to overlap at non-100%.
+      root.style.setProperty('--ui-zoom', String(zoom))
+      root.style.setProperty('--ui-zoom-inverse', String(1 / zoom))
+      localStorage.setItem('racktop.uiZoom', String(zoom))
+      setZoomNotice(zoom)
+    }
+    zoomAdjustRef.current = (delta) => { zoom = Math.min(2, Math.max(0.5, zoom + delta)); applyZoom() }
+    applyZoom()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) return
+      if (event.key === '-' || event.key === '=') { event.preventDefault(); zoom = Math.min(2, Math.max(0.5, zoom + (event.key === '-' ? -0.05 : 0.05))); applyZoom() }
+      else if (event.key === '0') { event.preventDefault(); zoom = 1; applyZoom() }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('keydown', onKeyDown); root.style.removeProperty('--ui-zoom'); root.style.removeProperty('--ui-zoom-inverse'); zoomAdjustRef.current = () => {} }
+  }, [])
+
+  useEffect(() => {
+    if (zoomNotice === null) return
+    const timeout = window.setTimeout(() => setZoomNotice(null), 3000)
+    return () => window.clearTimeout(timeout)
+  }, [zoomNotice])
 
   useEffect(() => {
     localStorage.setItem('racktop.fleetSort', fleetSort)
@@ -1646,7 +1682,7 @@ function App() {
             <h1>{mainView === 'projects' ? '我的项目' : mainView === 'idle' ? '寻找空闲算力' : mainView === 'mine' ? '我的进程' : mainView === 'fleet' ? '算力总览' : selectedServer ? serverDisplayName(selectedServer.name) : 'RackTop 总览'}</h1>
           </div>
           <div className="topbar__actions">
-            {(manualRefreshProgress || (remoteHistoryServerKey && remoteSyncStatus)) && <span className="remote-sync-slot">{manualRefreshProgress ? <span className="remote-sync-status remote-sync-status--syncing" role="status" aria-live="polite"><RefreshCw className={manualRefreshingAll ? 'spin' : ''} size={13} />正在重新连接 · {manualRefreshProgress.completed}/{manualRefreshProgress.total} 台</span> : remoteSyncStatus && <RemoteSyncStatus status={remoteSyncStatus} onOpenFailure={() => {
+            {(manualRefreshProgress || (remoteHistoryServerKey && remoteSyncStatus)) && <span className="remote-sync-slot">{manualRefreshProgress ? <span className="remote-sync-status remote-sync-status--syncing" role="status" aria-live="polite">正在刷新全部 · {manualRefreshProgress.completed}/{manualRefreshProgress.total} 台</span> : remoteSyncStatus && <RemoteSyncStatus status={remoteSyncStatus} onOpenFailure={() => {
               const serverId = remoteSyncStatus.failedServerIds[0]
               if (!serverId) return
               setSelectedServerId(serverId)
@@ -1692,7 +1728,7 @@ function App() {
               nvidiaWarningIgnored={ignoredNvidiaWarnings.has(selectedServer.id)}
               onIgnoreNvidiaWarning={() => setNvidiaWarningIgnored(selectedServer.id, true)}
               onRestoreNvidiaWarning={() => setNvidiaWarningIgnored(selectedServer.id, false)}
-              isRefreshing={browserPreviewState === 'reconnecting' || manualRefreshingAll || manualRefreshingServers.has(selectedServer.id)}
+              isRefreshing={browserPreviewState === 'reconnecting' || manualRefreshingServers.has(selectedServer.id)}
               animateCharts={manualRefreshingAll || manualRefreshingServers.has(selectedServer.id)}
               gpuMemoryWarnings={gpuMemoryStallWarnings.filter((warning) => warning.serverId === selectedServer.id)}
               ignoredGpuMemoryStallWarningIds={ignoredGpuMemoryStallWarningIds}
@@ -1729,6 +1765,7 @@ function App() {
       {showReservationCenter && <IdleReservationCenter reservations={idleReservations} warnings={gpuMemoryStallWarnings} onClose={() => setShowReservationCenter(false)} onEdit={(reservation) => { setShowReservationCenter(false); setReservationEditor({ filters: reservation.filters, reservation }) }} onStatusChange={setIdleReservationStatus} onClearPending={clearReservationPending} onDelete={removeIdleReservation} onIgnoreWarning={ignoreGpuMemoryStallWarning} />}
       {quickTerminal && (() => { const accelerator = snapshots[quickTerminal.server.id] ? acceleratorLabel(snapshots[quickTerminal.server.id]) : 'GPU'; return <div className="scrim quick-terminal-scrim" onMouseDown={(event) => event.target === event.currentTarget && setQuickTerminal(null)}><section className="sheet quick-terminal-sheet" role="dialog" aria-modal="true" aria-label={`${quickTerminal.server.name}${quickTerminal.gpu ? ` ${accelerator} ${quickTerminal.gpu.index}` : ''} 终端`}><header className="sheet__header"><div><p className="eyebrow">{quickTerminal.gpu ? `${accelerator} 固定终端` : 'SSH 终端'}</p><h2>{quickTerminal.server.name}{quickTerminal.gpu ? ` · ${accelerator} ${quickTerminal.gpu.index}` : ''}</h2></div><button className="icon-button" onClick={() => setQuickTerminal(null)} aria-label="关闭"><X size={18} /></button></header><SshTerminal serverId={quickTerminal.server.id} serverName={quickTerminal.server.name} gpuIndex={quickTerminal.gpu?.index} acceleratorVendor={snapshots[quickTerminal.server.id]?.acceleratorVendor} onNotice={setToast} /></section></div> })()}
       {toast && <div className="toast" role="status"><AlertCircle size={17} /><span>{toast}</span><button onClick={() => setToast(null)} aria-label="关闭"><X size={14} /></button></div>}
+      {zoomNotice !== null && api.isDesktop && <div className="zoom-pill" role="status" aria-live="polite"><span>{Math.round(zoomNotice * 100)}%</span><button type="button" onClick={() => zoomAdjustRef.current(-0.05)} aria-label="缩小">−</button><button type="button" onClick={() => zoomAdjustRef.current(0.05)} aria-label="放大">+</button><button type="button" onClick={() => { zoomAdjustRef.current(1 - zoomNotice) }} aria-label="重置缩放">重置</button></div>}
     </div>
   )
 }
@@ -1990,7 +2027,7 @@ export function GpuDetail({ snapshot, points, selectedGpuUuid, animateChart }: {
     return next
   })
   return <div className="content-stack">
-    <section className="resource-trend-grid">{orderedGpus.filter(isGpuAvailable).map((gpu) => <ResourceTrend key={gpu.uuid} snapshot={snapshot} kind="gpu" gpuUuid={gpu.uuid} title={`${accelerator} ${gpu.index} · ${acceleratorDeviceName(gpu.name)}`} animate={animateChart} />)}</section>
+    <section className="resource-trend-grid">{orderedGpus.filter(isGpuAvailable).map((gpu) => <ResourceTrend key={`${gpu.uuid}-usage`} snapshot={snapshot} kind="gpu" gpuUuid={gpu.uuid} title={`${accelerator} ${gpu.index} · ${acceleratorDeviceName(gpu.name)}`} animate={animateChart} />)}{orderedGpus.filter(isGpuAvailable).map((gpu) => <ResourceTrend key={`${gpu.uuid}-telemetry`} snapshot={snapshot} kind="gpu" gpuUuid={gpu.uuid} telemetry title={`${accelerator} ${gpu.index} · ${acceleratorDeviceName(gpu.name)}`} animate={animateChart} />)}</section>
     <section className="gpu-detail-list">{orderedGpus.map((gpu) => {
       if (!isGpuAvailable(gpu)) return <article className="panel gpu-detail gpu-detail--unavailable" key={gpu.uuid}><div className="gpu-detail__title"><div><span>{accelerator} {gpu.index}</span><h3>{gpu.name}</h3><small>{gpu.uuid.replace('unavailable-', '').replaceAll('_', ':')}</small></div><strong>无法读取</strong></div><div className="gpu-unavailable"><AlertCircle size={19} /><div><strong>监控数据不可用</strong><p>健康 {accelerator} 仍会继续采集；此卡不参与利用率汇总、空闲判断和预约。</p></div></div></article>
       const gpuProcesses = snapshot.processes.filter((process) => process.gpuUuid === gpu.uuid)
@@ -2083,7 +2120,7 @@ function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot 
       .then((points) => { if (!cancelled) { setHeatmapPoints(points); setHeatmapError(null) } })
       .catch((historyError) => { if (!cancelled) setHeatmapError(String(historyError)) })
     void loadHeatmap()
-    const interval = window.setInterval(() => { void loadHeatmap() }, 60_000)
+    const interval = window.setInterval(() => { void loadHeatmap() }, 3_600_000)
     return () => { cancelled = true; window.clearInterval(interval) }
   }, [gpuUuidKey, server.historyRetentionDays, server.id])
 
@@ -2098,7 +2135,7 @@ function HistoryView({ server, snapshot }: { server: Server; snapshot: Snapshot 
         .catch((reason) => { if (!cancelled) setUsageError(String(reason)) })
     }
     loadUsage()
-    const interval = window.setInterval(loadUsage, 60_000)
+    const interval = window.setInterval(loadUsage, 3_600_000)
     return () => { cancelled = true; window.clearInterval(interval) }
   }, [server.id, usageDays])
 
@@ -2243,7 +2280,10 @@ function MasonryItem({ children }: { children: React.ReactNode }) {
       const style = getComputedStyle(grid)
       const row = Number.parseFloat(style.gridAutoRows) || 4
       const gap = Number.parseFloat(style.rowGap) || 12
-      element.style.gridRowEnd = `span ${Math.ceil((element.getBoundingClientRect().height + gap) / (row + gap))}`
+      // Use layout height rather than getBoundingClientRect(), whose value is
+      // transformed by the app zoom and would under-size masonry rows at
+      // zoom levels below 100%, causing cards to overlap.
+      element.style.gridRowEnd = `span ${Math.ceil((element.offsetHeight + gap) / (row + gap))}`
     }
     const observer = new ResizeObserver(resize)
     observer.observe(element)
@@ -2534,10 +2574,13 @@ export function SettingsSheet({ settings, onboardingVisible, onClose, onSave }: 
           <label className="switch-row"><span><strong>保存历史数据</strong><small>使用本地 SQLite，固定保留最近 90 天</small></span><input type="checkbox" checked={value.historyEnabled} onChange={(event) => set('historyEnabled', event.target.checked)} /></label>
         </SettingsGroup>
         <SettingsGroup icon={<CircleGauge />} title="空闲与告警">
-          <label>空闲 GPU 阈值 <span>{value.idleGpuThreshold}%</span><input type="range" min="0" max="30" value={value.idleGpuThreshold} onChange={(event) => set('idleGpuThreshold', Number(event.target.value))} /></label>
-          <label>空闲通知持续时间 <select value={value.idleDurationMinutes} onChange={(event) => set('idleDurationMinutes', Number(event.target.value))}><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option></select></label>
-          <label>显存释放阈值 <span>{(value.idleMemoryThresholdMb / 1024).toFixed(0)} GB</span><input type="range" min="0" max="163840" step="4096" value={value.idleMemoryThresholdMb} onChange={(event) => set('idleMemoryThresholdMb', Number(event.target.value))} /></label>
-          <label>温度告警 <span>{value.temperatureThresholdCelsius}°C</span><input type="range" min="60" max="95" value={value.temperatureThresholdCelsius} onChange={(event) => set('temperatureThresholdCelsius', Number(event.target.value))} /></label>
+          <label className="switch-row"><span><strong>启用空闲与告警通知</strong><small>关闭后仍会采集和显示状态，但不发送系统通知</small></span><input type="checkbox" checked={value.idleNotificationsEnabled !== false} onChange={(event) => set('idleNotificationsEnabled', event.target.checked)} /></label>
+          {value.idleNotificationsEnabled !== false && <>
+            <label>空闲 GPU 阈值 <span>{value.idleGpuThreshold}%</span><input type="range" min="0" max="30" value={value.idleGpuThreshold} onChange={(event) => set('idleGpuThreshold', Number(event.target.value))} /></label>
+            <label>空闲通知持续时间 <select value={value.idleDurationMinutes} onChange={(event) => set('idleDurationMinutes', Number(event.target.value))}><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option></select></label>
+            <label>显存释放阈值 <span>{(value.idleMemoryThresholdMb / 1024).toFixed(0)} GB</span><input type="range" min="0" max="163840" step="4096" value={value.idleMemoryThresholdMb} onChange={(event) => set('idleMemoryThresholdMb', Number(event.target.value))} /></label>
+            <label>温度告警 <span>{value.temperatureThresholdCelsius}°C</span><input type="range" min="60" max="95" value={value.temperatureThresholdCelsius} onChange={(event) => set('temperatureThresholdCelsius', Number(event.target.value))} /></label>
+          </>}
         </SettingsGroup>
         {error && <p className="form-error" role="alert">{error}</p>}
       </div>

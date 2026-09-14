@@ -6,7 +6,7 @@ import { getCachedTrendHistory, loadCachedTrendHistory } from '../utils/trendHis
 import { TrendChart } from './TrendChart'
 
 type Range = 1 | 3 | 24 | 72
-type Metric = 'utl' | 'mem'
+type Metric = 'utl' | 'mem' | 'temperature' | 'power' | 'fan'
 
 function coverageLabel(points: HistoryPoint[]) {
   if (points.length < 2) return '等待更多样本'
@@ -15,9 +15,9 @@ function coverageLabel(points: HistoryPoint[]) {
   return `已覆盖 ${(seconds / 3600).toFixed(seconds < 36_000 ? 1 : 0)} 小时`
 }
 
-export function ResourceTrend({ snapshot, kind, gpuUuid, title, animate }: { snapshot: Snapshot; kind: 'gpu' | 'cpu'; gpuUuid?: string; title: string; animate: boolean }) {
+export function ResourceTrend({ snapshot, kind, gpuUuid, title, animate, telemetry = false }: { snapshot: Snapshot; kind: 'gpu' | 'cpu'; gpuUuid?: string; title: string; animate: boolean; telemetry?: boolean }) {
   const [range, setRange] = useState<Range>(3)
-  const [metric, setMetric] = useState<Metric>(kind === 'gpu' ? 'mem' : 'utl')
+  const [metric, setMetric] = useState<Metric>(telemetry ? 'temperature' : kind === 'gpu' ? 'mem' : 'utl')
   const [points, setPoints] = useState<HistoryPoint[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -34,6 +34,7 @@ export function ResourceTrend({ snapshot, kind, gpuUuid, title, animate }: { sna
     const interval = window.setInterval(() => void load(), 30_000)
     return () => { cancelled = true; window.clearInterval(interval) }
   }, [range, snapshot.serverId])
-  const mode = kind === 'cpu' ? (metric === 'utl' ? 'cpu' : 'systemMemory') : (metric === 'utl' ? 'gpu' : 'gpuMemory')
-  return <section className="panel panel--chart resource-trend"><header className="resource-trend__header"><div><strong>{title}</strong><small>{error ?? coverageLabel(points)}</small></div><div className="resource-trend__controls"><span>{([1, 3, 24, 72] as const).map((hours) => <button key={hours} aria-pressed={range === hours} onClick={() => setRange(hours)}>{hours === 1 ? '1h' : hours === 3 ? '3h' : hours === 24 ? '1d' : '3d'}</button>)}</span><span>{(['utl', 'mem'] as const).map((value) => <button key={value} aria-pressed={metric === value} onClick={() => setMetric(value)}>{value.toUpperCase()}</button>)}</span></div></header>{loading && points.length === 0 ? <div className="resource-trend__loading"><RefreshCw className="spin" size={15} />正在读取…</div> : <TrendChart points={points} snapshot={snapshot} mode={mode} gpuUuid={gpuUuid} height={220} animate={animate} />}</section>
+  const mode = kind === 'cpu' ? (metric === 'utl' ? 'cpu' : 'systemMemory') : metric === 'utl' ? 'gpu' : metric === 'mem' ? 'gpuMemory' : metric === 'temperature' ? 'gpuTemperature' : metric === 'power' ? 'gpuPower' : 'gpuFan'
+  const telemetryMetrics = snapshot.gpus.some((gpu) => gpuUuid ? gpu.uuid === gpuUuid && gpu.fanSpeedPercent != null : gpu.fanSpeedPercent != null) ? ['temperature', 'power', 'fan'] as const : ['temperature', 'power'] as const
+  return <section className="panel panel--chart resource-trend"><header className="resource-trend__header"><div><strong>{title}</strong><small>{error ?? coverageLabel(points)}</small></div><div className="resource-trend__controls"><span>{([1, 3, 24, 72] as const).map((hours) => <button key={hours} aria-pressed={range === hours} onClick={() => setRange(hours)}>{hours === 1 ? '1h' : hours === 3 ? '3h' : hours === 24 ? '1d' : '3d'}</button>)}</span>{kind === 'gpu' && <span>{(telemetry ? telemetryMetrics : ['utl', 'mem'] as const).map((value) => <button key={value} aria-pressed={metric === value} onClick={() => setMetric(value)}>{value === 'temperature' ? '温度' : value === 'power' ? '功耗' : value === 'fan' ? '风扇' : value.toUpperCase()}</button>)}</span>}</div></header>{loading && points.length === 0 ? <div className="resource-trend__loading"><RefreshCw className="spin" size={15} />正在读取…</div> : <TrendChart points={points} snapshot={snapshot} mode={mode} gpuUuid={gpuUuid} height={220} animate={animate} />}</section>
 }

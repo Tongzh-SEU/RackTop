@@ -119,6 +119,9 @@ impl TerminalManager {
 
 fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<CommandBuilder, String> {
     let mut command = CommandBuilder::new("ssh");
+    // GUI processes may inherit TERM=dumb (or no TERM). SSH forwards this
+    // value with the PTY request, so advertise the emulator we actually use.
+    command.env("TERM", "xterm-256color");
     command.args(["-tt", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=yes"]);
     if server.auth_method == "password" {
         let password = password.ok_or("没有可用密码；请重新编辑服务器并输入密码")?;
@@ -152,6 +155,17 @@ fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<Com
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ssh_advertises_xterm_instead_of_inheriting_gui_terminal_type() {
+        let server: crate::models::Server = serde_json::from_value(serde_json::json!({
+            "id": "test", "name": "test", "host": "localhost", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 5,
+            "historyRetentionDays": 90, "authMethod": "key", "status": "offline"
+        })).unwrap();
+        let command = super::configured_ssh_command(&server, None).unwrap();
+        assert_eq!(command.get_env("TERM"), Some(std::ffi::OsStr::new("xterm-256color")));
+    }
+
     #[test]
     fn gpu_terminal_starts_with_a_fixed_export() {
         let command = format!("export CUDA_VISIBLE_DEVICES={}; exec \"${{SHELL:-/bin/sh}}\" -l", 3);

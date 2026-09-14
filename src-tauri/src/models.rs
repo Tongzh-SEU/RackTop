@@ -351,11 +351,15 @@ pub struct Snapshot {
     pub nvidia_message: Option<String>,
 }
 
-fn default_accelerator_vendor() -> String { "nvidia".into() }
+fn default_accelerator_vendor() -> String {
+    "nvidia".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryPoint {
+    #[serde(default, flatten)]
+    pub telemetry_ranges: GpuTelemetryRanges,
     pub timestamp: i64,
     #[serde(default)]
     pub is_compacted: bool,
@@ -366,6 +370,12 @@ pub struct HistoryPoint {
     pub gpu_utilizations: HashMap<String, f64>,
     #[serde(default)]
     pub gpu_memory_utilizations: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_temperatures_celsius: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_power_watts: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_fan_speeds_percent: HashMap<String, Option<f64>>,
     #[serde(default)]
     pub gpu_other_user_occupancies: HashMap<String, bool>,
     #[serde(default)]
@@ -390,6 +400,51 @@ pub struct HistoryPoint {
     pub gpu_memory_maxes: HashMap<String, f64>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuTelemetryRanges {
+    #[serde(default)]
+    pub gpu_temperature_mins: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_temperature_maxes: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_power_mins: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_power_maxes: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_fan_mins: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_fan_maxes: HashMap<String, f64>,
+}
+
+impl GpuTelemetryRanges {
+    pub fn from_snapshot(snapshot: &Snapshot) -> Self {
+        let temperatures: HashMap<_, _> = snapshot
+            .gpus
+            .iter()
+            .map(|gpu| (gpu.uuid.clone(), gpu.temperature_celsius))
+            .collect();
+        let power: HashMap<_, _> = snapshot
+            .gpus
+            .iter()
+            .map(|gpu| (gpu.uuid.clone(), gpu.power_watts))
+            .collect();
+        let fan: HashMap<_, _> = snapshot
+            .gpus
+            .iter()
+            .filter_map(|gpu| gpu.fan_speed_percent.map(|value| (gpu.uuid.clone(), value)))
+            .collect();
+        Self {
+            gpu_temperature_mins: temperatures.clone(),
+            gpu_temperature_maxes: temperatures,
+            gpu_power_mins: power.clone(),
+            gpu_power_maxes: power,
+            gpu_fan_mins: fan.clone(),
+            gpu_fan_maxes: fan,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryHeatmapPoint {
@@ -412,12 +467,16 @@ pub struct RemoteHistorySyncResult {
 #[serde(rename_all = "camelCase")]
 pub struct UsagePoint {
     pub timestamp: i64,
+    #[serde(default = "default_usage_bucket_seconds")]
+    pub bucket_seconds: i64,
     pub gpu_uuid: String,
     pub username: String,
     pub active_seconds: i64,
     pub memory_mb_seconds: f64,
     pub coverage_seconds: i64,
 }
+
+fn default_usage_bucket_seconds() -> i64 { 60 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -489,9 +548,15 @@ pub struct AppSettings {
     pub show_add_server_guide: bool,
 }
 
-fn default_true() -> bool { true }
-fn default_menu_bar_mode() -> String { "compact".into() }
-fn default_font_size() -> String { "standard".into() }
+fn default_true() -> bool {
+    true
+}
+fn default_menu_bar_mode() -> String {
+    "compact".into()
+}
+fn default_font_size() -> String {
+    "standard".into()
+}
 
 impl Default for AppSettings {
     fn default() -> Self {
