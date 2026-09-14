@@ -212,6 +212,7 @@ export interface AppSettings {
   idleGpuThreshold: number
   idleMemoryThresholdMb: number
   idleDurationMinutes: number
+  idleNotificationsEnabled?: boolean
   temperatureThresholdCelsius: number
   currentUserAccent: string
   theme: 'system' | 'light' | 'dark'

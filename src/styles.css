@@ -472,7 +472,12 @@ button.gpu-card:active { transform: scale(.99); }
 .stat-row strong { font-size: calc(12px + var(--font-adjust, 0px)); font-variant-numeric: tabular-nums; }
 .gpu-detail__empty { margin: 0; padding: 14px 10px; color: var(--text-tertiary); font-size: calc(9px + var(--font-adjust, 0px)); text-align: center; }
 .history-page { display: grid; gap: 24px; min-width: 0; }
-.history-page-loading { display: grid; place-content: center; justify-items: center; gap: 9px; min-height: 320px; color: var(--text-tertiary); font-size: calc(10px + var(--font-adjust, 0px)); }
+.history-page-loading { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 320px; width: 100%; color: var(--text-tertiary); font-size: calc(10px + var(--font-adjust, 0px)); text-align: center; }
+.history-maintenance { flex-direction: column; gap: 16px; padding: 32px 24px; box-sizing: border-box; }
+.history-maintenance > svg { flex: none; }
+.history-maintenance > div { width: 100%; max-width: 560px; min-width: 0; text-align: center; }
+.history-maintenance strong { display: block; color: var(--text); font-size: calc(18px + var(--font-adjust, 0px)); line-height: 1.5; font-weight: 600; overflow-wrap: anywhere; }
+.history-maintenance p { margin: 8px 0 0; color: var(--text-secondary); font-size: calc(12px + var(--font-adjust, 0px)); line-height: 1.7; overflow-wrap: anywhere; }
 .history-section { display: grid; min-width: 0; gap: 12px; }
 .history-section + .history-section { padding-top: 22px; border-top: 1px solid var(--border); }
 .usage-range { display: flex; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-subtle); }

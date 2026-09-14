@@ -593,6 +593,9 @@ fn list_latest_snapshots(database: State<'_, Database>) -> Result<Vec<Snapshot>,
 }
 
 #[tauri::command]
+fn storage_maintenance_active(database: State<'_, Database>) -> bool { database.is_maintenance() }
+
+#[tauri::command]
 async fn get_history(
     app: AppHandle,
     server_id: String,
@@ -611,29 +614,41 @@ async fn get_history(
 }
 
 #[tauri::command]
-fn get_history_heatmap(
-    database: State<'_, Database>,
+async fn get_history_heatmap(
+    app: AppHandle,
     server_id: String,
     from_timestamp: i64,
     timezone_offset_seconds: i64,
     gpu_uuids: Vec<String>,
 ) -> Result<Vec<HistoryHeatmapPoint>, String> {
-    database.get_history_heatmap(
-        &server_id,
-        from_timestamp,
-        timezone_offset_seconds,
-        &gpu_uuids,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        let database = app.state::<Database>();
+        if database.is_maintenance() {
+            return Err("历史数据维护中，请稍等".into());
+        }
+        database.get_history_heatmap(
+            &server_id,
+            from_timestamp,
+            timezone_offset_seconds,
+            &gpu_uuids,
+        )
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn get_usage_distribution(
-    database: State<'_, Database>,
+async fn get_usage_distribution(
+    app: AppHandle,
     server_id: String,
     from_timestamp: i64,
     requested_days: i64,
 ) -> Result<UsageDistribution, String> {
-    database.get_usage_distribution(&server_id, from_timestamp, requested_days)
+    tauri::async_runtime::spawn_blocking(move || {
+        let database = app.state::<Database>();
+        if database.is_maintenance() {
+            return Err("历史数据维护中，请稍等".into());
+        }
+        database.get_usage_distribution(&server_id, from_timestamp, requested_days)
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1309,6 +1324,8 @@ pub fn run() {
             app.manage(TerminalManager::default());
             app.manage(InteractionLogStore::default());
 
+            app.state::<Database>().set_maintenance(true);
+
             #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_decorations(false);
@@ -1337,13 +1354,13 @@ pub fn run() {
             std::thread::spawn(move || {
                 if let Err(error) = Database::migrate_usage_in_background(&maintenance_path) {
                     eprintln!("Deferred usage migration skipped: {error}");
-                }
-                if let Err(error) = maintenance_handle
+                } else if let Err(error) = maintenance_handle
                     .state::<Database>()
                     .reclaim_storage_space()
                 {
                     eprintln!("Deferred storage cleanup skipped: {error}");
                 }
+                maintenance_handle.state::<Database>().set_maintenance(false);
             });
 
             #[cfg(target_os = "macos")]
@@ -1404,6 +1421,7 @@ pub fn run() {
             list_latest_snapshots,
             get_interaction_log_summary,
             get_history,
+            storage_maintenance_active,
             get_history_heatmap,
             get_usage_distribution,
             configure_remote_history,

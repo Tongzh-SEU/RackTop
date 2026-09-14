@@ -9,6 +9,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Mutex,
+    sync::atomic::{AtomicBool, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
@@ -30,6 +31,7 @@ pub struct Database {
     session_passwords: Mutex<HashMap<String, String>>,
     credential_errors: Mutex<HashMap<String, String>>,
     path: PathBuf,
+    maintenance: AtomicBool,
 }
 
 #[derive(Default)]
@@ -1508,8 +1510,12 @@ impl Database {
             session_passwords: Mutex::new(HashMap::new()),
             credential_errors: Mutex::new(HashMap::new()),
             path: path.to_path_buf(),
+            maintenance: AtomicBool::new(false),
         })
     }
+
+    pub fn set_maintenance(&self, value: bool) { self.maintenance.store(value, Ordering::Release); }
+    pub fn is_maintenance(&self) -> bool { self.maintenance.load(Ordering::Acquire) }
 
     /// Perform the potentially expensive usage migration only after the first
     /// window is visible. A separate connection keeps normal WAL reads usable.
@@ -1559,7 +1565,9 @@ impl Database {
     /// Reclaim pages deleted by migrations after the UI is already available.
     /// This is intentionally best-effort; a locked database is retried later.
     pub fn reclaim_storage_space(&self) -> Result<(), String> {
-        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        // VACUUM must not hold the shared connection mutex while other commands read.
+        let connection = Connection::open(&self.path).map_err(|error| error.to_string())?;
+        connection.busy_timeout(std::time::Duration::ZERO).map_err(|error| error.to_string())?;
         let repair_applied: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM storage_migrations WHERE key='snapshot-tier-gap-repair-v1')",
@@ -4187,6 +4195,37 @@ mod tests {
         );
         let count: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('history_trend_buckets','idx_legacy')", [], |row| row.get(0)).unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn reclamation_returns_when_another_connection_is_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sqlite");
+        let db = Database::open(&path).unwrap();
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        assert!(db.reclaim_storage_space().is_err());
+        writer.execute_batch("ROLLBACK;").unwrap();
+        assert!(database_integrity_ok(&writer));
+        db.reclaim_storage_space().unwrap();
+    }
+
+    #[test]
+    fn reclamation_does_not_wait_for_the_shared_connection_mutex() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(&dir.path().join("test.sqlite")).unwrap());
+        let guard = db.connection.lock().unwrap();
+        db.set_maintenance(true);
+        assert!(db.is_maintenance());
+        let worker = db.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || { tx.send(worker.reclaim_storage_space()).unwrap(); });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(guard);
+        thread.join().unwrap();
+        result.expect("reclamation waited for the shared mutex").unwrap();
+        db.set_maintenance(false);
+        assert!(!db.is_maintenance());
     }
 
     #[test]
