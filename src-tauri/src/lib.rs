@@ -1,30 +1,44 @@
 pub mod collector;
-pub mod models;
-mod remote_history;
-mod project_sync;
 mod host_key;
+pub mod models;
+mod project_sync;
+mod remote_history;
 mod ssh_config;
 mod ssh_keys;
 pub mod storage;
 mod terminal;
 
-use models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution};
-use std::collections::HashMap;
 #[cfg(target_os = "windows")]
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use models::{
+    AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation,
+    InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult,
+    ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress,
+    ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult,
+    Server, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution,
+};
+use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use std::fs::OpenOptions;
 #[cfg(target_os = "macos")]
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::process::Command;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{SystemTime, UNIX_EPOCH};
 use storage::Database;
-use terminal::TerminalManager;
-use tauri::{image::Image, menu::{Menu, MenuBuilder, MenuItemBuilder}, tray::TrayIconBuilder, AppHandle, Emitter, Manager, State};
 #[cfg(target_os = "macos")]
-use tauri::menu::{SubmenuBuilder, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID};
+use tauri::menu::{HELP_SUBMENU_ID, SubmenuBuilder, WINDOW_SUBMENU_ID};
+use tauri::{
+    AppHandle, Emitter, Manager, State,
+    image::Image,
+    menu::{Menu, MenuBuilder, MenuItemBuilder},
+    tray::TrayIconBuilder,
+};
+use terminal::TerminalManager;
 
 #[derive(Default)]
 struct InteractionLogStore {
@@ -57,7 +71,10 @@ struct InteractionServerState {
 
 impl InteractionLogStore {
     fn now_millis() -> i64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_millis() as i64).unwrap_or_default()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_millis() as i64)
+            .unwrap_or_default()
     }
 
     fn begin(&self, server: &Server, command: String) -> u64 {
@@ -66,18 +83,22 @@ impl InteractionLogStore {
         if let Ok(mut state) = self.state.lock() {
             state.sent_bytes = state.sent_bytes.saturating_add(sent_bytes);
             state.interactions.insert(id, server.id.clone());
-            let entry = state.servers.entry(server.id.clone()).or_insert_with(|| InteractionServerState {
-                id,
-                server_name: server.name.clone(),
-                sent_bytes: 0,
-                response_bytes: 0,
-                stored_bytes: 0,
-                last_started_at: 0,
-                last_finished_at: None,
-                last_command: String::new(),
-                status: "success".into(),
-                error: None,
-            });
+            let entry =
+                state
+                    .servers
+                    .entry(server.id.clone())
+                    .or_insert_with(|| InteractionServerState {
+                        id,
+                        server_name: server.name.clone(),
+                        sent_bytes: 0,
+                        response_bytes: 0,
+                        stored_bytes: 0,
+                        last_started_at: 0,
+                        last_finished_at: None,
+                        last_command: String::new(),
+                        status: "success".into(),
+                        error: None,
+                    });
             entry.id = id;
             entry.server_name = server.name.clone();
             entry.sent_bytes = entry.sent_bytes.saturating_add(sent_bytes);
@@ -104,7 +125,11 @@ impl InteractionLogStore {
                 entry.stored_bytes = entry.stored_bytes.saturating_add(stored_bytes);
                 if entry.id == id {
                     entry.last_finished_at = Some(Self::now_millis());
-                    entry.status = if error.is_some() { "error".into() } else { "success".into() };
+                    entry.status = if error.is_some() {
+                        "error".into()
+                    } else {
+                        "success".into()
+                    };
                     entry.error = error;
                 }
             }
@@ -113,20 +138,31 @@ impl InteractionLogStore {
 
     fn summary(&self, local_storage_bytes: u64) -> Result<InteractionLogSummary, String> {
         let state = self.state.lock().map_err(|error| error.to_string())?;
-        let mut servers: Vec<_> = state.servers.iter().map(|(server_id, entry)| InteractionServerSummary {
-            server_id: server_id.clone(),
-            server_name: entry.server_name.clone(),
-            sent_bytes: entry.sent_bytes,
-            response_bytes: entry.response_bytes,
-            stored_bytes: entry.stored_bytes,
-            last_started_at: entry.last_started_at,
-            last_finished_at: entry.last_finished_at,
-            last_command: entry.last_command.clone(),
-            status: entry.status.clone(),
-            error: entry.error.clone(),
-        }).collect();
+        let mut servers: Vec<_> = state
+            .servers
+            .iter()
+            .map(|(server_id, entry)| InteractionServerSummary {
+                server_id: server_id.clone(),
+                server_name: entry.server_name.clone(),
+                sent_bytes: entry.sent_bytes,
+                response_bytes: entry.response_bytes,
+                stored_bytes: entry.stored_bytes,
+                last_started_at: entry.last_started_at,
+                last_finished_at: entry.last_finished_at,
+                last_command: entry.last_command.clone(),
+                status: entry.status.clone(),
+                error: entry.error.clone(),
+            })
+            .collect();
         servers.sort_by(|left, right| left.server_name.cmp(&right.server_name));
-        Ok(InteractionLogSummary { sent_bytes: state.sent_bytes, response_bytes: state.response_bytes, stored_bytes: state.stored_bytes, local_storage_bytes, failure_count: state.failure_count, servers })
+        Ok(InteractionLogSummary {
+            sent_bytes: state.sent_bytes,
+            response_bytes: state.response_bytes,
+            stored_bytes: state.stored_bytes,
+            local_storage_bytes,
+            failure_count: state.failure_count,
+            servers,
+        })
     }
 }
 
@@ -136,11 +172,25 @@ mod interaction_log_tests {
 
     fn server(id: &str, name: &str) -> Server {
         Server {
-            id: id.into(), name: name.into(), location: None, host: "10.0.0.1".into(), port: 22,
-            username: "test".into(), ssh_alias: None, identity_file: None, proxy_jump: None, tags: vec![],
-            sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
-            remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(),
-            status: "online".into(), last_error: None, last_seen_at: None,
+            id: id.into(),
+            name: name.into(),
+            location: None,
+            host: "10.0.0.1".into(),
+            port: 22,
+            username: "test".into(),
+            ssh_alias: None,
+            identity_file: None,
+            proxy_jump: None,
+            tags: vec![],
+            sampling_interval_seconds: 2,
+            history_retention_days: 90,
+            remote_history_enabled: false,
+            remote_history_last_sync_at: None,
+            sort_order: 0,
+            auth_method: "sshAgent".into(),
+            status: "online".into(),
+            last_error: None,
+            last_seen_at: None,
         }
     }
 
@@ -185,7 +235,10 @@ mod interaction_log_tests {
 }
 
 #[tauri::command]
-fn get_interaction_log_summary(database: State<'_, Database>, logs: State<'_, InteractionLogStore>) -> Result<InteractionLogSummary, String> {
+fn get_interaction_log_summary(
+    database: State<'_, Database>,
+    logs: State<'_, InteractionLogStore>,
+) -> Result<InteractionLogSummary, String> {
     logs.summary(database.storage_size_bytes())
 }
 
@@ -200,36 +253,78 @@ fn save_server(database: State<'_, Database>, draft: ServerDraft) -> Result<Serv
 }
 
 #[tauri::command]
-fn list_server_notification_settings(database: State<'_, Database>) -> Result<Vec<ServerNotificationSettings>, String> {
+fn list_server_notification_settings(
+    database: State<'_, Database>,
+) -> Result<Vec<ServerNotificationSettings>, String> {
     database.list_server_notification_settings()
 }
 
 #[tauri::command]
-fn save_server_notification_settings(database: State<'_, Database>, settings: ServerNotificationSettings) -> Result<ServerNotificationSettings, String> {
+fn save_server_notification_settings(
+    database: State<'_, Database>,
+    settings: ServerNotificationSettings,
+) -> Result<ServerNotificationSettings, String> {
     database.save_server_notification_settings(settings)
 }
 
 #[tauri::command]
-async fn delete_server(database: State<'_, Database>, server_id: String, revoke_ssh_access: bool) -> Result<RemoteCleanupResult, String> {
+async fn delete_server(
+    database: State<'_, Database>,
+    server_id: String,
+    revoke_ssh_access: bool,
+) -> Result<RemoteCleanupResult, String> {
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id, false).unwrap_or(None) } else { None };
-    let managed_public_key = if revoke_ssh_access {
-        Some(ssh_keys::managed_public_key(&server)?.ok_or("这台服务器未使用 RackTop 专用密钥，无法自动撤销免密登录")?)
+    let password = if server.auth_method == "password" {
+        database.get_password(&server_id, false).unwrap_or(None)
     } else {
         None
     };
-    match remote_history::remove(&server, password.as_deref(), managed_public_key.as_deref()).await {
+    let managed_public_key = if revoke_ssh_access {
+        Some(
+            ssh_keys::managed_public_key(&server)?
+                .ok_or("这台服务器未使用 RackTop 专用密钥，无法自动撤销免密登录")?,
+        )
+    } else {
+        None
+    };
+    match remote_history::remove(&server, password.as_deref(), managed_public_key.as_deref()).await
+    {
         Ok(()) => {
             database.delete_server(&server_id)?;
-            let suffix = if revoke_ssh_access { "，并已撤销 RackTop 免密登录" } else { "" };
-            Ok(RemoteCleanupResult { remote_cleaned: true, cleanup_pending: false, message: format!("已删除“{}”及其本地与远端 RackTop 数据{}", server.name, suffix) })
+            let suffix = if revoke_ssh_access {
+                "，并已撤销 RackTop 免密登录"
+            } else {
+                ""
+            };
+            Ok(RemoteCleanupResult {
+                remote_cleaned: true,
+                cleanup_pending: false,
+                message: format!(
+                    "已删除“{}”及其本地与远端 RackTop 数据{}",
+                    server.name, suffix
+                ),
+            })
         }
         Err(error) => {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|reason| reason.to_string())?.as_secs() as i64;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|reason| reason.to_string())?
+                .as_secs() as i64;
             database.enqueue_remote_cleanup(&server, now, &error, managed_public_key.as_deref())?;
             database.delete_server_record(&server_id, false)?;
-            let scope = if revoke_ssh_access { "远端数据与免密授权" } else { "远端数据" };
-            Ok(RemoteCleanupResult { remote_cleaned: false, cleanup_pending: true, message: format!("已删除“{}”的本地记录；{}清理将在重新连接后自动重试 24 小时", server.name, scope) })
+            let scope = if revoke_ssh_access {
+                "远端数据与免密授权"
+            } else {
+                "远端数据"
+            };
+            Ok(RemoteCleanupResult {
+                remote_cleaned: false,
+                cleanup_pending: true,
+                message: format!(
+                    "已删除“{}”的本地记录；{}清理将在重新连接后自动重试 24 小时",
+                    server.name, scope
+                ),
+            })
         }
     }
 }
@@ -240,19 +335,49 @@ fn reorder_servers(database: State<'_, Database>, server_ids: Vec<String>) -> Re
 }
 
 #[tauri::command]
-fn start_terminal(app: tauri::AppHandle, database: State<'_, Database>, terminals: State<'_, TerminalManager>, server_id: String, columns: u16, rows: u16, gpu_index: Option<u32>, accelerator_vendor: Option<String>) -> Result<String, String> {
+fn start_terminal(
+    app: tauri::AppHandle,
+    database: State<'_, Database>,
+    terminals: State<'_, TerminalManager>,
+    server_id: String,
+    columns: u16,
+    rows: u16,
+    gpu_index: Option<u32>,
+    accelerator_vendor: Option<String>,
+) -> Result<String, String> {
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
-    terminals.start(app, &server, password.as_deref(), columns, rows, gpu_index, accelerator_vendor.as_deref().unwrap_or("nvidia"))
+    let password = if server.auth_method == "password" {
+        database.get_password(&server_id, true)?
+    } else {
+        None
+    };
+    terminals.start(
+        app,
+        &server,
+        password.as_deref(),
+        columns,
+        rows,
+        gpu_index,
+        accelerator_vendor.as_deref().unwrap_or("nvidia"),
+    )
 }
 
 #[tauri::command]
-fn write_terminal(terminals: State<'_, TerminalManager>, session_id: String, data: String) -> Result<(), String> {
+fn write_terminal(
+    terminals: State<'_, TerminalManager>,
+    session_id: String,
+    data: String,
+) -> Result<(), String> {
     terminals.write(&session_id, data.as_bytes())
 }
 
 #[tauri::command]
-fn resize_terminal(terminals: State<'_, TerminalManager>, session_id: String, columns: u16, rows: u16) -> Result<(), String> {
+fn resize_terminal(
+    terminals: State<'_, TerminalManager>,
+    session_id: String,
+    columns: u16,
+    rows: u16,
+) -> Result<(), String> {
     terminals.resize(&session_id, columns, rows)
 }
 
@@ -263,7 +388,9 @@ fn close_terminal(terminals: State<'_, TerminalManager>, session_id: String) -> 
 
 #[tauri::command]
 fn open_setup_terminal(script: String) -> Result<(), String> {
-    if script.trim().is_empty() { return Err("启动配置命令为空".into()); }
+    if script.trim().is_empty() {
+        return Err("启动配置命令为空".into());
+    }
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -271,7 +398,10 @@ fn open_setup_terminal(script: String) -> Result<(), String> {
         let script_path = std::env::temp_dir().join(format!(
             "racktop-ssh-setup-{}-{}.sh",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_nanos(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos(),
         ));
         let mut file = OpenOptions::new()
             .write(true)
@@ -279,23 +409,40 @@ fn open_setup_terminal(script: String) -> Result<(), String> {
             .mode(0o700)
             .open(&script_path)
             .map_err(|error| format!("无法创建 macOS SSH 配置脚本：{error}"))?;
-        file.write_all(script.as_bytes()).map_err(|error| format!("无法写入 macOS SSH 配置脚本：{error}"))?;
-        file.sync_all().map_err(|error| format!("无法保存 macOS SSH 配置脚本：{error}"))?;
+        file.write_all(script.as_bytes())
+            .map_err(|error| format!("无法写入 macOS SSH 配置脚本：{error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("无法保存 macOS SSH 配置脚本：{error}"))?;
 
         let path = shell_quote(script_path.to_string_lossy().as_ref());
-        let command = format!("clear; printf '%s\\n\\n' 'RackTop SSH 密钥快速配置'; cat {path}; printf '%s\\n\\n' '正在执行…'; /bin/sh {path}; status=$?; rm -f {path}; printf '\\n%s\\n' 'RackTop SSH 配置已结束。'; exit $status");
+        let command = format!(
+            "clear; printf '%s\\n\\n' 'RackTop SSH 密钥快速配置'; cat {path}; printf '%s\\n\\n' '正在执行…'; /bin/sh {path}; status=$?; rm -f {path}; printf '\\n%s\\n' 'RackTop SSH 配置已结束。'; exit $status"
+        );
         let apple_script_command = command.replace('\\', "\\\\").replace('"', "\\\"");
         Command::new("osascript").args(["-e", &format!("tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{apple_script_command}\"")]).spawn().map_err(|error| format!("无法打开 macOS Terminal：{error}"))?;
     }
     #[cfg(target_os = "windows")]
     {
         let encoded = powershell_encoded_command(&script);
-        let launcher = format!("Start-Process powershell.exe -ArgumentList @('-NoExit','-NoProfile','-EncodedCommand','{encoded}')");
-        Command::new("powershell.exe").args(["-NoProfile", "-Command", &launcher]).spawn().map_err(|error| format!("无法打开 Windows PowerShell：{error}"))?;
+        let launcher = format!(
+            "Start-Process powershell.exe -ArgumentList @('-NoExit','-NoProfile','-EncodedCommand','{encoded}')"
+        );
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &launcher])
+            .spawn()
+            .map_err(|error| format!("无法打开 Windows PowerShell：{error}"))?;
     }
     #[cfg(target_os = "linux")]
     {
-        Command::new("x-terminal-emulator").args(["-e", "sh", "-lc", &format!("{}; exec \"${{SHELL:-/bin/sh}}\"", script)]).spawn().map_err(|error| format!("无法打开系统终端：{error}"))?;
+        Command::new("x-terminal-emulator")
+            .args([
+                "-e",
+                "sh",
+                "-lc",
+                &format!("{}; exec \"${{SHELL:-/bin/sh}}\"", script),
+            ])
+            .spawn()
+            .map_err(|error| format!("无法打开系统终端：{error}"))?;
     }
     Ok(())
 }
@@ -306,7 +453,10 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(target_os = "windows")]
 fn powershell_encoded_command(value: &str) -> String {
-    let utf16_le = value.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+    let utf16_le = value
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
     STANDARD.encode(utf16_le)
 }
 
@@ -337,44 +487,85 @@ async fn verify_ssh_setup(draft: ServerDraft) -> Result<(), String> {
         last_seen_at: None,
     };
     let (mut command, target) = collector::configured_ssh_command(&server, None)?;
-    command.arg(target).arg("printf '__RACKTOP_SSH_READY__\\n'").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    let output = tokio::time::timeout(std::time::Duration::from_secs(12), command.output()).await
+    command
+        .arg(target)
+        .arg("printf '__RACKTOP_SSH_READY__\\n'")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let output = tokio::time::timeout(std::time::Duration::from_secs(12), command.output())
+        .await
         .map_err(|_| "等待 RackTop 专用密钥验证超时".to_string())?
         .map_err(|error| format!("无法启动系统 ssh：{error}"))?;
     if !output.status.success() {
-        return Err(collector::classify_ssh_error(String::from_utf8_lossy(&output.stderr).trim()));
+        return Err(collector::classify_ssh_error(
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ));
     }
-    if !String::from_utf8_lossy(&output.stdout).lines().any(|line| line.trim() == "__RACKTOP_SSH_READY__") {
+    if !String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.trim() == "__RACKTOP_SSH_READY__")
+    {
         return Err("专用密钥登录后未返回验证标记".into());
     }
     Ok(())
 }
 
 #[tauri::command]
-async fn collect_server(database: State<'_, Database>, logs: State<'_, InteractionLogStore>, server_id: String, include_processes: bool, include_disks: bool, record_history: bool, allow_credential_prompt: bool) -> Result<Snapshot, String> {
+async fn collect_server(
+    database: State<'_, Database>,
+    logs: State<'_, InteractionLogStore>,
+    server_id: String,
+    include_processes: bool,
+    include_disks: bool,
+    record_history: bool,
+    allow_credential_prompt: bool,
+) -> Result<Snapshot, String> {
     let server = database.get_server(&server_id)?;
-    let log_id = logs.begin(&server, collector::collection_display_command(&server, include_processes, include_disks));
-    let password = match if server.auth_method == "password" { database.get_password(&server_id, allow_credential_prompt) } else { Ok(None) } {
+    let log_id = logs.begin(
+        &server,
+        collector::collection_display_command(&server, include_processes, include_disks),
+    );
+    let password = match if server.auth_method == "password" {
+        database.get_password(&server_id, allow_credential_prompt)
+    } else {
+        Ok(None)
+    } {
         Ok(password) => password,
         Err(error) => {
             logs.finish(log_id, 0, 0, Some(error.clone()));
             return Err(error);
         }
     };
-    match collector::collect_with_password_detailed(&server, password.as_deref(), include_processes, include_disks).await {
+    match collector::collect_with_password_detailed(
+        &server,
+        password.as_deref(),
+        include_processes,
+        include_disks,
+    )
+    .await
+    {
         Ok(collected) => {
             let response_bytes = collected.response_bytes;
             let snapshot = collected.snapshot;
             let mut stored_bytes = 0u64;
             let stored = (|| -> Result<(), String> {
-                database.update_status(&server_id, &snapshot.status, snapshot.nvidia_message.as_deref(), Some(snapshot.timestamp))?;
+                database.update_status(
+                    &server_id,
+                    &snapshot.status,
+                    snapshot.nvidia_message.as_deref(),
+                    Some(snapshot.timestamp),
+                )?;
                 if record_history {
-                    stored_bytes = serde_json::to_vec(&snapshot).map_err(|error| error.to_string())?.len() as u64;
+                    stored_bytes = serde_json::to_vec(&snapshot)
+                        .map_err(|error| error.to_string())?
+                        .len() as u64;
                     database.save_snapshot(&snapshot)?;
                 }
                 if snapshot.processes_sampled {
                     let usage_rows = database.save_local_usage(&snapshot)?;
-                    stored_bytes = stored_bytes.saturating_add((usage_rows as u64).saturating_mul(96));
+                    stored_bytes =
+                        stored_bytes.saturating_add((usage_rows as u64).saturating_mul(96));
                 }
                 Ok(())
             })();
@@ -402,71 +593,151 @@ fn list_latest_snapshots(database: State<'_, Database>) -> Result<Vec<Snapshot>,
 }
 
 #[tauri::command]
-async fn get_history(app: AppHandle, server_id: String, from_timestamp: i64, bucket_seconds: Option<i64>) -> Result<Vec<HistoryPoint>, String> {
+async fn get_history(
+    app: AppHandle,
+    server_id: String,
+    from_timestamp: i64,
+    bucket_seconds: Option<i64>,
+) -> Result<Vec<HistoryPoint>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let database = app.state::<Database>();
         match bucket_seconds.filter(|seconds| *seconds > 0) {
             Some(seconds) => database.get_compacted_history(&server_id, from_timestamp, seconds),
             None => database.get_recent_history(&server_id, from_timestamp),
         }
-    }).await.map_err(|error| error.to_string())?
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn get_history_heatmap(database: State<'_, Database>, server_id: String, from_timestamp: i64, timezone_offset_seconds: i64, gpu_uuids: Vec<String>) -> Result<Vec<HistoryHeatmapPoint>, String> {
-    database.get_history_heatmap(&server_id, from_timestamp, timezone_offset_seconds, &gpu_uuids)
+fn get_history_heatmap(
+    database: State<'_, Database>,
+    server_id: String,
+    from_timestamp: i64,
+    timezone_offset_seconds: i64,
+    gpu_uuids: Vec<String>,
+) -> Result<Vec<HistoryHeatmapPoint>, String> {
+    database.get_history_heatmap(
+        &server_id,
+        from_timestamp,
+        timezone_offset_seconds,
+        &gpu_uuids,
+    )
 }
 
 #[tauri::command]
-fn get_usage_distribution(database: State<'_, Database>, server_id: String, from_timestamp: i64, requested_days: i64) -> Result<UsageDistribution, String> {
+fn get_usage_distribution(
+    database: State<'_, Database>,
+    server_id: String,
+    from_timestamp: i64,
+    requested_days: i64,
+) -> Result<UsageDistribution, String> {
     database.get_usage_distribution(&server_id, from_timestamp, requested_days)
 }
 
 #[tauri::command]
-async fn configure_remote_history(database: State<'_, Database>, server_id: String) -> Result<(), String> {
+async fn configure_remote_history(
+    database: State<'_, Database>,
+    server_id: String,
+) -> Result<(), String> {
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id, false)? } else { None };
+    let password = if server.auth_method == "password" {
+        database.get_password(&server_id, false)?
+    } else {
+        None
+    };
     remote_history::configure(&server, password.as_deref()).await
 }
 
 #[tauri::command]
-async fn sync_remote_history(database: State<'_, Database>, server_id: String) -> Result<RemoteHistorySyncResult, String> {
+async fn sync_remote_history(
+    database: State<'_, Database>,
+    server_id: String,
+) -> Result<RemoteHistorySyncResult, String> {
     let server = database.get_server(&server_id)?;
     if !server.remote_history_enabled {
-        return Ok(RemoteHistorySyncResult { imported_count: 0, latest_timestamp: server.remote_history_last_sync_at });
+        return Ok(RemoteHistorySyncResult {
+            imported_count: 0,
+            latest_timestamp: server.remote_history_last_sync_at,
+        });
     }
     if !database.get_settings()?.history_enabled {
-        return Ok(RemoteHistorySyncResult { imported_count: 0, latest_timestamp: server.remote_history_last_sync_at });
+        return Ok(RemoteHistorySyncResult {
+            imported_count: 0,
+            latest_timestamp: server.remote_history_last_sync_at,
+        });
     }
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs() as i64;
     let since = database.remote_history_cursor(&server_id, now)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id, false)? } else { None };
+    let password = if server.auth_method == "password" {
+        database.get_password(&server_id, false)?
+    } else {
+        None
+    };
     let fetched_points = remote_history::fetch(&server, password.as_deref(), since).await?;
     let usage_points = remote_history::fetch_usage(&server, password.as_deref(), since).await?;
-    let points: Vec<_> = fetched_points.iter().filter(|point| point.timestamp >= now - 31 * 86_400 && point.timestamp <= now + 300).cloned().collect();
+    let points: Vec<_> = fetched_points
+        .iter()
+        .filter(|point| point.timestamp >= now - 31 * 86_400 && point.timestamp <= now + 300)
+        .cloned()
+        .collect();
     if !fetched_points.is_empty() && points.is_empty() {
         return Err("远端历史时间戳超出有效范围，请检查服务器系统时间和时区".into());
     }
-    let latest_timestamp = points.iter().map(|point| point.timestamp).max().or(server.remote_history_last_sync_at);
+    let latest_timestamp = points
+        .iter()
+        .map(|point| point.timestamp)
+        .max()
+        .or(server.remote_history_last_sync_at);
     let imported_count = database.import_remote_history(&server_id, &points)?;
     let usage_imported = database.import_remote_usage(&server_id, &usage_points, now)?;
-    Ok(RemoteHistorySyncResult { imported_count: imported_count + usage_imported, latest_timestamp })
+    Ok(RemoteHistorySyncResult {
+        imported_count: imported_count + usage_imported,
+        latest_timestamp,
+    })
 }
 
 #[tauri::command]
-async fn retry_remote_cleanups(database: State<'_, Database>) -> Result<RemoteCleanupSweepResult, String> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
-    let mut result = RemoteCleanupSweepResult { cleaned_names: Vec::new(), pending_names: Vec::new(), expired_names: Vec::new() };
+async fn retry_remote_cleanups(
+    database: State<'_, Database>,
+) -> Result<RemoteCleanupSweepResult, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs() as i64;
+    let mut result = RemoteCleanupSweepResult {
+        cleaned_names: Vec::new(),
+        pending_names: Vec::new(),
+        expired_names: Vec::new(),
+    };
     for task in database.list_remote_cleanup_tasks()? {
         if task.expires_at <= now {
-            database.finish_remote_cleanup(&task.server.id, task.server.auth_method == "password")?;
+            database
+                .finish_remote_cleanup(&task.server.id, task.server.auth_method == "password")?;
             result.expired_names.push(task.server.name);
             continue;
         }
-        let password = if task.server.auth_method == "password" { database.get_password(&task.server.id, false)? } else { None };
-        match remote_history::remove(&task.server, password.as_deref(), task.managed_public_key.as_deref()).await {
+        let password = if task.server.auth_method == "password" {
+            database.get_password(&task.server.id, false)?
+        } else {
+            None
+        };
+        match remote_history::remove(
+            &task.server,
+            password.as_deref(),
+            task.managed_public_key.as_deref(),
+        )
+        .await
+        {
             Ok(()) => {
-                database.finish_remote_cleanup(&task.server.id, task.server.auth_method == "password")?;
+                database.finish_remote_cleanup(
+                    &task.server.id,
+                    task.server.auth_method == "password",
+                )?;
                 result.cleaned_names.push(task.server.name);
             }
             Err(error) => {
@@ -484,12 +755,18 @@ fn list_idle_reservations(database: State<'_, Database>) -> Result<Vec<IdleReser
 }
 
 #[tauri::command]
-fn save_idle_reservation(database: State<'_, Database>, reservation: IdleReservation) -> Result<IdleReservation, String> {
+fn save_idle_reservation(
+    database: State<'_, Database>,
+    reservation: IdleReservation,
+) -> Result<IdleReservation, String> {
     database.save_idle_reservation(reservation)
 }
 
 #[tauri::command]
-fn delete_idle_reservation(database: State<'_, Database>, reservation_id: String) -> Result<(), String> {
+fn delete_idle_reservation(
+    database: State<'_, Database>,
+    reservation_id: String,
+) -> Result<(), String> {
     database.delete_idle_reservation(&reservation_id)
 }
 
@@ -509,31 +786,53 @@ fn delete_project(database: State<'_, Database>, project_id: String) -> Result<(
 }
 
 #[tauri::command]
-async fn probe_project_paths(database: State<'_, Database>, draft: ProjectDraft) -> Result<Vec<ProjectPathCheck>, String> {
+async fn probe_project_paths(
+    database: State<'_, Database>,
+    draft: ProjectDraft,
+) -> Result<Vec<ProjectPathCheck>, String> {
     project_sync::probe(&database, &draft).await
 }
 
 #[tauri::command]
-async fn suggest_project_paths(database: State<'_, Database>, server_id: String, query: String) -> Result<Vec<String>, String> {
+async fn suggest_project_paths(
+    database: State<'_, Database>,
+    server_id: String,
+    query: String,
+) -> Result<Vec<String>, String> {
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server.id, false)? } else { None };
+    let password = if server.auth_method == "password" {
+        database.get_password(&server.id, false)?
+    } else {
+        None
+    };
     project_sync::suggest_paths(&server, password.as_deref(), &query).await
 }
 
 #[tauri::command]
-async fn inspect_project(database: State<'_, Database>, project_id: String) -> Result<Project, String> {
+async fn inspect_project(
+    database: State<'_, Database>,
+    project_id: String,
+) -> Result<Project, String> {
     let project = database.get_project(&project_id)?;
     project_sync::inspect(&database, &project).await
 }
 
 #[tauri::command]
-async fn inspect_project_source(database: State<'_, Database>, project_id: String) -> Result<Project, String> {
+async fn inspect_project_source(
+    database: State<'_, Database>,
+    project_id: String,
+) -> Result<Project, String> {
     let project = database.get_project(&project_id)?;
     project_sync::inspect_source(&database, &project).await
 }
 
 #[tauri::command]
-async fn sync_project(database: State<'_, Database>, project_id: String, target_server_id: String, force: bool) -> Result<ProjectSyncResult, String> {
+async fn sync_project(
+    database: State<'_, Database>,
+    project_id: String,
+    target_server_id: String,
+    force: bool,
+) -> Result<ProjectSyncResult, String> {
     let project = database.get_project(&project_id)?;
     project_sync::sync(&database, &project, &target_server_id, force).await
 }
@@ -545,12 +844,19 @@ fn list_project_sync_progress() -> Vec<ProjectSyncProgress> {
 
 #[tauri::command]
 fn cancel_project_sync(project_id: String, target_server_id: String) -> Result<(), String> {
-    if project_sync::cancel(&project_id, &target_server_id) { Ok(()) } else { Err("找不到正在运行的同步任务".into()) }
+    if project_sync::cancel(&project_id, &target_server_id) {
+        Ok(())
+    } else {
+        Err("找不到正在运行的同步任务".into())
+    }
 }
 
 #[tauri::command]
 fn import_ssh_config(path: Option<String>) -> Result<Vec<ServerDraft>, String> {
-    let path = path.map(PathBuf::from).map(Ok).unwrap_or_else(ssh_config::default_config_path)?;
+    let path = path
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(ssh_config::default_config_path)?;
     ssh_config::import(&path)
 }
 
@@ -560,7 +866,10 @@ fn get_settings(database: State<'_, Database>) -> Result<AppSettings, String> {
 }
 
 #[tauri::command]
-fn save_settings(database: State<'_, Database>, settings: AppSettings) -> Result<AppSettings, String> {
+fn save_settings(
+    database: State<'_, Database>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
     if settings.default_sampling_interval_seconds < 2 {
         return Err("前台采样间隔不能短于 2 秒".into());
     }
@@ -575,7 +884,10 @@ fn save_settings(database: State<'_, Database>, settings: AppSettings) -> Result
 }
 
 #[tauri::command]
-async fn scan_host_key(database: State<'_, Database>, server_id: String) -> Result<HostKeyInfo, String> {
+async fn scan_host_key(
+    database: State<'_, Database>,
+    server_id: String,
+) -> Result<HostKeyInfo, String> {
     let server = database.get_server(&server_id)?;
     host_key::scan(&server).await
 }
@@ -587,49 +899,121 @@ fn trust_host_key(database: State<'_, Database>, info: HostKeyInfo) -> Result<()
 }
 
 #[tauri::command]
-async fn install_nvidia_driver(database: State<'_, Database>, server_id: String, confirmed: bool) -> Result<String, String> {
-    if !confirmed { return Err("必须在界面明确确认后才能安装驱动".into()); }
+async fn install_nvidia_driver(
+    database: State<'_, Database>,
+    server_id: String,
+    confirmed: bool,
+) -> Result<String, String> {
+    if !confirmed {
+        return Err("必须在界面明确确认后才能安装驱动".into());
+    }
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
+    let password = if server.auth_method == "password" {
+        database.get_password(&server_id, true)?
+    } else {
+        None
+    };
     collector::install_nvidia_driver(&server, password.as_deref()).await
 }
 
 #[tauri::command]
-async fn terminate_process(database: State<'_, Database>, server_id: String, pid: u32, confirmed: bool) -> Result<String, String> {
-    if !confirmed { return Err("必须在界面完成二次确认后才能结束进程".into()); }
+async fn terminate_process(
+    database: State<'_, Database>,
+    server_id: String,
+    pid: u32,
+    confirmed: bool,
+) -> Result<String, String> {
+    if !confirmed {
+        return Err("必须在界面完成二次确认后才能结束进程".into());
+    }
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
+    let password = if server.auth_method == "password" {
+        database.get_password(&server_id, true)?
+    } else {
+        None
+    };
     collector::terminate_process_tree(&server, password.as_deref(), pid).await
 }
 
 #[tauri::command]
-async fn launch_managed_run(database: State<'_, Database>, server_id: String, run_id: String, working_directory: String, command: String, gpu_indices: Vec<u32>, project_log_path: Option<String>, accelerator_vendor: Option<String>) -> Result<ManagedRunLaunchResult, String> {
+async fn launch_managed_run(
+    database: State<'_, Database>,
+    server_id: String,
+    run_id: String,
+    working_directory: String,
+    command: String,
+    gpu_indices: Vec<u32>,
+    project_log_path: Option<String>,
+    accelerator_vendor: Option<String>,
+) -> Result<ManagedRunLaunchResult, String> {
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
-    collector::launch_managed_run(&server, password.as_deref(), &run_id, &working_directory, &command, &gpu_indices, project_log_path.as_deref(), accelerator_vendor.as_deref().unwrap_or("nvidia")).await
+    let password = if server.auth_method == "password" {
+        database.get_password(&server_id, true)?
+    } else {
+        None
+    };
+    collector::launch_managed_run(
+        &server,
+        password.as_deref(),
+        &run_id,
+        &working_directory,
+        &command,
+        &gpu_indices,
+        project_log_path.as_deref(),
+        accelerator_vendor.as_deref().unwrap_or("nvidia"),
+    )
+    .await
 }
 
 #[tauri::command]
-async fn read_managed_run_log(database: State<'_, Database>, server_id: String, run_id: String, lines: u32) -> Result<String, String> {
+async fn read_managed_run_log(
+    database: State<'_, Database>,
+    server_id: String,
+    run_id: String,
+    lines: u32,
+) -> Result<String, String> {
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
+    let password = if server.auth_method == "password" {
+        database.get_password(&server_id, true)?
+    } else {
+        None
+    };
     collector::read_managed_run_log(&server, password.as_deref(), &run_id, lines).await
 }
 
 #[tauri::command]
-async fn get_managed_run_status(database: State<'_, Database>, server_id: String, run_id: String, pid: u32) -> Result<ManagedRunRemoteStatus, String> {
+async fn get_managed_run_status(
+    database: State<'_, Database>,
+    server_id: String,
+    run_id: String,
+    pid: u32,
+) -> Result<ManagedRunRemoteStatus, String> {
     let server = database.get_server(&server_id)?;
-    let password = if server.auth_method == "password" { database.get_password(&server_id, true)? } else { None };
+    let password = if server.auth_method == "password" {
+        database.get_password(&server_id, true)?
+    } else {
+        None
+    };
     collector::managed_run_status(&server, password.as_deref(), &run_id, pid).await
 }
 
 fn tray_pixel(rgba: &mut [u8], width: usize, x: usize, y: usize, alpha: u8) {
-    if x >= width || y >= 18 { return; }
+    if x >= width || y >= 18 {
+        return;
+    }
     let index = (y * width + x) * 4;
     rgba[index..index + 4].copy_from_slice(&[0, 0, 0, alpha]);
 }
 
-fn tray_rect(rgba: &mut [u8], width: usize, x: usize, y: usize, rect_width: usize, rect_height: usize, alpha: u8) {
+fn tray_rect(
+    rgba: &mut [u8],
+    width: usize,
+    x: usize,
+    y: usize,
+    rect_width: usize,
+    rect_height: usize,
+    alpha: u8,
+) {
     for draw_y in y..y + rect_height {
         for draw_x in x..x + rect_width {
             tray_pixel(rgba, width, draw_x, draw_y, alpha);
@@ -638,22 +1022,32 @@ fn tray_rect(rgba: &mut [u8], width: usize, x: usize, y: usize, rect_width: usiz
 }
 
 const TRAY_DIGITS: [[u8; 15]; 10] = [
-    [1,1,1, 1,0,1, 1,0,1, 1,0,1, 1,1,1],
-    [0,1,0, 1,1,0, 0,1,0, 0,1,0, 1,1,1],
-    [1,1,1, 0,0,1, 1,1,1, 1,0,0, 1,1,1],
-    [1,1,1, 0,0,1, 0,1,1, 0,0,1, 1,1,1],
-    [1,0,1, 1,0,1, 1,1,1, 0,0,1, 0,0,1],
-    [1,1,1, 1,0,0, 1,1,1, 0,0,1, 1,1,1],
-    [1,1,1, 1,0,0, 1,1,1, 1,0,1, 1,1,1],
-    [1,1,1, 0,0,1, 0,1,0, 0,1,0, 0,1,0],
-    [1,1,1, 1,0,1, 1,1,1, 1,0,1, 1,1,1],
-    [1,1,1, 1,0,1, 1,1,1, 0,0,1, 1,1,1],
+    [1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1],
+    [0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1],
+    [1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1],
+    [1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1],
+    [1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0, 1],
+    [1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1],
+    [1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1],
+    [1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0],
+    [1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1],
+    [1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1],
 ];
 
 fn tray_digit(rgba: &mut [u8], width: usize, x: usize, value: usize, alpha: u8) {
     for (index, pixel) in TRAY_DIGITS[value].iter().enumerate() {
-        if *pixel == 0 { continue; }
-        tray_rect(rgba, width, x + (index % 3) * 2, 4 + (index / 3) * 2, 2, 2, alpha);
+        if *pixel == 0 {
+            continue;
+        }
+        tray_rect(
+            rgba,
+            width,
+            x + (index % 3) * 2,
+            4 + (index / 3) * 2,
+            2,
+            2,
+            alpha,
+        );
     }
 }
 
@@ -667,12 +1061,24 @@ fn tray_count(rgba: &mut [u8], width: usize, x: usize, count: usize, alpha: u8) 
     }
 }
 
-fn render_tray_image(mode: &str, reservation_pending: usize, process_warnings: usize) -> (Vec<u8>, u32, u32) {
+fn render_tray_image(
+    mode: &str,
+    reservation_pending: usize,
+    process_warnings: usize,
+) -> (Vec<u8>, u32, u32) {
     let expanded = mode == "expanded";
     let width = if expanded { 78usize } else { 18usize };
     let mut rgba = vec![0u8; width * 18 * 4];
     for x in 2..16 {
-        let y = if x < 6 { 10 } else if x < 9 { 5 } else if x < 12 { 12 } else { 7 };
+        let y = if x < 6 {
+            10
+        } else if x < 9 {
+            5
+        } else if x < 12 {
+            12
+        } else {
+            7
+        };
         for offset in 0..2 {
             tray_pixel(&mut rgba, width, x, y + offset, 255);
         }
@@ -719,7 +1125,8 @@ mod tray_image_tests {
         let (compact, compact_width, compact_height) = render_tray_image("compact", 0, 0);
         let (compact_alert, alert_width, alert_height) = render_tray_image("compact", 1, 2);
         let (expanded, expanded_width, expanded_height) = render_tray_image("expanded", 0, 0);
-        let (expanded_alert, expanded_alert_width, expanded_alert_height) = render_tray_image("expanded", 12, 3);
+        let (expanded_alert, expanded_alert_width, expanded_alert_height) =
+            render_tray_image("expanded", 12, 3);
 
         assert_eq!((compact_width, compact_height), (18, 18));
         assert_eq!((alert_width, alert_height), (18, 18));
@@ -731,20 +1138,46 @@ mod tray_image_tests {
     }
 }
 
-fn build_tray_menu(app: &AppHandle, reservation_pending: usize, process_warnings: usize) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
+fn build_tray_menu(
+    app: &AppHandle,
+    reservation_pending: usize,
+    process_warnings: usize,
+) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
     let open = MenuItemBuilder::with_id("open", "打开 RackTop").build(app)?;
-    let reservations = MenuItemBuilder::with_id("reservations", format!("预约待处理  {}", reservation_pending)).build(app)?;
-    let processes = MenuItemBuilder::with_id("mine-processes", format!("我的进程异常  {}", process_warnings)).build(app)?;
+    let reservations = MenuItemBuilder::with_id(
+        "reservations",
+        format!("预约待处理  {}", reservation_pending),
+    )
+    .build(app)?;
+    let processes = MenuItemBuilder::with_id(
+        "mine-processes",
+        format!("我的进程异常  {}", process_warnings),
+    )
+    .build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
-    Ok(MenuBuilder::new(app).item(&open).separator().items(&[&reservations, &processes]).separator().item(&quit).build()?)
+    Ok(MenuBuilder::new(app)
+        .item(&open)
+        .separator()
+        .items(&[&reservations, &processes])
+        .separator()
+        .item(&quit)
+        .build()?)
 }
 
 #[cfg(target_os = "macos")]
 fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
     let about = MenuItemBuilder::with_id("menu-about", "关于 RackTop").build(app)?;
-    let settings = MenuItemBuilder::with_id("menu-settings", "设置…").accelerator("CmdOrCtrl+,").build(app)?;
-    let quit = MenuItemBuilder::with_id("menu-quit", "退出 RackTop").accelerator("CmdOrCtrl+Q").build(app)?;
-    let racktop = SubmenuBuilder::new(app, "RackTop").items(&[&about, &settings]).separator().item(&quit).build()?;
+    let settings = MenuItemBuilder::with_id("menu-settings", "设置…")
+        .accelerator("CmdOrCtrl+,")
+        .build(app)?;
+    let quit = MenuItemBuilder::with_id("menu-quit", "退出 RackTop")
+        .accelerator("CmdOrCtrl+Q")
+        .build(app)?;
+    let racktop = SubmenuBuilder::new(app, "RackTop")
+        .items(&[&about, &settings])
+        .separator()
+        .item(&quit)
+        .build()?;
 
     let edit = SubmenuBuilder::new(app, "编辑")
         .undo_with_text("撤销")
@@ -756,16 +1189,37 @@ fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn s
         .select_all_with_text("全选")
         .build()?;
 
-    let add_server = MenuItemBuilder::with_id("menu-add-server", "添加服务器…").accelerator("CmdOrCtrl+N").build(app)?;
-    let import_config = MenuItemBuilder::with_id("menu-import-config", "导入 SSH Config…").build(app)?;
-    let refresh_all = MenuItemBuilder::with_id("menu-refresh-all", "刷新全部服务器").accelerator("CmdOrCtrl+R").build(app)?;
-    let servers = SubmenuBuilder::new(app, "服务器").items(&[&add_server, &import_config]).separator().item(&refresh_all).build()?;
+    let add_server = MenuItemBuilder::with_id("menu-add-server", "添加服务器…")
+        .accelerator("CmdOrCtrl+N")
+        .build(app)?;
+    let import_config =
+        MenuItemBuilder::with_id("menu-import-config", "导入 SSH Config…").build(app)?;
+    let refresh_all = MenuItemBuilder::with_id("menu-refresh-all", "刷新全部服务器")
+        .accelerator("CmdOrCtrl+R")
+        .build(app)?;
+    let servers = SubmenuBuilder::new(app, "服务器")
+        .items(&[&add_server, &import_config])
+        .separator()
+        .item(&refresh_all)
+        .build()?;
 
-    let fleet = MenuItemBuilder::with_id("menu-view-fleet", "算力总览").accelerator("CmdOrCtrl+1").build(app)?;
-    let idle = MenuItemBuilder::with_id("menu-view-idle", "空闲算力").accelerator("CmdOrCtrl+2").build(app)?;
-    let mine = MenuItemBuilder::with_id("menu-view-mine", "我的进程").accelerator("CmdOrCtrl+3").build(app)?;
-    let logs = MenuItemBuilder::with_id("menu-view-logs", "日志").accelerator("CmdOrCtrl+L").build(app)?;
-    let view = SubmenuBuilder::new(app, "查看").items(&[&fleet, &idle, &mine]).separator().item(&logs).build()?;
+    let fleet = MenuItemBuilder::with_id("menu-view-fleet", "算力总览")
+        .accelerator("CmdOrCtrl+1")
+        .build(app)?;
+    let idle = MenuItemBuilder::with_id("menu-view-idle", "空闲算力")
+        .accelerator("CmdOrCtrl+2")
+        .build(app)?;
+    let mine = MenuItemBuilder::with_id("menu-view-mine", "我的进程")
+        .accelerator("CmdOrCtrl+3")
+        .build(app)?;
+    let logs = MenuItemBuilder::with_id("menu-view-logs", "日志")
+        .accelerator("CmdOrCtrl+L")
+        .build(app)?;
+    let view = SubmenuBuilder::new(app, "查看")
+        .items(&[&fleet, &idle, &mine])
+        .separator()
+        .item(&logs)
+        .build()?;
 
     let window = SubmenuBuilder::with_id(app, WINDOW_SUBMENU_ID, "窗口")
         .minimize_with_text("最小化")
@@ -777,19 +1231,44 @@ fn build_application_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn s
 
     let guide = MenuItemBuilder::with_id("menu-help-guide", "使用说明").build(app)?;
     let project = MenuItemBuilder::with_id("menu-help-project", "打开项目主页").build(app)?;
-    let help = SubmenuBuilder::with_id(app, HELP_SUBMENU_ID, "帮助").items(&[&guide, &project]).build()?;
+    let help = SubmenuBuilder::with_id(app, HELP_SUBMENU_ID, "帮助")
+        .items(&[&guide, &project])
+        .build()?;
 
-    Ok(MenuBuilder::new(app).items(&[&racktop, &edit, &servers, &view, &window, &help]).build()?)
+    Ok(MenuBuilder::new(app)
+        .items(&[&racktop, &edit, &servers, &view, &window, &help])
+        .build()?)
 }
 
 #[tauri::command]
-fn update_tray_summary(app: AppHandle, mode: String, reservation_pending: usize, process_warnings: usize) -> Result<(), String> {
-    let mode = if mode == "expanded" { "expanded" } else { "compact" };
-    let menu = build_tray_menu(&app, reservation_pending, process_warnings).map_err(|error| error.to_string())?;
-    let tray = app.tray_by_id("racktop-tray").ok_or("找不到 RackTop 菜单栏图标")?;
-    tray.set_menu(Some(menu)).map_err(|error| error.to_string())?;
-    tray.set_icon_with_as_template(Some(tray_image(mode, reservation_pending, process_warnings)), true).map_err(|error| error.to_string())?;
-    tray.set_tooltip(Some(&format!("RackTop · 预约待处理 {} · 我的进程异常 {}", reservation_pending, process_warnings))).map_err(|error| error.to_string())?;
+fn update_tray_summary(
+    app: AppHandle,
+    mode: String,
+    reservation_pending: usize,
+    process_warnings: usize,
+) -> Result<(), String> {
+    let mode = if mode == "expanded" {
+        "expanded"
+    } else {
+        "compact"
+    };
+    let menu = build_tray_menu(&app, reservation_pending, process_warnings)
+        .map_err(|error| error.to_string())?;
+    let tray = app
+        .tray_by_id("racktop-tray")
+        .ok_or("找不到 RackTop 菜单栏图标")?;
+    tray.set_menu(Some(menu))
+        .map_err(|error| error.to_string())?;
+    tray.set_icon_with_as_template(
+        Some(tray_image(mode, reservation_pending, process_warnings)),
+        true,
+    )
+    .map_err(|error| error.to_string())?;
+    tray.set_tooltip(Some(&format!(
+        "RackTop · 预约待处理 {} · 我的进程异常 {}",
+        reservation_pending, process_warnings
+    )))
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -819,8 +1298,13 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            let app_data = app.path().app_data_dir().map_err(|error| Box::<dyn std::error::Error>::from(error))?;
-            let database = Database::open(&app_data.join("racktop.sqlite")).map_err(|error| Box::<dyn std::error::Error>::from(std::io::Error::other(error)))?;
+            let app_data = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| Box::<dyn std::error::Error>::from(error))?;
+            let database = Database::open(&app_data.join("racktop.sqlite")).map_err(|error| {
+                Box::<dyn std::error::Error>::from(std::io::Error::other(error))
+            })?;
             app.manage(database);
             app.manage(TerminalManager::default());
             app.manage(InteractionLogStore::default());
@@ -829,19 +1313,38 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_decorations(false);
                 let _ = window.unmaximize();
-                let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(1500.0, 900.0)));
+                let _ =
+                    window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(1500.0, 900.0)));
             }
 
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unmaximize();
-                let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(1320.0, 820.0)));
+                let _ =
+                    window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(1320.0, 820.0)));
             }
 
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
+
+            // Large SQLite VACUUM operations must never delay the first paint.
+            // Run best-effort cleanup after the window is visible; a locked
+            // database is harmless and will be retried on the next launch.
+            let maintenance_handle = app.handle().clone();
+            let maintenance_path = app_data.join("racktop.sqlite");
+            std::thread::spawn(move || {
+                if let Err(error) = Database::migrate_usage_in_background(&maintenance_path) {
+                    eprintln!("Deferred usage migration skipped: {error}");
+                }
+                if let Err(error) = maintenance_handle
+                    .state::<Database>()
+                    .reclaim_storage_space()
+                {
+                    eprintln!("Deferred storage cleanup skipped: {error}");
+                }
+            });
 
             #[cfg(target_os = "macos")]
             app.set_menu(build_application_menu(&app.handle())?)?;
@@ -863,7 +1366,7 @@ pub fn run() {
                     "quit" => {
                         app.state::<TerminalManager>().close_all();
                         app.exit(0)
-                    },
+                    }
                     _ => {}
                 })
                 .build(app)?;
@@ -883,7 +1386,56 @@ pub fn run() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![list_servers, save_server, list_server_notification_settings, save_server_notification_settings, delete_server, retry_remote_cleanups, reorder_servers, start_terminal, write_terminal, resize_terminal, close_terminal, open_setup_terminal, verify_ssh_setup, collect_server, list_latest_snapshots, get_interaction_log_summary, get_history, get_history_heatmap, get_usage_distribution, configure_remote_history, sync_remote_history, list_idle_reservations, save_idle_reservation, delete_idle_reservation, list_projects, save_project, delete_project, probe_project_paths, suggest_project_paths, inspect_project, inspect_project_source, sync_project, list_project_sync_progress, cancel_project_sync, import_ssh_config, get_settings, save_settings, scan_host_key, trust_host_key, install_nvidia_driver, terminate_process, launch_managed_run, read_managed_run_log, get_managed_run_status, update_tray_summary, window_minimize, window_toggle_maximize, window_close])
+        .invoke_handler(tauri::generate_handler![
+            list_servers,
+            save_server,
+            list_server_notification_settings,
+            save_server_notification_settings,
+            delete_server,
+            retry_remote_cleanups,
+            reorder_servers,
+            start_terminal,
+            write_terminal,
+            resize_terminal,
+            close_terminal,
+            open_setup_terminal,
+            verify_ssh_setup,
+            collect_server,
+            list_latest_snapshots,
+            get_interaction_log_summary,
+            get_history,
+            get_history_heatmap,
+            get_usage_distribution,
+            configure_remote_history,
+            sync_remote_history,
+            list_idle_reservations,
+            save_idle_reservation,
+            delete_idle_reservation,
+            list_projects,
+            save_project,
+            delete_project,
+            probe_project_paths,
+            suggest_project_paths,
+            inspect_project,
+            inspect_project_source,
+            sync_project,
+            list_project_sync_progress,
+            cancel_project_sync,
+            import_ssh_config,
+            get_settings,
+            save_settings,
+            scan_host_key,
+            trust_host_key,
+            install_nvidia_driver,
+            terminate_process,
+            launch_managed_run,
+            read_managed_run_log,
+            get_managed_run_status,
+            update_tray_summary,
+            window_minimize,
+            window_toggle_maximize,
+            window_close
+        ])
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }
