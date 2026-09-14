@@ -4,6 +4,7 @@ use crate::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::process::Stdio;
+use std::collections::HashMap;
 use tokio::time::{timeout, Duration};
 
 const REMOTE_DIRECTORY: &str = "$HOME/.racktop";
@@ -188,7 +189,7 @@ fn parse_history_line(line: &str) -> Result<HistoryPoint, String> {
             gpu_other_user_occupancies.insert(values[0].to_string(), match values[3] { "0" => false, "1" => true, _ => return Err("远端 GPU 占用状态无效".into()) });
         }
     }
-    Ok(HistoryPoint { timestamp, is_compacted: false, cpu_utilization, memory_utilization, swap_utilization, cpu_min: cpu_utilization, cpu_max: cpu_utilization, memory_min: memory_utilization, memory_max: memory_utilization, swap_min: swap_utilization, swap_max: swap_utilization, gpu_mins: gpu_utilizations.clone(), gpu_maxes: gpu_utilizations.clone(), gpu_memory_mins: gpu_memory_utilizations.clone(), gpu_memory_maxes: gpu_memory_utilizations.clone(), gpu_utilizations, gpu_memory_utilizations, gpu_other_user_occupancies })
+    Ok(HistoryPoint { telemetry_ranges: Default::default(), timestamp, is_compacted: false, cpu_utilization, memory_utilization, swap_utilization, cpu_min: cpu_utilization, cpu_max: cpu_utilization, memory_min: memory_utilization, memory_max: memory_utilization, swap_min: swap_utilization, swap_max: swap_utilization, gpu_mins: gpu_utilizations.clone(), gpu_maxes: gpu_utilizations.clone(), gpu_memory_mins: gpu_memory_utilizations.clone(), gpu_memory_maxes: gpu_memory_utilizations.clone(), gpu_utilizations, gpu_memory_utilizations, gpu_temperatures_celsius: HashMap::new(), gpu_power_watts: HashMap::new(), gpu_fan_speeds_percent: HashMap::new(), gpu_other_user_occupancies })
 }
 
 fn parse_percent(value: &str) -> Result<f64, String> {

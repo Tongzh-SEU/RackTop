@@ -64,9 +64,15 @@ export function missingTimeRanges(points: HistoryPoint[], thresholds = gapThresh
   return data
 }
 
-function peakRangeSeries(id: string, points: HistoryPoint[], averageOf: (point: HistoryPoint) => number | null, minOf: (point: HistoryPoint) => number | null, maxOf: (point: HistoryPoint) => number | null, color: string, thresholds: GapThresholds) {
+function peakRangeSeries(id: string, points: HistoryPoint[], averageOf: (point: HistoryPoint) => number | null, minOf: (point: HistoryPoint) => number | null, maxOf: (point: HistoryPoint) => number | null, color: string, thresholds: GapThresholds, percent = true) {
   const stack = `${id}:range`
-  return [{ id: `${id}:range-min`, type: 'line', stack, silent: true, showSymbol: false, connectNulls: false, data: trendSeriesData(points, (point) => minOf(point) ?? averageOf(point), thresholds), lineStyle: { width: 0, opacity: 0 }, areaStyle: { opacity: 0 }, tooltip: { show: false } }, { id: `${id}:range-span`, type: 'line', stack, silent: true, showSymbol: false, connectNulls: false, data: trendSeriesData(points, (point) => { const average = averageOf(point); const min = minOf(point) ?? average; const max = maxOf(point) ?? average; return min == null || max == null ? null : Math.max(0, max - min) }, thresholds), lineStyle: { width: 0, opacity: 0 }, areaStyle: { color, opacity: 0.1 }, tooltip: { show: false } }]
+  const bounds = (point: HistoryPoint) => {
+    const fallback = percent ? averageOf(point) : null
+    const min = minOf(point) ?? fallback
+    const max = maxOf(point) ?? fallback
+    return min == null || max == null || !Number.isFinite(min) || !Number.isFinite(max) || min > max ? null : { min, max }
+  }
+  return [{ id: `${id}:range-min`, type: 'line', stack, silent: true, showSymbol: false, connectNulls: false, data: trendSeriesData(points, (point) => bounds(point)?.min ?? null, thresholds, percent), lineStyle: { width: 0, opacity: 0 }, areaStyle: { opacity: 0 }, tooltip: { show: false } }, { id: `${id}:range-span`, type: 'line', stack, silent: true, showSymbol: false, connectNulls: false, data: trendSeriesData(points, (point) => { const range = bounds(point); return range ? range.max - range.min : null }, thresholds, percent), lineStyle: { width: 0, opacity: 0 }, areaStyle: { color, opacity: 0.1 }, tooltip: { show: false } }]
 }
 
 function percentTooltip(value: number) {
@@ -89,7 +95,7 @@ function timeAxisInterval(timestamps: number[]) {
 }
 
 function temperatureAxisMax(points: HistoryPoint[]) {
-  const peak = Math.max(0, ...points.flatMap((point) => Object.values(point.gpuTemperaturesCelsius ?? [])))
+  const peak = Math.max(0, ...points.flatMap((point) => [...Object.values(point.gpuTemperaturesCelsius ?? {}), ...Object.values(point.gpuTemperatureMaxes ?? {})]))
   return Math.max(100, Math.ceil((peak + 5) / 5) * 5)
 }
 
@@ -174,11 +180,9 @@ function TrendChartComponent({ points, snapshot, mode = 'all', height = 260, ani
       const id = `${isMemory ? 'gpu-memory' : 'gpu-utilization'}:${gpu.uuid}`
       const color = telemetry === 'temperature' ? '#0a84ff' : telemetry === 'power' ? '#ff9f0a' : telemetry === 'fan' ? '#64d2ff' : colors[index % colors.length]
       const valueOf = (point: HistoryPoint) => telemetry === 'temperature' ? point.gpuTemperaturesCelsius?.[gpu.uuid] ?? null : telemetry === 'power' ? point.gpuPowerWatts?.[gpu.uuid] ?? null : telemetry === 'fan' ? point.gpuFanSpeedsPercent?.[gpu.uuid] ?? null : isMemory ? point.gpuMemoryUtilizations?.[gpu.uuid] ?? null : point.gpuUtilizations[gpu.uuid] ?? null
-      const minOf = (point: HistoryPoint) => isMemory ? point.gpuMemoryMins?.[gpu.uuid] ?? null : point.gpuMins?.[gpu.uuid] ?? null
-      const maxOf = (point: HistoryPoint) => isMemory ? point.gpuMemoryMaxes?.[gpu.uuid] ?? null : point.gpuMaxes?.[gpu.uuid] ?? null
-      // Utilization/memory have calibrated min/max bands. Telemetry metrics
-      // (temperature, power, fan) do not share those percent bounds.
-      if (telemetry === null || isMemory) series.push(...peakRangeSeries(id, points, valueOf, minOf, maxOf, color, thresholds))
+      const minOf = (point: HistoryPoint) => (telemetry === 'temperature' ? point.gpuTemperatureMins : telemetry === 'power' ? point.gpuPowerMins : telemetry === 'fan' ? point.gpuFanMins : isMemory ? point.gpuMemoryMins : point.gpuMins)?.[gpu.uuid] ?? null
+      const maxOf = (point: HistoryPoint) => (telemetry === 'temperature' ? point.gpuTemperatureMaxes : telemetry === 'power' ? point.gpuPowerMaxes : telemetry === 'fan' ? point.gpuFanMaxes : isMemory ? point.gpuMemoryMaxes : point.gpuMaxes)?.[gpu.uuid] ?? null
+      series.push(...peakRangeSeries(id, points, valueOf, minOf, maxOf, color, thresholds, telemetry === null))
       series.push({
         id,
         name: `${accelerator} ${gpu.index}${telemetry === 'temperature' ? ' 温度' : telemetry === 'power' ? ' 功耗' : telemetry === 'fan' ? ' 风扇' : ''}`,

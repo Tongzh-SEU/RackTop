@@ -1,5 +1,6 @@
 use crate::models::{AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Project, ProjectDraft, ProjectTarget, Server, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution, UsagePoint, UsageUserAggregate};
 use rusqlite::{params, Connection, OptionalExtension};
+use crate::models::GpuTelemetryRanges;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
@@ -57,6 +58,8 @@ struct StoredHistorySample {
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompactedHistoryRange {
+    #[serde(default, flatten)]
+    telemetry_ranges: GpuTelemetryRanges,
     #[serde(default)]
     history_range_version: u8,
     #[serde(default)]
@@ -81,10 +84,26 @@ struct CompactedHistoryRange {
     gpu_memory_mins: HashMap<String, f64>,
     #[serde(default)]
     gpu_memory_maxes: HashMap<String, f64>,
+    #[serde(default)]
+    gpu_temperatures: HashMap<String, f64>,
+    #[serde(default)]
+    gpu_power: HashMap<String, f64>,
+    #[serde(default)]
+    gpu_fan: HashMap<String, Option<f64>>,
+    #[serde(default)]
+    gpu_temperature_counts: HashMap<String, i64>,
+    #[serde(default)]
+    gpu_power_counts: HashMap<String, i64>,
+    #[serde(default)]
+    gpu_fan_counts: HashMap<String, i64>,
 }
 
 #[derive(Default)]
 struct TrendHistoryBucket {
+    telemetry_ranges: GpuTelemetryRanges,
+    missing_temperature_ranges: HashSet<String>,
+    missing_power_ranges: HashSet<String>,
+    missing_fan_ranges: HashSet<String>,
     row_count: i64,
     sample_count: i64,
     cpu_sum: f64,
@@ -104,6 +123,12 @@ struct TrendHistoryBucket {
     gpu_memory_counts: HashMap<String, i64>,
     gpu_memory_mins: HashMap<String, f64>,
     gpu_memory_maxes: HashMap<String, f64>,
+    gpu_temperature_sums: HashMap<String, f64>,
+    gpu_temperature_counts: HashMap<String, i64>,
+    gpu_power_sums: HashMap<String, f64>,
+    gpu_power_counts: HashMap<String, i64>,
+    gpu_fan_sums: HashMap<String, f64>,
+    gpu_fan_counts: HashMap<String, i64>,
 }
 
 fn hour_start(timestamp: i64) -> i64 {
@@ -121,9 +146,13 @@ fn merge_map_max(target: &mut HashMap<String, f64>, values: &HashMap<String, f64
 
 fn add_trend_sample(bucket: &mut TrendHistoryBucket, cpu: f64, memory: f64, swap: f64, gpu_json: &str, gpu_memory_json: &str, payload_json: &str) {
     let range: CompactedHistoryRange = serde_json::from_str(payload_json).unwrap_or_default();
+    let snapshot: Option<Snapshot> = serde_json::from_str(payload_json).ok();
     let weight = if range.history_range_version == 1 { range.sample_count.max(1) } else { 1 };
     let gpu_values: HashMap<String, f64> = serde_json::from_str(gpu_json).unwrap_or_default();
     let gpu_memory_values: HashMap<String, f64> = serde_json::from_str(gpu_memory_json).unwrap_or_default();
+    let temperatures = snapshot.as_ref().map(|value| value.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.temperature_celsius)).collect()).unwrap_or_else(|| range.gpu_temperatures.clone());
+    let power = snapshot.as_ref().map(|value| value.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.power_watts)).collect()).unwrap_or_else(|| range.gpu_power.clone());
+    let fan = snapshot.as_ref().map(|value| value.gpus.iter().filter_map(|gpu| gpu.fan_speed_percent.map(|speed| (gpu.uuid.clone(), speed))).collect()).unwrap_or_else(|| range.gpu_fan.iter().filter_map(|(uuid, speed)| speed.map(|value| (uuid.clone(), value))).collect());
     bucket.row_count += 1;
     bucket.sample_count += weight;
     bucket.cpu_sum += cpu * weight as f64;
@@ -141,6 +170,38 @@ fn add_trend_sample(bucket: &mut TrendHistoryBucket, cpu: f64, memory: f64, swap
     merge_map_max(&mut bucket.gpu_maxes, if range.history_range_version == 1 { &range.gpu_maxes } else { &gpu_values });
     merge_map_min(&mut bucket.gpu_memory_mins, if range.history_range_version == 1 { &range.gpu_memory_mins } else { &gpu_memory_values });
     merge_map_max(&mut bucket.gpu_memory_maxes, if range.history_range_version == 1 { &range.gpu_memory_maxes } else { &gpu_memory_values });
+    add_telemetry_totals(&mut bucket.gpu_temperature_sums, &mut bucket.gpu_temperature_counts, &temperatures, &range.gpu_temperature_counts, weight);
+    add_telemetry_totals(&mut bucket.gpu_power_sums, &mut bucket.gpu_power_counts, &power, &range.gpu_power_counts, weight);
+    add_telemetry_totals(&mut bucket.gpu_fan_sums, &mut bucket.gpu_fan_counts, &fan, &range.gpu_fan_counts, weight);
+    let ranges = snapshot.as_ref().map(GpuTelemetryRanges::from_snapshot).unwrap_or_else(|| range.telemetry_ranges.clone());
+    merge_telemetry_range(&mut bucket.telemetry_ranges.gpu_temperature_mins, &mut bucket.telemetry_ranges.gpu_temperature_maxes, &mut bucket.missing_temperature_ranges, &temperatures, &ranges.gpu_temperature_mins, &ranges.gpu_temperature_maxes);
+    merge_telemetry_range(&mut bucket.telemetry_ranges.gpu_power_mins, &mut bucket.telemetry_ranges.gpu_power_maxes, &mut bucket.missing_power_ranges, &power, &ranges.gpu_power_mins, &ranges.gpu_power_maxes);
+    merge_telemetry_range(&mut bucket.telemetry_ranges.gpu_fan_mins, &mut bucket.telemetry_ranges.gpu_fan_maxes, &mut bucket.missing_fan_ranges, &fan, &ranges.gpu_fan_mins, &ranges.gpu_fan_maxes);
+}
+
+fn add_telemetry_totals(sums: &mut HashMap<String, f64>, counts: &mut HashMap<String, i64>, values: &HashMap<String, f64>, source_counts: &HashMap<String, i64>, fallback_weight: i64) {
+    for (uuid, value) in values {
+        let count = source_counts.get(uuid).copied().unwrap_or(fallback_weight).max(1);
+        *sums.entry(uuid.clone()).or_default() += value * count as f64;
+        *counts.entry(uuid.clone()).or_default() += count;
+    }
+}
+
+// A legacy average cannot stand in for an unknown extreme, including when
+// mixed with newer samples in a larger bucket.
+fn merge_telemetry_range(mins: &mut HashMap<String, f64>, maxes: &mut HashMap<String, f64>, missing: &mut HashSet<String>, values: &HashMap<String, f64>, source_mins: &HashMap<String, f64>, source_maxes: &HashMap<String, f64>) {
+    for uuid in values.keys() {
+        if let (Some(min), Some(max)) = (source_mins.get(uuid), source_maxes.get(uuid)) {
+            if !missing.contains(uuid) && min.is_finite() && max.is_finite() && min <= max {
+                mins.entry(uuid.clone()).and_modify(|value| *value = value.min(*min)).or_insert(*min);
+                maxes.entry(uuid.clone()).and_modify(|value| *value = value.max(*max)).or_insert(*max);
+                continue;
+            }
+        }
+        missing.insert(uuid.clone());
+        mins.remove(uuid);
+        maxes.remove(uuid);
+    }
 }
 
 fn insert_compacted_trend(connection: &Connection, server_id: &str, timestamp: i64, bucket: &TrendHistoryBucket) -> Result<(), String> {
@@ -153,7 +214,11 @@ fn insert_compacted_trend(connection: &Connection, server_id: &str, timestamp: i
         let count = bucket.gpu_memory_counts.get(uuid).copied().unwrap_or_default();
         (count > 0).then_some((uuid.clone(), sum / count as f64))
     }).collect();
-    let range = CompactedHistoryRange { history_range_version: 1, sample_count: bucket.sample_count, cpu_min: bucket.cpu_min.unwrap_or_default(), cpu_max: bucket.cpu_max.unwrap_or_default(), memory_min: bucket.memory_min.unwrap_or_default(), memory_max: bucket.memory_max.unwrap_or_default(), swap_min: bucket.swap_min.unwrap_or_default(), swap_max: bucket.swap_max.unwrap_or_default(), gpu_mins: bucket.gpu_mins.clone(), gpu_maxes: bucket.gpu_maxes.clone(), gpu_memory_mins: bucket.gpu_memory_mins.clone(), gpu_memory_maxes: bucket.gpu_memory_maxes.clone() };
+    let averages = |sums: &HashMap<String, f64>, counts: &HashMap<String, i64>| sums.iter().filter_map(|(uuid, sum)| counts.get(uuid).copied().filter(|count| *count > 0).map(|count| (uuid.clone(), sum / count as f64))).collect::<HashMap<_, _>>();
+    let temperature = averages(&bucket.gpu_temperature_sums, &bucket.gpu_temperature_counts);
+    let power = averages(&bucket.gpu_power_sums, &bucket.gpu_power_counts);
+    let fan = averages(&bucket.gpu_fan_sums, &bucket.gpu_fan_counts).into_iter().map(|(uuid, value)| (uuid, Some(value))).collect::<HashMap<_, _>>();
+    let range = CompactedHistoryRange { gpu_temperature_counts: bucket.gpu_temperature_counts.clone(), gpu_power_counts: bucket.gpu_power_counts.clone(), gpu_fan_counts: bucket.gpu_fan_counts.clone(), telemetry_ranges: bucket.telemetry_ranges.clone(), history_range_version: 1, sample_count: bucket.sample_count, cpu_min: bucket.cpu_min.unwrap_or_default(), cpu_max: bucket.cpu_max.unwrap_or_default(), memory_min: bucket.memory_min.unwrap_or_default(), memory_max: bucket.memory_max.unwrap_or_default(), swap_min: bucket.swap_min.unwrap_or_default(), swap_max: bucket.swap_max.unwrap_or_default(), gpu_mins: bucket.gpu_mins.clone(), gpu_maxes: bucket.gpu_maxes.clone(), gpu_memory_mins: bucket.gpu_memory_mins.clone(), gpu_memory_maxes: bucket.gpu_memory_maxes.clone(), gpu_temperatures: temperature, gpu_power: power, gpu_fan: fan };
     connection.execute(
         "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,payload_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![server_id, timestamp, bucket.cpu_sum / samples, bucket.memory_sum / samples, bucket.swap_sum / samples, serde_json::to_string(&gpu_utilizations).map_err(|error| error.to_string())?, serde_json::to_string(&gpu_memory_utilizations).map_err(|error| error.to_string())?, serde_json::to_string(&range).map_err(|error| error.to_string())?],
@@ -171,7 +236,9 @@ fn trend_history_point(timestamp: i64, bucket: TrendHistoryBucket) -> HistoryPoi
         let count = bucket.gpu_memory_counts.get(uuid).copied().unwrap_or_default();
         (count > 0).then_some((uuid.clone(), sum / count as f64))
     }).collect();
+    let averages = |sums: &HashMap<String, f64>, counts: &HashMap<String, i64>| sums.iter().filter_map(|(uuid, sum)| counts.get(uuid).copied().filter(|count| *count > 0).map(|count| (uuid.clone(), sum / count as f64))).collect::<HashMap<_, _>>();
     HistoryPoint {
+        telemetry_ranges: bucket.telemetry_ranges,
         timestamp,
         is_compacted: true,
         cpu_utilization: bucket.cpu_sum / samples,
@@ -189,6 +256,7 @@ fn trend_history_point(timestamp: i64, bucket: TrendHistoryBucket) -> HistoryPoi
         gpu_memory_maxes: bucket.gpu_memory_maxes,
         gpu_utilizations,
         gpu_memory_utilizations,
+        gpu_temperatures_celsius: averages(&bucket.gpu_temperature_sums, &bucket.gpu_temperature_counts), gpu_power_watts: averages(&bucket.gpu_power_sums, &bucket.gpu_power_counts), gpu_fan_speeds_percent: averages(&bucket.gpu_fan_sums, &bucket.gpu_fan_counts).into_iter().map(|(uuid, value)| (uuid, Some(value))).collect(),
         gpu_other_user_occupancies: HashMap::new(),
     }
 }
@@ -1156,15 +1224,19 @@ impl Database {
             let gpu_memory_utilizations: HashMap<String, f64> = serde_json::from_str(&gpu_memory_json).unwrap_or_default();
             let gpu_other_user_occupancies: HashMap<String, bool> = serde_json::from_str(&gpu_other_user_occupancy_json).unwrap_or_default();
             let range: CompactedHistoryRange = serde_json::from_str(&payload_json).unwrap_or_default();
+            let snapshot: Option<Snapshot> = serde_json::from_str(&payload_json).ok();
+            let gpu_temperatures_celsius = snapshot.as_ref().map(|s| s.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.temperature_celsius)).collect()).unwrap_or_else(|| range.gpu_temperatures.clone());
+            let gpu_power_watts = snapshot.as_ref().map(|s| s.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.power_watts)).collect()).unwrap_or_else(|| range.gpu_power.clone());
+            let gpu_fan_speeds_percent = snapshot.as_ref().map(|s| s.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.fan_speed_percent)).collect()).unwrap_or_else(|| range.gpu_fan.clone());
             let compacted = range.history_range_version == 1;
-            Ok(HistoryPoint { timestamp: row.get(0)?, is_compacted: compacted, cpu_utilization, memory_utilization, swap_utilization, cpu_min: if compacted { range.cpu_min } else { cpu_utilization }, cpu_max: if compacted { range.cpu_max } else { cpu_utilization }, memory_min: if compacted { range.memory_min } else { memory_utilization }, memory_max: if compacted { range.memory_max } else { memory_utilization }, swap_min: if compacted { range.swap_min } else { swap_utilization }, swap_max: if compacted { range.swap_max } else { swap_utilization }, gpu_mins: if compacted { range.gpu_mins } else { gpu_utilizations.clone() }, gpu_maxes: if compacted { range.gpu_maxes } else { gpu_utilizations.clone() }, gpu_memory_mins: if compacted { range.gpu_memory_mins } else { gpu_memory_utilizations.clone() }, gpu_memory_maxes: if compacted { range.gpu_memory_maxes } else { gpu_memory_utilizations.clone() }, gpu_utilizations, gpu_memory_utilizations, gpu_other_user_occupancies })
+            Ok(HistoryPoint { telemetry_ranges: snapshot.as_ref().map(GpuTelemetryRanges::from_snapshot).unwrap_or_else(|| range.telemetry_ranges.clone()), timestamp: row.get(0)?, is_compacted: compacted, cpu_utilization, memory_utilization, swap_utilization, gpu_temperatures_celsius, gpu_power_watts, gpu_fan_speeds_percent, cpu_min: if compacted { range.cpu_min } else { cpu_utilization }, cpu_max: if compacted { range.cpu_max } else { cpu_utilization }, memory_min: if compacted { range.memory_min } else { memory_utilization }, memory_max: if compacted { range.memory_max } else { memory_utilization }, swap_min: if compacted { range.swap_min } else { swap_utilization }, swap_max: if compacted { range.swap_max } else { swap_utilization }, gpu_mins: if compacted { range.gpu_mins } else { gpu_utilizations.clone() }, gpu_maxes: if compacted { range.gpu_maxes } else { gpu_utilizations.clone() }, gpu_memory_mins: if compacted { range.gpu_memory_mins } else { gpu_memory_utilizations.clone() }, gpu_memory_maxes: if compacted { range.gpu_memory_maxes } else { gpu_memory_utilizations.clone() }, gpu_utilizations, gpu_memory_utilizations, gpu_other_user_occupancies })
         }).map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
 
     pub fn get_recent_history(&self, server_id: &str, from_timestamp: i64) -> Result<Vec<HistoryPoint>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,gpu_other_user_occupancy_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare("SELECT timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,gpu_other_user_occupancy_json,payload_json FROM snapshots WHERE server_id=?1 AND timestamp>=?2 ORDER BY timestamp").map_err(|error| error.to_string())?;
         let rows = statement.query_map(params![server_id, from_timestamp], |row| {
             let cpu_utilization = row.get(1)?;
             let memory_utilization = row.get(2)?;
@@ -1172,7 +1244,11 @@ impl Database {
             let gpu_utilizations: HashMap<String, f64> = serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default();
             let gpu_memory_utilizations: HashMap<String, f64> = serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default();
             let gpu_other_user_occupancies: HashMap<String, bool> = serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default();
+            let payload_json: String = row.get(7)?;
+            let snapshot: Option<Snapshot> = serde_json::from_str(&payload_json).ok();
+            let range: CompactedHistoryRange = serde_json::from_str(&payload_json).unwrap_or_default();
             Ok(HistoryPoint {
+                telemetry_ranges: snapshot.as_ref().map(GpuTelemetryRanges::from_snapshot).unwrap_or_else(|| range.telemetry_ranges.clone()),
                 timestamp: row.get(0)?, is_compacted: false,
                 cpu_utilization, memory_utilization, swap_utilization,
                 cpu_min: cpu_utilization, cpu_max: cpu_utilization,
@@ -1180,7 +1256,10 @@ impl Database {
                 swap_min: swap_utilization, swap_max: swap_utilization,
                 gpu_mins: gpu_utilizations.clone(), gpu_maxes: gpu_utilizations.clone(),
                 gpu_memory_mins: gpu_memory_utilizations.clone(), gpu_memory_maxes: gpu_memory_utilizations.clone(),
-                gpu_utilizations, gpu_memory_utilizations, gpu_other_user_occupancies,
+                gpu_utilizations, gpu_memory_utilizations,
+                gpu_temperatures_celsius: snapshot.as_ref().map(|value| value.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.temperature_celsius)).collect()).unwrap_or_else(|| range.gpu_temperatures),
+                gpu_power_watts: snapshot.as_ref().map(|value| value.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.power_watts)).collect()).unwrap_or_else(|| range.gpu_power),
+                gpu_fan_speeds_percent: snapshot.as_ref().map(|value| value.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.fan_speed_percent)).collect()).unwrap_or_else(|| range.gpu_fan), gpu_other_user_occupancies,
             })
         }).map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
@@ -1607,6 +1686,61 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_ranges_survive_storage_and_reaggregation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("telemetry.sqlite");
+        let db = Database::open(&path).unwrap();
+        let server = db.save_server(draft("Telemetry", 30)).unwrap();
+        let mut bucket = TrendHistoryBucket::default();
+        for (temperature, power, fan) in [(40.0, 120.0, Some(20.0)), (80.0, 450.0, Some(70.0)), (60.0, 330.0, None)] {
+            let mut sample = snapshot(&server.id, 1_000_000);
+            sample.gpus.push(GpuMetric { uuid: "GPU-a".into(), temperature_celsius: temperature, power_watts: power, fan_speed_percent: fan, ..Default::default() });
+            add_trend_sample(&mut bucket, 0.0, 0.0, 0.0, "{}", "{}", &serde_json::to_string(&sample).unwrap());
+        }
+        insert_compacted_trend(&db.connection.lock().unwrap(), &server.id, 999_600, &bucket).unwrap();
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        for points in [db.get_history(&server.id, 0).unwrap(), db.get_compacted_history(&server.id, 0, 3600).unwrap()] {
+            let point = &points[0];
+            let ranges = &point.telemetry_ranges;
+            assert_eq!(point.gpu_temperatures_celsius["GPU-a"], 60.0);
+            assert_eq!(point.gpu_power_watts["GPU-a"], 300.0);
+            assert_eq!(point.gpu_fan_speeds_percent["GPU-a"], Some(45.0));
+            assert_eq!(ranges.gpu_temperature_mins["GPU-a"], 40.0);
+            assert_eq!(ranges.gpu_temperature_maxes["GPU-a"], 80.0);
+            assert_eq!(ranges.gpu_power_mins["GPU-a"], 120.0);
+            assert_eq!(ranges.gpu_power_maxes["GPU-a"], 450.0);
+            assert_eq!(ranges.gpu_fan_mins["GPU-a"], 20.0);
+            assert_eq!(ranges.gpu_fan_maxes["GPU-a"], 70.0);
+            let json = serde_json::to_value(point).unwrap();
+            assert_eq!(json["gpuPowerMaxes"]["GPU-a"], 450.0);
+        }
+        let mut extra = snapshot(&server.id, 999_660);
+        extra.gpus.push(GpuMetric { uuid: "GPU-a".into(), temperature_celsius: 60.0, power_watts: 300.0, fan_speed_percent: Some(90.0), ..Default::default() });
+        db.save_snapshot(&extra).unwrap();
+        let points = db.get_compacted_history(&server.id, 0, 3600).unwrap();
+        assert_eq!(points[0].gpu_fan_speeds_percent["GPU-a"], Some(60.0));
+        assert_eq!(points[0].telemetry_ranges.gpu_fan_maxes["GPU-a"], 90.0);
+    }
+
+    #[test]
+    fn legacy_telemetry_averages_do_not_create_false_ranges() {
+        let mut sample = snapshot("test", 0);
+        sample.gpus.push(GpuMetric { uuid: "GPU-a".into(), temperature_celsius: 50.0, power_watts: 300.0, fan_speed_percent: None, ..Default::default() });
+        let raw = serde_json::to_string(&sample).unwrap();
+        let legacy = r#"{"historyRangeVersion":1,"sampleCount":10,"gpuTemperatures":{"GPU-a":60},"gpuPower":{"GPU-a":250}}"#;
+        for payloads in [[raw.as_str(), legacy], [legacy, raw.as_str()]] {
+            let mut bucket = TrendHistoryBucket::default();
+            for payload in payloads { add_trend_sample(&mut bucket, 0.0, 0.0, 0.0, "{}", "{}", payload); }
+            let point = trend_history_point(0, bucket);
+            assert!(point.telemetry_ranges.gpu_temperature_mins.is_empty());
+            assert!(point.telemetry_ranges.gpu_power_maxes.is_empty());
+            assert!(point.telemetry_ranges.gpu_fan_mins.is_empty());
+            assert!(point.gpu_fan_speeds_percent.is_empty());
+        }
+    }
+
+    #[test]
     fn reports_sqlite_database_and_sidecar_storage_size() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("size.sqlite");
@@ -1900,6 +2034,7 @@ mod tests {
         let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
         let server = db.save_server(ServerDraft { remote_history_enabled: true, ..draft("Remote", 30) }).unwrap();
         let point = HistoryPoint {
+            telemetry_ranges: GpuTelemetryRanges::default(),
             timestamp: 1_722_700_800,
             is_compacted: false,
             cpu_utilization: 12.5,
@@ -1907,6 +2042,7 @@ mod tests {
             swap_utilization: 3.0,
             gpu_utilizations: HashMap::from([("GPU-a".into(), 80.0)]),
             gpu_memory_utilizations: HashMap::from([("GPU-a".into(), 50.0)]),
+            gpu_temperatures_celsius: HashMap::new(), gpu_power_watts: HashMap::new(), gpu_fan_speeds_percent: HashMap::new(),
             gpu_other_user_occupancies: HashMap::from([("GPU-a".into(), false)]),
             cpu_min: 12.5, cpu_max: 12.5, memory_min: 40.0, memory_max: 40.0, swap_min: 3.0, swap_max: 3.0,
             gpu_mins: HashMap::from([("GPU-a".into(), 80.0)]), gpu_maxes: HashMap::from([("GPU-a".into(), 80.0)]),

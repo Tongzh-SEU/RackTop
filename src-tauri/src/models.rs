@@ -356,6 +356,8 @@ fn default_accelerator_vendor() -> String { "nvidia".into() }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryPoint {
+    #[serde(default, flatten)]
+    pub telemetry_ranges: GpuTelemetryRanges,
     pub timestamp: i64,
     #[serde(default)]
     pub is_compacted: bool,
@@ -366,6 +368,12 @@ pub struct HistoryPoint {
     pub gpu_utilizations: HashMap<String, f64>,
     #[serde(default)]
     pub gpu_memory_utilizations: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_temperatures_celsius: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_power_watts: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_fan_speeds_percent: HashMap<String, Option<f64>>,
     #[serde(default)]
     pub gpu_other_user_occupancies: HashMap<String, bool>,
     #[serde(default)]
@@ -388,6 +396,32 @@ pub struct HistoryPoint {
     pub gpu_memory_mins: HashMap<String, f64>,
     #[serde(default)]
     pub gpu_memory_maxes: HashMap<String, f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuTelemetryRanges {
+    #[serde(default)]
+    pub gpu_temperature_mins: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_temperature_maxes: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_power_mins: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_power_maxes: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_fan_mins: HashMap<String, f64>,
+    #[serde(default)]
+    pub gpu_fan_maxes: HashMap<String, f64>,
+}
+
+impl GpuTelemetryRanges {
+    pub fn from_snapshot(snapshot: &Snapshot) -> Self {
+        let temperatures: HashMap<_, _> = snapshot.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.temperature_celsius)).collect();
+        let power: HashMap<_, _> = snapshot.gpus.iter().map(|gpu| (gpu.uuid.clone(), gpu.power_watts)).collect();
+        let fan: HashMap<_, _> = snapshot.gpus.iter().filter_map(|gpu| gpu.fan_speed_percent.map(|value| (gpu.uuid.clone(), value))).collect();
+        Self { gpu_temperature_mins: temperatures.clone(), gpu_temperature_maxes: temperatures, gpu_power_mins: power.clone(), gpu_power_maxes: power, gpu_fan_mins: fan.clone(), gpu_fan_maxes: fan }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

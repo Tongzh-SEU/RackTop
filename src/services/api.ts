@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { aggregateTelemetryPreview } from '../utils/telemetryPreview'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
 import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution } from '../types/models'
 import { clampPercent, gpuMemoryPercent, hasOtherUserGpuWorkload } from '../utils/gpu'
@@ -265,17 +266,21 @@ const browserProjectSyncProgress: ProjectSyncProgress[] = [{ projectId: 'demo-pr
 const historyRequests = new Map<string, { expiresAt: number; request: Promise<HistoryPoint[]> }>()
 const browserInteractionSummary: InteractionLogSummary = { sentBytes: 0, responseBytes: 0, storedBytes: 0, localStorageBytes: 36.3 * 1024 ** 2, failureCount: 0, servers: [] }
 
-function rollingHistory(snapshot: Snapshot): HistoryPoint[] {
+function rollingHistory(snapshot: Snapshot, fromTimestamp?: number): HistoryPoint[] {
   const historyNow = Math.floor(Date.now() / 1000)
-  return Array.from({ length: 121 }, (_, index) => {
+  const length = fromTimestamp == null ? 121 : Math.min(8641, Math.max(2, Math.ceil((historyNow - fromTimestamp) / 30) + 1))
+  return Array.from({ length }, (_, index) => {
     const phase = index / 6
     return {
-      timestamp: historyNow - (120 - index) * 30,
+      timestamp: historyNow - (length - 1 - index) * 30,
       cpuUtilization: clampPercent(Math.max(2, snapshot.system.cpuUtilization + Math.sin(phase) * 8)),
       memoryUtilization: clampPercent((snapshot.system.memoryUsedBytes / snapshot.system.memoryTotalBytes) * 100),
       swapUtilization: clampPercent(snapshot.system.swapTotalBytes ? (snapshot.system.swapUsedBytes / snapshot.system.swapTotalBytes) * 100 : 0),
       gpuUtilizations: Object.fromEntries(snapshot.gpus.map((gpu, gpuIndex) => [gpu.uuid, clampPercent(gpu.utilization + Math.sin(phase + gpuIndex) * 4)])),
       gpuMemoryUtilizations: Object.fromEntries(snapshot.gpus.map((gpu) => [gpu.uuid, gpuMemoryPercent(gpu)])),
+      gpuTemperaturesCelsius: Object.fromEntries(snapshot.gpus.map((gpu) => [gpu.uuid, gpu.temperatureCelsius + Math.sin(phase + gpu.index) * 1.5])),
+      gpuPowerWatts: Object.fromEntries(snapshot.gpus.map((gpu) => [gpu.uuid, Math.max(0, gpu.powerWatts + Math.sin(phase + gpu.index) * 3)])),
+      gpuFanSpeedsPercent: Object.fromEntries(snapshot.gpus.map((gpu) => [gpu.uuid, gpu.fanSpeedPercent == null ? null : clampPercent(gpu.fanSpeedPercent + Math.sin(phase + gpu.index) * 4)])),
       gpuOtherUserOccupancies: Object.fromEntries(snapshot.gpus.map((gpu) => [gpu.uuid, hasOtherUserGpuWorkload(gpu, snapshot.processes)])),
     }
   })
@@ -392,15 +397,9 @@ export const api = {
     const request = (async () => {
       if (isTauri) return invoke<HistoryPoint[]>('get_history', { serverId, fromTimestamp, bucketSeconds: bucketSeconds ?? null })
       const source = browserSnapshotFor(serverId)
-      const points = rollingHistory({ ...source, serverId })
+      const points = rollingHistory({ ...source, serverId }, fromTimestamp)
       if (!bucketSeconds) return points
-      return Object.values(points.reduce<Record<number, HistoryPoint>>((buckets, point) => {
-        const timestamp = Math.floor(point.timestamp / bucketSeconds) * bucketSeconds
-        const current = buckets[timestamp]
-        if (!current) return { ...buckets, [timestamp]: { ...point, timestamp, isCompacted: true } }
-        const next = { ...current, cpuUtilization: (current.cpuUtilization + point.cpuUtilization) / 2, memoryUtilization: (current.memoryUtilization + point.memoryUtilization) / 2, swapUtilization: (current.swapUtilization + point.swapUtilization) / 2 }
-        return { ...buckets, [timestamp]: next }
-      }, {})).sort((left, right) => left.timestamp - right.timestamp)
+      return aggregateTelemetryPreview(points, bucketSeconds)
     })()
     historyRequests.set(cacheKey, { expiresAt: Date.now() + 5_000, request })
     request.catch(() => historyRequests.delete(cacheKey))
