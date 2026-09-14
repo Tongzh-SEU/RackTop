@@ -31,8 +31,17 @@ describe('terminal preview', () => {
     const input = createTerminalPreview(data => { output += data }, () => ({ cols: 80, rows: 24 }))
     output = ''
     input('\x1b[200~echo one\ntwo\x1b[201~')
-    expect(output).toBe('echo one two')
+    expect(output).toBe('echo one\r\ntwo')
     input('\r')
-    expect(output).toContain('\r\none two\r\n')
+    expect(output).toContain('\r\none\r\ntwo\r\n')
+  })
+
+  it('preserves Chinese paragraphs and blank lines without executing pasted input', () => {
+    let output = ''
+    const input = createTerminalPreview(data => { output += data }, () => ({ cols: 80, rows: 24 }))
+    output = ''
+    input('\x1b[200~第一段文字\r\n\r\n第二段文字\n第三段文字\x1b[201~')
+    expect(output).toBe('第一段文字\r\n\r\n第二段文字\r\n第三段文字')
+    expect(output).not.toContain('preview@racktop')
   })
 })

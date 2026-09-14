@@ -9,7 +9,12 @@ export function createTerminalPreview(write: (data: string) => void, size: () =>
   fill()
   prompt()
   return (data: string) => {
-    if (data.startsWith('\x1b[200~')) data = data.replace(/^\x1b\[200~/, '').replace(/\x1b\[201~$/, '').replace(/\r?\n/g, ' ')
+    if (data.startsWith('\x1b[200~')) {
+      const pasted = data.slice(6).replace(/\x1b\[201~$/, '').replace(/\r\n?/g, '\n')
+      line += pasted
+      write(pasted.replace(/\n/g, '\r\n'))
+      return
+    }
     else if (data.startsWith('\x1b')) return
     for (const character of data) {
       if (character === '\r' || character === '\n') {
@@ -20,8 +25,8 @@ export function createTerminalPreview(write: (data: string) => void, size: () =>
         else if (command === 'clear') write('\x1b[2J\x1b[H')
         else if (command === 'size') write(`${size().cols} 列 × ${size().rows} 行\r\n`)
         else if (command === 'help') write('fill：连续输出；size：当前列/行数；clear：清屏；echo 文本：回显\r\n')
-        else if (command.startsWith('echo ')) write(`${command.slice(5)}\r\n`)
-        else if (command) write(`模拟终端不执行真实命令：${command}\r\n`)
+        else if (command.startsWith('echo ')) write(`${command.slice(5).replace(/\n/g, '\r\n')}\r\n`)
+        else if (command) write(`模拟终端不执行真实命令：${command.replace(/\n/g, '\r\n')}\r\n`)
         prompt()
       } else if (character === '\x7f') {
         if (line) { line = Array.from(line).slice(0, -1).join(''); write('\b \b') }

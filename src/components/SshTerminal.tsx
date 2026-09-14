@@ -23,11 +23,12 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
 
   useEffect(() => {
     if (!containerRef.current) return
+    const container = containerRef.current
     let disposed = false
     const terminal = new Terminal({ cursorBlink: true, convertEol: false, fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, monospace', fontSize: 12, lineHeight: 1.3, scrollback: 5000, theme: { background: '#101114', foreground: '#e7e8ea', cursor: '#79aaff', selectionBackground: '#45658a88' } })
     const fit = new FitAddon()
     terminal.loadAddon(fit)
-    terminal.open(containerRef.current)
+    terminal.open(container)
     fit.fit()
     terminal.focus()
     const previewInput = api.isDesktop ? null : createTerminalPreview((data) => terminal.write(data), () => terminal)
@@ -72,8 +73,8 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
       if (!navigator.clipboard) { onNotice?.('复制失败，请使用 ⌘C / Ctrl+C'); return }
       void navigator.clipboard.writeText(selection).then(() => onNotice?.('已复制选中的终端内容')).catch(() => onNotice?.('复制失败，请使用 ⌘C / Ctrl+C'))
     }
-    containerRef.current.addEventListener('paste', handlePaste, true)
-    containerRef.current.addEventListener('contextmenu', handleContextMenu, true)
+    container.addEventListener('paste', handlePaste, true)
+    container.addEventListener('contextmenu', handleContextMenu, true)
     const dataDisposable = terminal.onData((data) => {
       if (previewInput) { previewInput(data); return }
       if (pendingEnterRef.current) return
@@ -89,7 +90,7 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
     })
 
     const resize = new ResizeObserver(fitAndResize)
-    resize.observe(containerRef.current)
+    resize.observe(container)
     const started = api.isDesktop ? api.startTerminal(serverId, terminal.cols, terminal.rows, gpuIndex, acceleratorVendor) : Promise.resolve(null)
     void started.then((id) => {
       if (disposed) { if (id) void api.closeTerminal(id); return }
@@ -106,8 +107,8 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
       if (fitFrame !== null) cancelAnimationFrame(fitFrame)
       void fontFit
       resize.disconnect()
-      containerRef.current?.removeEventListener('paste', handlePaste, true)
-      containerRef.current?.removeEventListener('contextmenu', handleContextMenu, true)
+      container.removeEventListener('paste', handlePaste, true)
+      container.removeEventListener('contextmenu', handleContextMenu, true)
       dataDisposable.dispose()
       void outputListener.then((unlisten) => unlisten())
       void exitListener.then((unlisten) => unlisten())
