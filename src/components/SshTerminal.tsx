@@ -41,6 +41,10 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
         if (id) void api.resizeTerminal(id, terminal.cols, terminal.rows)
       })
     }
+    // Sheets finish their grid/layout pass after the terminal mounts. Fit once
+    // more after that pass so rows cover the entire visible canvas.
+    const delayedFit = window.setTimeout(fitAndResize, 180)
+    const fontFit = document.fonts?.ready.then(() => fitAndResize())
 
     const decode = (value: string) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0))
     const outputListener = listen<TerminalEvent>('terminal-output', ({ payload }) => {
@@ -61,7 +65,16 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
       send(bracketTerminalPaste(normalized))
       onNotice?.(`已整体粘贴 ${normalized.split('\n').filter(Boolean).length} 行，按回车执行`)
     }
+    const handleContextMenu = (event: MouseEvent) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const selection = terminal.getSelection()
+      if (!selection) return
+      if (!navigator.clipboard) { onNotice?.('复制失败，请使用 ⌘C / Ctrl+C'); return }
+      void navigator.clipboard.writeText(selection).then(() => onNotice?.('已复制选中的终端内容')).catch(() => onNotice?.('复制失败，请使用 ⌘C / Ctrl+C'))
+    }
     containerRef.current.addEventListener('paste', handlePaste, true)
+    containerRef.current.addEventListener('contextmenu', handleContextMenu, true)
     const dataDisposable = terminal.onData((data) => {
       if (pendingEnterRef.current) return
       if (gpuIndex !== undefined && (data === '\r' || data === '\n')) {
@@ -77,6 +90,14 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
 
     const resize = new ResizeObserver(fitAndResize)
     resize.observe(containerRef.current)
+    // The terminal lives in a nested grid whose final height can change
+    // without changing the canvas node's own content box (window resize,
+    // sheet/grid reflow). Observe the shell and viewport as well so rows are
+    // recalculated whenever either layer changes.
+    const shell = containerRef.current.closest<HTMLElement>('.terminal-shell')
+    if (shell && shell !== containerRef.current) resize.observe(shell)
+    const viewport = containerRef.current.parentElement
+    if (viewport && viewport !== shell) resize.observe(viewport)
     void api.startTerminal(serverId, terminal.cols, terminal.rows, gpuIndex, acceleratorVendor).then((id) => {
       if (disposed) { void api.closeTerminal(id); return }
       sessionRef.current = id
@@ -90,8 +111,11 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
     return () => {
       disposed = true
       if (fitFrame !== null) cancelAnimationFrame(fitFrame)
+      window.clearTimeout(delayedFit)
+      void fontFit
       resize.disconnect()
       containerRef.current?.removeEventListener('paste', handlePaste, true)
+      containerRef.current?.removeEventListener('contextmenu', handleContextMenu, true)
       dataDisposable.dispose()
       void outputListener.then((unlisten) => unlisten())
       void exitListener.then((unlisten) => unlisten())

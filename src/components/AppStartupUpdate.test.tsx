@@ -90,7 +90,7 @@ describe('App startup update check', () => {
     expect(releaseNotes).toBeDefined()
     await act(async () => releaseNotes?.click())
     expect(open).toHaveBeenCalledWith(
-      'https://github.com/Tongzh-SEU/RackTop/releases/tag/v1.25.4',
+      'https://github.com/Tongzh-SEU/RackTop/releases/tag/v1.25.5',
       '_blank',
       'noopener,noreferrer',
     )
