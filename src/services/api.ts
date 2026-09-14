@@ -69,6 +69,7 @@ const defaultSettings: AppSettings = {
   idleGpuThreshold: 10,
   idleMemoryThresholdMb: 40960,
   idleDurationMinutes: 10,
+  idleNotificationsEnabled: true,
   temperatureThresholdCelsius: 85,
   currentUserAccent: '#0a84ff',
   theme: 'system',
@@ -287,6 +288,7 @@ function rollingHistory(snapshot: Snapshot, fromTimestamp?: number): HistoryPoin
 }
 
 export const api = {
+  isStorageMaintenanceActive: async (): Promise<boolean> => isTauri ? invoke<boolean>('storage_maintenance_active') : new URLSearchParams(window.location.search).get('maintenance') === '1',
   isDesktop: isTauri,
   async listServers(): Promise<Server[]> {
     return isTauri ? invoke('list_servers') : browserServers
