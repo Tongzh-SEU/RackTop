@@ -44,6 +44,19 @@ afterEach(() => {
 })
 
 describe('GpuDetail hardware disclosure', () => {
+  it('shows Ascend HBM and AI Core without unsupported NVIDIA bandwidth or SM labels', async () => {
+    const container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    const npu: Snapshot = { ...snapshot, acceleratorVendor: 'ascend', gpus: [{ ...snapshot.gpus[0], uuid: 'NPU-0-0', name: 'Ascend 910B2C', memoryUsedMb: 54469, memoryTotalMb: 65536, utilization: 37 }] }
+    await act(async () => root?.render(<GpuDetail snapshot={npu} points={[]} selectedGpuUuid={null} onSelectGpu={vi.fn()} animateChart={false} />))
+    expect(container.textContent).toContain('53.2 / 64.0 GB')
+    expect(container.textContent).toContain('AI Core37%')
+    expect(container.textContent).not.toContain('MBW')
+    expect(container.textContent).not.toContain('SM')
+    expect(container.textContent).not.toContain('pmon')
+  })
+
   it('expands a card in a three-column set when optional hardware values are null', async () => {
     const container = document.createElement('div')
     document.body.append(container)

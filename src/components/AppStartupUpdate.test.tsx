@@ -4,6 +4,7 @@ import { StrictMode, act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../App'
+import packageInfo from '../../package.json'
 import { api } from '../services/api'
 import { loadCachedUpdate, saveCachedUpdate, UPDATE_CHECK_INTERVAL_MS } from '../utils/updateCheck'
 
@@ -90,7 +91,7 @@ describe('App startup update check', () => {
     expect(releaseNotes).toBeDefined()
     await act(async () => releaseNotes?.click())
     expect(open).toHaveBeenCalledWith(
-      'https://github.com/Tongzh-SEU/RackTop/releases/tag/v1.25.5',
+      `https://github.com/Tongzh-SEU/RackTop/releases/tag/v${packageInfo.version}`,
       '_blank',
       'noopener,noreferrer',
     )

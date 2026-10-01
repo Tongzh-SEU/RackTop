@@ -6,7 +6,7 @@ use std::{collections::{HashMap, HashSet}, process::Stdio, time::{SystemTime, UN
 use std::os::windows::process::CommandExt;
 use tokio::{process::Command, time::{timeout, Duration}};
 
-const REMOTE_SCRIPT: &str = r#"export LANG=C LC_ALL=C;
+const REMOTE_SCRIPT: &str = concat!(include_str!("../assets/ascend-collector.sh"), r#"export LANG=C LC_ALL=C;
 cleanup_marker="$HOME/.racktop/.cleanup-usercpu-redirection-v1";
 if [ ! -e "$cleanup_marker" ]; then
   cleanup_lock="$HOME/.racktop/.cleanup-usercpu-redirection-v1.lock";
@@ -79,30 +79,20 @@ if [ "${RACKTOP_INCLUDE_DISKS:-1}" = "1" ]; then
   done | head -n 16;
 fi;
 printf '__RACKTOP_USERCPU__\n'; ps -u "$(id -un)" -o pcpu= 2>/dev/null | awk -v n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)" '{s+=$1} END {printf "%.2f\n", (n>0?s/n:s+0)}';
+racktop_probe_npu;
 printf '__RACKTOP_ACCELERATOR__\n';
-if command -v nvidia-smi >/dev/null 2>&1; then printf 'nvidia\n'; elif command -v npu-smi >/dev/null 2>&1; then printf 'ascend\n'; elif command -v ppu-smi >/dev/null 2>&1; then printf 'ppu\n'; else printf 'nvidia\n'; fi;
+if [ "$racktop_npu_status" -eq 0 ] || command -v npu-smi >/dev/null 2>&1; then racktop_accelerator=ascend; elif command -v nvidia-smi >/dev/null 2>&1; then racktop_accelerator=nvidia; elif command -v ppu-smi >/dev/null 2>&1; then racktop_accelerator=ppu; else racktop_accelerator=nvidia; fi;
+printf '%s\n' "$racktop_accelerator";
 printf '__RACKTOP_NVIDIA__\n';
-if ! command -v nvidia-smi >/dev/null 2>&1 && command -v npu-smi >/dev/null 2>&1; then
-  ascend_info="$(npu-smi info 2>&1)"; ascend_status=$?;
+if [ "$racktop_accelerator" = ascend ]; then
+  ascend_info="$racktop_npu_info"; ascend_status=$racktop_npu_status;
   if [ "$ascend_status" -eq 0 ]; then
     printf 'available\n';
     printf '__RACKTOP_GPU__\n';
-    printf '%s\n' "$ascend_info" | awk -F '|' '
-      function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value }
-      /^\|/ {
-        for (i=2; i<NF; i++) field[i]=trim($i)
-        if (field[2] ~ /^[0-9]+$/ && field[4] ~ /^(OK|Warning|Alarm|Failure)$/) {
-          device=field[2]; name=field[3]; health=field[4]; power=field[5]+0; temperature=field[6]+0; hugepages=field[7]; next
-        }
-        if (device != "" && field[2] ~ /^[0-9]+$/ && field[3] ~ /^[0-9]+$/ && field[4] ~ /:/) {
-          split(field[7], memory, "/"); used=trim(memory[1])+0; total=trim(memory[2])+0;
-          memory_percent=(total > 0 ? used/total*100 : 0);
-          printf "%s, Ascend %s, NPU-%s-%s, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, , , , , , , , %s, %s, %s, %s\n", device, name, device, field[2], field[5]+0, memory_percent, used, total, temperature, power, health, field[4], field[2], hugepages
-        }
-      }';
+    racktop_npu_metrics;
   elif printf '%s\n' "$ascend_info" | grep -qi 'permission denied'; then printf 'permissionDenied\n%s\n' "$ascend_info";
   else printf 'failed\n%s\n' "$ascend_info"; fi;
-elif ! command -v nvidia-smi >/dev/null 2>&1 && command -v ppu-smi >/dev/null 2>&1; then
+elif [ "$racktop_accelerator" = ppu ]; then
   ppu_info="$(ppu-smi --query-ppu=index,name,uuid,utilization.ppu,utilization.memory,memory.used,memory.total,temperature.ppu,power.draw --format=csv,noheader,nounits 2>&1)"; ppu_status=$?;
   if [ "$ppu_status" -eq 0 ]; then
     printf 'available\n';
@@ -159,7 +149,7 @@ fi;
 if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = "1" ]; then
   printf '__RACKTOP_GPUPROC__\n';
   gpu_proc="";
-  if command -v nvidia-smi >/dev/null 2>&1; then
+  if [ "$racktop_accelerator" = nvidia ]; then
     query_gpu_processes() {
       selector="$1";
       if nvidia_smi_processes="$(nvidia-smi $selector --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits 2>/dev/null)"; then
@@ -174,28 +164,20 @@ if [ "${RACKTOP_INCLUDE_PROCESSES:-1}" = "1" ]; then
       gpu_proc="$(printf '%s\n' "$nvidia_list" | sed -n 's/^GPU \([0-9][0-9]*\):.*/\1/p' | while read -r gpu_index; do query_gpu_processes "-i $gpu_index" || true; done)";
     fi;
     printf '%s\n' "$gpu_proc";
-  elif command -v npu-smi >/dev/null 2>&1; then
-    gpu_proc="$(npu-smi info 2>/dev/null | awk -F '|' '
-      function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value }
-      /^\|/ { for (i=2; i<NF; i++) field[i]=trim($i); if (field[2] ~ /^[0-9]+$/ && field[4] ~ /^(OK|Warning|Alarm|Failure)$/) print field[2] }
-    ' | sort -nu | while read -r npu_index; do
-      npu-smi info -t proc-mem -i "$npu_index" 2>/dev/null | awk -F '|' '
-        function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value }
-        /^\|/ { for (i=2; i<NF; i++) field[i]=trim($i); if (field[2] ~ /^[0-9]+$/ && field[3] ~ /^[0-9]+$/ && field[4] ~ /^[0-9]+$/) printf "NPU-%s-%s, %s, %s, %.2f\n", field[2], field[3], field[4], field[5], field[6]+0 }
-      '
-    done)";
+  elif [ "$racktop_accelerator" = ascend ]; then
+    gpu_proc="$(racktop_npu_processes)";
     printf '%s\n' "$gpu_proc";
-  elif command -v ppu-smi >/dev/null 2>&1; then
+  elif [ "$racktop_accelerator" = ppu ]; then
     gpu_proc="$(ppu-smi --query-compute-apps=uuid,pid,process_name,used_ppu_memory --format=csv,noheader,nounits 2>/dev/null || true)";
     printf '%s\n' "$gpu_proc";
   fi;
   printf '__RACKTOP_GPUPMON__\n';
-  if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi pmon -c 1 -s um 2>/dev/null || true; fi;
+  if [ "$racktop_accelerator" = nvidia ]; then nvidia-smi pmon -c 1 -s um 2>/dev/null || true; fi;
   printf '__RACKTOP_PS__\n';
   gpu_pids="$(printf '%s\n' "$gpu_proc" | cut -d, -f2 | tr -d ' ' | paste -sd, -)";
   ps -eo user:64=,uid=,pid=,ppid=,pgid=,pcpu=,pmem=,rss=,etime=,args= --sort=-pcpu 2>/dev/null | awk -v gpu_pids="$gpu_pids" -v uid_min="$uid_min" 'BEGIN { n=split(gpu_pids, ids, ","); for (i=1; i<=n; i++) if (ids[i] != "") gpu[ids[i]]=1 } { is_gpu=($3 in gpu); is_child=($4 in gpu); is_user=($2 >= uid_min); is_main=($3 == $5 && $6 > 0); has_memory=($8 > 1048576); if (is_gpu || (is_user && has_memory && (is_child || (is_main && main_count < 64)))) { print; if (!is_gpu && is_main && !is_child) main_count++ } }' || true;
 fi;
-printf '__RACKTOP_END__\n';"#;
+printf '__RACKTOP_END__\n';"#);
 
 pub async fn collect(server: &Server) -> Result<Snapshot, String> {
     collect_with_password(server, None, true, true).await
@@ -213,10 +195,11 @@ pub struct CollectionResult {
 pub async fn collect_with_password_detailed(server: &Server, password: Option<&str>, include_processes: bool, include_disks: bool) -> Result<CollectionResult, String> {
     let (mut command, target) = configured_ssh_command(server, password)?;
     command.arg(target).arg(format!(
-        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{REMOTE_SCRIPT}",
+        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{remote_script}",
         if include_processes { 1 } else { 0 },
         if include_disks { 1 } else { 0 },
         if server.remote_history_enabled { 1 } else { 0 },
+        remote_script = REMOTE_SCRIPT.replace("\r\n", "\n"),
     )).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = timeout(Duration::from_secs(30), command.output()).await.map_err(|_| format!("连接 {} 超时（30 秒）", server.name))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
     if !output.status.success() {
@@ -267,10 +250,11 @@ pub fn collection_display_command(server: &Server, include_processes: bool, incl
         format!("{}@{}", server.username, server.host)
     });
     let remote_command = format!(
-        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{REMOTE_SCRIPT}",
+        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{remote_script}",
         if include_processes { 1 } else { 0 },
         if include_disks { 1 } else { 0 },
         if server.remote_history_enabled { 1 } else { 0 },
+        remote_script = REMOTE_SCRIPT.replace("\r\n", "\n"),
     );
     format!("ssh {} {} {}", arguments.join(" "), shell_quote(&target), shell_quote(&remote_command))
 }
@@ -986,7 +970,7 @@ mod tests {
         let snapshot = parse_snapshot("server-npu", &sample).unwrap();
         assert_eq!(snapshot.accelerator_vendor, "ascend");
         assert_eq!(snapshot.gpus[0].uuid, "NPU-0-0");
-        assert!(REMOTE_SCRIPT.contains("npu-smi info"));
+        assert!(include_str!("../assets/ascend-collector.sh").contains("npu-smi info"));
         assert!(REMOTE_SCRIPT.contains("Ascend"));
     }
 
