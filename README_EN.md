@@ -49,7 +49,15 @@ If macOS blocks the app the first time you open it, go to **System Settings → 
 If Windows reports that "Smart App Control has blocked an app that may be unsafe," search for **Smart App Control** in Settings and turn it off.
 
 ## A Note from the Author
-
+<p align="center">
+<a href="https://www.star-history.com/?repos=tongzh-seu%2Fracktop&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=tongzh-seu/racktop&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=tongzh-seu/racktop&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=tongzh-seu/racktop&type=date&legend=top-left" width="50%"/>
+ </picture>
+</a>
+</p>
 As the number of lab servers grows, keeping projects in sync, launching jobs, and checking server status becomes increasingly cumbersome. Asking AI to handle these tasks often consumes a surprising amount of time and tokens, so I built RackTop to bring these repetitive operations into a tool you can actually use directly.
 
 Of course, building the app itself also consumed plenty of tokens. At least now, the next time I launch a job, I will not have to explain the servers, projects, and commands all over again.
