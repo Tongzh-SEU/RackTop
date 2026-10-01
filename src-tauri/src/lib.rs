@@ -1457,3 +1457,6 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("RackTop 启动失败");
 }
+
+#[cfg(test)]
+mod ascend_tests;

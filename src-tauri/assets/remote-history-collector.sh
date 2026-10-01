@@ -31,13 +31,33 @@ swap_percent="$(awk '
   END { value=(total > 0 ? (total-free)/total*100 : 0); printf "%.2f", value }
 ' /proc/meminfo)"
 
+export LANG=C LC_ALL=C
+racktop_probe_npu
+racktop_accelerator=nvidia
+if [ "$racktop_npu_status" -eq 0 ] || command -v npu-smi >/dev/null 2>&1; then racktop_accelerator=ascend; fi
+query_history_gpus() {
+  if [ "$racktop_accelerator" = ascend ]; then
+    [ "$racktop_npu_status" -eq 0 ] || return 1
+    racktop_npu_metrics | awk -F, '$3 !~ /unavailable-/ { printf "%s,%s,%s,%s\n", $3,$4,$6,$7 }'
+  else
+    nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null
+  fi
+}
+query_history_processes() {
+  if [ "$racktop_accelerator" = ascend ]; then
+    [ "$racktop_npu_status" -eq 0 ] || return 1
+    racktop_npu_processes | awk -F, '{ printf "%s,%s,%s\n", $1,$2,$4 }'
+  else
+    nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits 2>/dev/null
+  fi
+}
 gpu_values=""
-if command -v nvidia-smi >/dev/null 2>&1; then
+if [ "$racktop_accelerator" = ascend ] || command -v nvidia-smi >/dev/null 2>&1; then
   gpu_sample="$state_dir/.gpu-history-sample.$$"
   occupancy_sample="$state_dir/.gpu-occupancy-sample.$$"
   : > "$gpu_sample"
   printf '__none__|0\n' > "$occupancy_sample"
-  nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | awk -F, '
+  query_history_gpus | awk -F, '
     {
       for (i=1; i<=NF; i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i) }
       memory = $4 > 0 ? $3 / $4 * 100 : 0
@@ -45,7 +65,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     }
   ' > "$gpu_sample" || true
   current_user="$(id -un 2>/dev/null || printf '')"
-  nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while IFS=, read -r gpu_uuid pid memory_mb; do
+  query_history_processes | while IFS=, read -r gpu_uuid pid memory_mb; do
     gpu_uuid="$(printf '%s' "$gpu_uuid" | tr -d '[:space:]')"
     pid="$(printf '%s' "$pid" | tr -d '[:space:]')"
     memory_mb="$(printf '%s' "$memory_mb" | tr -cd '0-9.')"
@@ -71,14 +91,14 @@ fi
 
 printf 'v2|%s|%s|%s|%s|%s\n' "$bucket" "$cpu_percent" "$memory_percent" "$swap_percent" "$gpu_values" >> "$history_file"
 
-if command -v nvidia-smi >/dev/null 2>&1; then
+if [ "$racktop_accelerator" = ascend ] || command -v nvidia-smi >/dev/null 2>&1; then
   usage_tmp="$state_dir/.usage-sample.$$"
   : > "$usage_tmp"
-  nvidia-smi --query-gpu=uuid --format=csv,noheader,nounits 2>/dev/null | while IFS= read -r gpu_uuid; do
+  query_history_gpus | cut -d, -f1 | while IFS= read -r gpu_uuid; do
     gpu_uuid="$(printf '%s' "$gpu_uuid" | tr -d '[:space:]')"
     [ -n "$gpu_uuid" ] && printf '%s|%s|0|60\n' "$gpu_uuid" "__racktop_coverage__" >> "$usage_tmp"
   done
-  nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while IFS=, read -r gpu_uuid pid memory_mb; do
+  query_history_processes | while IFS=, read -r gpu_uuid pid memory_mb; do
     gpu_uuid="$(printf '%s' "$gpu_uuid" | tr -d '[:space:]')"
     pid="$(printf '%s' "$pid" | tr -d '[:space:]')"
     memory_mb="$(printf '%s' "$memory_mb" | tr -cd '0-9.')"

@@ -10,7 +10,7 @@ use std::process::Stdio;
 use tokio::time::{Duration, timeout};
 
 const REMOTE_DIRECTORY: &str = "$HOME/.racktop";
-const REMOTE_COLLECTOR_SCRIPT: &str = include_str!("../assets/remote-history-collector.sh");
+const REMOTE_COLLECTOR_SCRIPT: &str = concat!(include_str!("../assets/ascend-collector.sh"), include_str!("../assets/remote-history-collector.sh"));
 const REMOTE_DAEMON_SCRIPT: &str = include_str!("../assets/remote-history-daemon.sh");
 const REMOTE_REMOVE_SCRIPT: &str = r#"set -eu
 state=$HOME/.racktop
