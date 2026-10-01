@@ -51,6 +51,14 @@ Windows版本若提示“智能应用控制已阻止可能不安全的应用”�
 
 ## 作者的话
 
+<a href="https://www.star-history.com/?repos=tongzh-seu%2Fracktop&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=tongzh-seu/racktop&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=tongzh-seu/racktop&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=tongzh-seu/racktop&type=date&legend=top-left" />
+ </picture>
+</a>
+
 实验室服务器越来越多以后，项目之间的同步、任务运行和服务器状态查看会变得越来越麻烦。把这些事情交给 Agent 做，往往又会浪费不少 token 和时间，所以我决定开发 RackTop，把这些重复的操作收进一个真正可操作的工具里。
 
 当然，开发这个 App 的过程本身也花了很多 token，笑死。至少现在，下一次启动任务时不用再从头解释一遍服务器、项目和命令了。
