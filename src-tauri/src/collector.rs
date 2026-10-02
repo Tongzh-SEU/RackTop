@@ -285,6 +285,7 @@ pub(crate) fn configured_ssh_command_without_control(server: &Server, password: 
 
 fn configured_ssh_command_with_control(server: &Server, password: Option<&str>, _use_control_master: bool) -> Result<(Command, String), String> {
     let mut command = Command::new("ssh");
+    command.kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x08000000);
     command.args(["-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=yes"]);
@@ -795,6 +796,117 @@ else printf 'unknown\n'; fi"#);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(unix, windows))]
+    fn test_ssh_process_is_running(pid: &str) -> bool {
+        #[cfg(unix)]
+        {
+            std::process::Command::new("kill").args(["-0", pid])
+                .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success()
+        }
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("tasklist.exe")
+                .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+                .creation_flags(0x08000000).output().expect("tasklist is required");
+            assert!(output.status.success(), "tasklist failed: {}", String::from_utf8_lossy(&output.stderr));
+            let expected_pid = format!("\"{pid}\"");
+            String::from_utf8_lossy(&output.stdout).lines()
+                .any(|line| line.split(',').nth(1) == Some(expected_pid.as_str()))
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    fn test_stop_ssh_process(pid: &str) {
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = std::process::Command::new("kill");
+            command.args(["-KILL", pid]);
+            command
+        };
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new("taskkill.exe");
+            command.args(["/F", "/PID", pid]).creation_flags(0x08000000);
+            command
+        };
+        let _ = command.stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn timed_out_ssh_command_does_not_leave_a_running_child() {
+        // An open local socket that never sends an SSH banner stalls the real ssh
+        // process without requiring credentials, a GPU, or a remote server.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = Server {
+            id: "local-timeout".into(), name: "Local timeout".into(), location: None,
+            host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(),
+            username: "racktop".into(), ssh_alias: None, identity_file: None, proxy_jump: None,
+            tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90,
+            remote_history_enabled: false, remote_history_last_sync_at: None, sort_order: 0,
+            auth_method: "sshAgent".into(), status: "unknown".into(), last_error: None, last_seen_at: None,
+        };
+        let (mut command, target) = configured_ssh_command(&server, None).unwrap();
+        command.args(["-F", "none"]).arg(target).arg("true")
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn().expect("system OpenSSH is required");
+        let pid = child.id().unwrap().to_string();
+
+        // Reap a leaked child even if the regression assertion fails.
+        struct Cleanup(Option<String>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Some(pid) = &self.0 { test_stop_ssh_process(pid); }
+            }
+        }
+        let mut cleanup = Cleanup(Some(pid.clone()));
+
+        // Confirm the client connected before timing out its output future.
+        let connection_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let (_connection, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if child.try_wait().unwrap().is_some() {
+                        let output = child.wait_with_output().await.unwrap();
+                        cleanup.0 = None;
+                        panic!("SSH exited before connecting ({}): {}", output.status, String::from_utf8_lossy(&output.stderr));
+                    }
+                    assert!(tokio::time::Instant::now() < connection_deadline, "SSH did not connect to the local listener");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => panic!("cannot accept local SSH connection: {error}"),
+            }
+        };
+        assert!(timeout(Duration::from_millis(200), child.wait_with_output()).await.is_err());
+
+        // The process table is the oracle, rather than the timeout result alone.
+        let exit_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < exit_deadline {
+            if !test_ssh_process_is_running(&pid) { cleanup.0 = None; return; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("SSH child {pid} survived cancellation of its output future");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn ssh_command_can_complete_normally() {
+        let server = Server {
+            id: "local-version".into(), name: "Local version".into(), location: None,
+            host: "127.0.0.1".into(), port: 22, username: "racktop".into(),
+            ssh_alias: None, identity_file: None, proxy_jump: None, tags: Vec::new(),
+            sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
+            remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(),
+            status: "unknown".into(), last_error: None, last_seen_at: None,
+        };
+        let (mut command, _) = configured_ssh_command(&server, None).unwrap();
+        let output = timeout(Duration::from_secs(5), command.arg("-V").output()).await.unwrap().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("OpenSSH"));
+    }
 
     const SAMPLE: &str = "__RACKTOP_USER__\ntongzh\n__RACKTOP_UIDMIN__\n1000\n__RACKTOP_HOST__\ngpu-box\n__RACKTOP_OS__\nubuntu|Ubuntu 22.04 LTS\n__RACKTOP_CPUMODEL__\nAMD EPYC 9654 96-Core Processor\n__RACKTOP_CPU1__\ncpu 100 0 20 880 0 0 0\n__RACKTOP_CPU2__\ncpu 120 0 30 950 0 0 0\n__RACKTOP_LOAD__\n0.06 0.11 0.09 1/100 1\n__RACKTOP_MEM__\nMemTotal: 100000 kB\nMemAvailable: 75000 kB\nSwapTotal: 1000 kB\nSwapFree: 900 kB\n__RACKTOP_USERCPU__\n5.50\n__RACKTOP_NVIDIA__\navailable\n__RACKTOP_GPU__\n0, NVIDIA GeForce RTX 4090 D, GPU-abc, 25, 10, 2048, 24564, 48, 110.5\n__RACKTOP_GPUPROC__\nGPU-abc, 4242, python, 2048\n__RACKTOP_GPUPMON__\n# gpu pid type sm mem\n0 4242 C 73 41 - - - - 2048 0 python\n__RACKTOP_PS__\ntongzh 1000 4242 1 4242 12.5 2.0 204800 01:20 python train.py\ntongzh 1000 4343 4242 4242 1.5 1.5 2097152 00:10 python data-loader.py\ntongzh 1000 5000 1 5000 0.8 1.2 1572864 00:30 python cpu-task.py\ntongzh 1000 5500 1 5500 0.9 0.5 1048576 00:20 python small-task.py\ntongzh 1000 5800 1 5800 1.2 1.4 1468006 00:20 /usr/bin/python3 /usr/bin/nvitop\ntongzh 1000 5900 1 5900 1.1 1.5 1572864 00:20 /home/tongzh/.vscode-server/bin/node server-main.js\ntongzh 1000 6000 1 6000 0.7 1.1 1153434 10:00 /usr/lib/systemd/systemd --user\nroot 0 99 1 99 0.2 1.2 1258291 10:00 systemd-worker\n__RACKTOP_END__\n";
 
