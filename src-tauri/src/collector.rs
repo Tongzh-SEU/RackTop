@@ -849,10 +849,9 @@ mod tests {
             auth_method: "sshAgent".into(), status: "unknown".into(), last_error: None, last_seen_at: None,
         };
         let (mut command, target) = configured_ssh_command(&server, None).unwrap();
-        let config = tempfile::NamedTempFile::new().unwrap();
-        command.arg("-F").arg(config.path()).arg(target).arg("true")
+        command.args(["-F", "none"]).arg(target).arg("true")
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let child = command.spawn().expect("system OpenSSH is required");
+        let mut child = command.spawn().expect("system OpenSSH is required");
         let pid = child.id().unwrap().to_string();
 
         // Reap a leaked child even if the regression assertion fails.
@@ -870,6 +869,11 @@ mod tests {
             match listener.accept() {
                 Ok(connection) => break connection,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if child.try_wait().unwrap().is_some() {
+                        let output = child.wait_with_output().await.unwrap();
+                        cleanup.0 = None;
+                        panic!("SSH exited before connecting ({}): {}", output.status, String::from_utf8_lossy(&output.stderr));
+                    }
                     assert!(tokio::time::Instant::now() < connection_deadline, "SSH did not connect to the local listener");
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }

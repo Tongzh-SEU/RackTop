@@ -45,7 +45,8 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
-      - name: Run process cancellation regression
+      - name: Run process cancellation regression (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -54,4 +55,14 @@ jobs:
             echo 'The process cancellation regression did not execute and pass.' >&2
             exit 1
           fi
+      - name: Run process cancellation regression (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-Command ssh | Select-Object Source
+          cargo test --manifest-path src-tauri/Cargo.toml --lib collector::tests::timed_out_ssh_command_does_not_leave_a_running_child -- --exact --nocapture 2>&1 | Tee-Object -FilePath cancellation-test.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -Path cancellation-test.log -Pattern 'test result: ok\. 1 passed; 0 failed;' -Quiet)) {
+            throw 'The process cancellation regression did not execute and pass.'
+          }
       - run: cargo test --manifest-path src-tauri/Cargo.toml

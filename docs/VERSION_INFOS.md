@@ -4,7 +4,7 @@
 
 ## 1.25.7 — 采集取消回收与磁盘失败节流
 
-- 修改时间：2026-10-02 20:51:53 +08:00
+- 修改时间：2026-10-02 22:01:29 +08:00
 - 发布日期：未发布
 - 发布阶段：本地审查草稿；1.25.6 已用于开放 PR #89，最终版本号需与合并顺序协调
 - 桌面平台：macOS、Windows（本次未验证 Windows）
@@ -25,8 +25,9 @@
 - 前端完整测试：58 个文件、246 项通过；TypeScript 检查和 Vite 生产构建通过。
 - Rust 完整测试：macOS 97 项通过、3 项按上游配置忽略（2 项需指定双 SSH 服务器，1 项需指定数据库副本）。
 - 新增测试复现磁盘失败后立即重采，以及 SSH 子进程在取消等待后仍存活；修复后 3 项前端用例和 2 项 Rust 进程用例在 macOS 通过。新版取消回归临时移除回收设置后失败，恢复设置后通过。
-- 进程用例使用本机 loopback TCP socket 和真实 OpenSSH，确认客户端已连接后将等待期限设为 200ms；Unix 检查 PID，Windows 通过 tasklist 查询，并包含失败清理及正常完成路径。Windows 分支尚未实际执行。
-- 新增 macOS/Windows/Linux 测试 CI 并通过 actionlint；CI 明确检查取消回归实际执行且通过，不构建签名发布包。云端工作流尚未上传或运行。
+- 进程用例使用本机 loopback TCP socket 和真实 OpenSSH，使用 `-F none` 隔离配置文件，确认客户端已连接后将等待期限设为 200ms；Unix 检查 PID，Windows 通过 tasklist 查询，并包含失败清理及正常完成路径。
+- 第一轮 fork CI：macOS/Ubuntu 全套通过；Windows 前端测试、构建和 Git Bash 下的单项取消测试通过，但 PowerShell 下完整 Rust 测试在 SSH 建立连接前失败（83 passed / 1 failed / 1 ignored）。尚不能汇报 Windows 全套通过。
+- 测试 CI 明确检查取消回归实际执行，不构建签名发布包。针对第一轮结果，Windows 单项测试改用与完整测试一致的 PowerShell 环境，并补充 SSH 提前退出的 stderr 诊断；该调整待云端再次验证。
 - 独立 Ubuntu 24.04 VM 中建立真实 NFS 4.2 挂载，复用当前 SSH 构造器、远端脚本和快照解析器；正常采集返回 NFS 磁盘及系统内存，约 2.65 秒完成。受控 NFS 服务中断后，等待约 30 秒超时，本机 SSH PID 已退出；恢复服务后，轻量采集约 0.69 秒成功。
 - Linux 端独立 PID 观察发现：本机 SSH 超时退出后，普通远端 sleep 仍为 S 状态；NFS 中断案例的远端 shell 仍为 D 状态。实验结束后恢复 NFS、清理工作负载并停止专用 VM。
 - 独立 identifier 的 macOS debug/ad-hoc 审查 App 构建并启动成功；原生关于页面显示 1.25.7，空服务器刷新反馈正常结束。此项是启动与界面烟雾验证，不替代真实服务器采集验收。
