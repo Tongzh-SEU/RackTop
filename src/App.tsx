@@ -453,10 +453,10 @@ function App() {
       const includeProcesses = collectDetailData && (!quiet || fastStatusView || nowMs - (lastProcessAttemptAt.current[serverId] ?? 0) >= (settings?.processIntervalSeconds ?? 5) * 1000)
       const includeDisks = collectDetailData && (!quiet || nowMs - (lastDiskAttemptAt.current[serverId] ?? 0) >= DISK_STATUS_INTERVAL_MS)
       const recordHistory = !serverConfig || shouldRecordHistory(lastHistoryRecordedAt.current[serverId], nowMs, serverConfig.samplingIntervalSeconds)
+      if (includeDisks) lastDiskAttemptAt.current[serverId] = nowMs
       const collected = await api.collectServer(serverId, includeProcesses, includeDisks, recordHistory, !quiet)
       if (deletedServerIds.current.has(serverId)) return
       if (collected.processesSampled) lastProcessAttemptAt.current[serverId] = nowMs
-      if (includeDisks) lastDiskAttemptAt.current[serverId] = nowMs
       const snapshot = {
         ...collected,
         ...(!collected.processesSampled ? { processes: previous?.processes ?? [], cpuProcesses: previous?.cpuProcesses ?? [] } : {}),
