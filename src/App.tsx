@@ -277,6 +277,7 @@ function App() {
   const [idleHistoryLoadedMinutes, setIdleHistoryLoadedMinutes] = useState(0)
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null)
+  const [terminalServerIds, setTerminalServerIds] = useState<Set<string>>(() => new Set())
   const [selectedTab, setSelectedTab] = useState<DetailTab>(() => browserPreviewState === 'terminal' ? 'terminal' : browserPreviewState === 'notifications' ? 'connection' : 'overview')
   const [selectedGpuUuid, setSelectedGpuUuid] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -403,6 +404,19 @@ function App() {
 
   const selectedServer = servers.find((server) => server.id === selectedServerId)
   const selectedSnapshot = selectedServerId ? snapshots[selectedServerId] : undefined
+  const showTerminal = mainView === 'server' && selectedTab === 'terminal' && !!selectedServer && !!selectedSnapshot && canDisplayServerDetails(selectedServer.status, true)
+
+  useEffect(() => {
+    if (!showTerminal || !selectedServerId) return
+    setTerminalServerIds((current) => current.has(selectedServerId) ? current : new Set([...current, selectedServerId]))
+  }, [selectedServerId, showTerminal])
+
+  useEffect(() => {
+    setTerminalServerIds((current) => {
+      const remaining = new Set([...current].filter((id) => servers.some((server) => server.id === id)))
+      return remaining.size === current.size ? current : remaining
+    })
+  }, [servers])
   const remoteHistoryServerKey = servers.filter((server) => server.remoteHistoryEnabled).map((server) => server.id).sort().join('\n')
 
   useEffect(() => { remoteHistoryServersRef.current = servers }, [servers])
@@ -1697,7 +1711,7 @@ function App() {
           </div>
         </header>
 
-        <div className="workspace__scroll">
+        <div className={`workspace__scroll ${showTerminal ? 'workspace__scroll--terminal' : ''}`}>
           {shouldShowGuidedEmptyState(mainView, servers.length) ? (
             <EmptyState onboarding={<OnboardingChecklist steps={onboardingSteps} previewStep={onboardingPreviewStep} collapsed={onboardingCollapsed} dismissed={onboardingDismissed} useActualState={onboardingUseActualState} showPreviewControls={!api.isDesktop} onPreviewStepChange={setOnboardingPreviewStep} onCollapsedChange={setOnboardingCollapsed} onDismiss={() => { localStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true'); setOnboardingDismissed(true); setToast('已隐藏新手引导，可在“设置 → 通用”中重新显示') }} onUseActualStateChange={setOnboardingUseActualState} />} onAdd={() => { setEditingServer(null); setShowServerForm(true) }} onImport={importConfig} />
           ) : servers.length === 0 ? (
@@ -1741,6 +1755,12 @@ function App() {
           ) : (
             <LoadingServer server={selectedServer} isRefreshing={selectedServer ? busy.has(selectedServer.id) : false} onRefresh={() => selectedServer && void refreshServer(selectedServer.id)} onEdit={() => { if (selectedServer) { setEditingServer(selectedServer); setShowServerForm(true) } }} onDelete={() => selectedServer && setServerPendingDelete(selectedServer)} />
           )}
+          {servers.filter((server) => terminalServerIds.has(server.id)).map((server) => {
+            const active = showTerminal && selectedServerId === server.id
+            return <div className="terminal-workspace" key={server.id} hidden={!active}>
+              <SshTerminal serverId={server.id} serverName={server.name} active={active} />
+            </div>
+          })}
         </div>
       </main>
 
@@ -1857,7 +1877,6 @@ function ServerDetail({ server, snapshot, points, settings, tab, selectedGpuUuid
         {tab === 'gpu' && <GpuDetail snapshot={snapshot} points={points} selectedGpuUuid={selectedGpuUuid} onSelectGpu={onSelectGpu} animateChart={animateCharts} />}
         {tab === 'cpu' && <CpuDetail snapshot={snapshot} points={points} animateChart={animateCharts} />}
         {tab === 'processes' && <ProcessBlocks snapshot={snapshot} terminatingPid={terminatingPid} onRequestTerminate={onRequestTerminate} loading={isRefreshing} />}
-        {tab === 'terminal' && <SshTerminal serverId={server.id} serverName={server.name} />}
         {tab === 'history' && (historyContentReady ? <HistoryView server={server} snapshot={snapshot} /> : <div className="history-page-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={18} /><span>正在加载趋势…</span></div>)}
         {tab === 'connection' && <ConnectionView server={server} snapshot={snapshot} nvidiaWarningIgnored={nvidiaWarningIgnored} ignoredGpuMemoryStallWarningIds={ignoredGpuMemoryStallWarningIds} onRestoreNvidiaWarning={onRestoreNvidiaWarning} onRestoreGpuMemoryStallWarning={onRestoreGpuMemoryStallWarning} onRefresh={onRefresh} onDelete={onDelete} onEdit={onEdit} isRefreshing={isRefreshing} notificationSettings={notificationSettings} onNotificationSettingsChange={onNotificationSettingsChange} notificationMenuRequested={notificationMenuRequested} onNotificationMenuRequestHandled={onNotificationMenuRequestHandled} />}
       </div>

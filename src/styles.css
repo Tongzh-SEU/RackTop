@@ -131,6 +131,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .sidebar__footer button { color: var(--text-secondary); font-size: calc(12px + var(--font-adjust, 0px)); }
 .workspace { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; background: var(--bg); }
 .workspace__scroll { min-width: 0; min-height: 0; overflow-y: auto; overflow-anchor: none; scrollbar-color: color-mix(in srgb, var(--text-tertiary) 20%, transparent) transparent; scrollbar-width: thin; }
+.workspace__scroll--terminal { display: flex; flex-direction: column; overflow: hidden; }
+.workspace__scroll--terminal > .detail-page--terminal { flex: 0 0 auto; height: auto; margin-bottom: 14px; }
+.terminal-workspace { display: grid; flex: 1 1 0; min-width: 0; min-height: 0; width: min(1180px, calc(100% - 52px)); margin: 0 auto 26px; }
+.terminal-workspace[hidden] { display: none; }
 .workspace__scroll::-webkit-scrollbar { width: 9px; }
 .workspace__scroll::-webkit-scrollbar-track { background: transparent; }
 .workspace__scroll::-webkit-scrollbar-thumb { min-height: 44px; border: 3px solid transparent; border-radius: 999px; background: color-mix(in srgb, var(--text-tertiary) 20%, transparent); background-clip: padding-box; }

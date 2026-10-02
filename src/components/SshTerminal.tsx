@@ -11,11 +11,14 @@ import { bracketTerminalPaste, isMultilineTerminalPaste, normalizeTerminalPaste 
 
 interface TerminalEvent { sessionId: string; data?: string }
 
-export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor = 'nvidia', onNotice }: { serverId: string; serverName: string; gpuIndex?: number; acceleratorVendor?: 'nvidia' | 'ascend' | 'ppu'; onNotice?: (message: string) => void }) {
+export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor = 'nvidia', onNotice, active = true }: { serverId: string; serverName: string; gpuIndex?: number; acceleratorVendor?: 'nvidia' | 'ascend' | 'ppu'; onNotice?: (message: string) => void; active?: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<string | null>(null)
   const lineRef = useRef('')
   const pendingEnterRef = useRef(false)
+  const activeRef = useRef(active)
+  const activateRef = useRef<((visible: boolean) => void) | null>(null)
+  activeRef.current = active
   const [status, setStatus] = useState<'connecting' | 'connected' | 'closed' | 'error'>('connecting')
   const [error, setError] = useState<string | null>(null)
   const [restart, setRestart] = useState(0)
@@ -29,20 +32,24 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
     const fit = new FitAddon()
     terminal.loadAddon(fit)
     terminal.open(container)
-    fit.fit()
-    terminal.focus()
+    if (activeRef.current) { fit.fit(); terminal.focus() }
     const previewInput = api.isDesktop ? null : createTerminalPreview((data) => terminal.write(data), () => terminal)
     let fitFrame: number | null = null
 
     const fitAndResize = () => {
+      if (disposed || !activeRef.current) return
       if (fitFrame !== null) cancelAnimationFrame(fitFrame)
       fitFrame = requestAnimationFrame(() => {
         fitFrame = null
-        if (disposed) return
+        if (disposed || !activeRef.current) return
         fit.fit()
         const id = sessionRef.current
         if (id) void api.resizeTerminal(id, terminal.cols, terminal.rows)
       })
+    }
+    activateRef.current = (visible) => {
+      if (visible) { fitAndResize(); terminal.focus() }
+      else terminal.blur()
     }
     const fontFit = document.fonts?.ready.then(() => fitAndResize())
 
@@ -96,14 +103,13 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
       if (disposed) { if (id) void api.closeTerminal(id); return }
       sessionRef.current = id
       setStatus('connected')
-      fit.fit()
-      if (id) void api.resizeTerminal(id, terminal.cols, terminal.rows)
       fitAndResize()
-      terminal.focus()
-    }).catch((reason) => { setStatus('error'); setError(String(reason)) })
+      if (activeRef.current) terminal.focus()
+    }).catch((reason) => { if (!disposed) { setStatus('error'); setError(String(reason)) } })
 
     return () => {
       disposed = true
+      activateRef.current = null
       if (fitFrame !== null) cancelAnimationFrame(fitFrame)
       void fontFit
       resize.disconnect()
@@ -118,6 +124,8 @@ export function SshTerminal({ serverId, serverName, gpuIndex, acceleratorVendor 
       terminal.dispose()
     }
   }, [acceleratorVendor, gpuIndex, onNotice, restart, serverId])
+
+  useEffect(() => { activateRef.current?.(active) }, [active])
 
   const confirmPending = (sendEnter: boolean) => {
     pendingEnterRef.current = false
