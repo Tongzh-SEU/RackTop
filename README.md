@@ -44,7 +44,7 @@ RackTop 是面向个人研究者和小型团队的 GPU 服务器桌面工作台�
 | --- | --- | --- |
 | macOS Apple Silicon | `RackTop_1.26.0_macos-arm64.dmg` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.0/RackTop_1.26.0_macos-arm64.dmg) |
 | Windows x64 | `RackTop_1.26.0_x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.0/RackTop_1.26.0_x64-setup.exe) |
-| Linux Ubuntu/Debian x64 | `RackTop_1.26.0_amd64.deb`（约 9.2 MB） | [下载 Linux 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.0/RackTop_1.26.0_amd64.deb) |
+| Linux Ubuntu/Debian x64 | `RackTop_1.26.0_amd64.deb` | [下载 Linux 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.0/RackTop_1.26.0_amd64.deb) |
 
 更多版本见 [GitHub Releases](https://github.com/Tongzh-SEU/RackTop/releases)。
 
