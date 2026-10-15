@@ -1,15 +1,19 @@
 {
-  "version": "1.25.6",
-  "notes": "RackTop v1.25.6 稳定版",
-  "pub_date": "2026-10-14T03:14:40Z",
+  "version": "1.26.0",
+  "notes": "RackTop v1.26.0 稳定版",
+  "pub_date": "2026-10-15T15:07:20Z",
   "platforms": {
     "darwin-aarch64": {
-      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.6/RackTop_1.25.6_macos-arm64.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaGZWdTFTa0lXOEg4RGhKQjA0eitvdTB6bUR5YndaTDZqTTNJRmtHUTNKUzZmQ0FnY2R6b1pQNXkxN04yclh6NytUN2VveE5xNWJQNDkxbktUQXc5V3d3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTQ3MzMyCWZpbGU6UmFja1RvcF8xLjI1LjZfbWFjb3MtYXJtNjQuYXBwLnRhci5negpsclFGZ1JYUWwwdnA2cjZ2QmtGT3N5cldWK056VnZoN0FyajBWeGo3enluRFJiN2NvY2E1bU0wWnhlbk9oclVYSk03alJvaXEzRlNIMHl4WTVZZGFCdz09Cg=="
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.0/RackTop_1.26.0_macos-arm64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaFN4d05Ma0hXbTBIR2ozSFFaQjRuS0JYN1VFektjNUxPK2dmMDkrVVI1dldoNzhMREs5cHVjWHgySzBSTXgxVVFpek9SVjU4QnNvRXVGanVSdTNWRkFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDc1MTIxCWZpbGU6UmFja1RvcF8xLjI2LjBfbWFjb3MtYXJtNjQuYXBwLnRhci5negpNUEtWVXNkVDdEUTlDcGw4cEIzS3lIaHd3ZDNsb3hUMXZQaU5yTmtZNDlQd2pKS0VKdzRxM1phTFhCRVNaTmxSVUhDbWZWZ1dHRERmdCtCY3oxajNBQT09Cg=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.6/RackTop_1.25.6_x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaGFwYkJZcHpJWVFhS3ptR2tJOVpDU3R6NVZoVlkyQkZkTkN4bXBjWjlpTVJhUnV3N01vWGd0d1krK284Tlo3MmJqYjl5MUhKc0V3SzgzZExiUnl0WEFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTQ3MzQ5CWZpbGU6UmFja1RvcF8xLjI1LjZfeDY0LXNldHVwLmV4ZQpCVWlEaUVVaW5XWlpQaG1tWlA4NkdzQ0craEVXQ2hKditVWXJZbU9uOXFxTXI1anI5V1lnYmdBSTV3SE5rV3RrazJCaVZKM29HUXFpUFluUTZocXJEUT09Cg=="
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.0/RackTop_1.26.0_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaGVUck5jeTBMOWQ2Q2dYSTVFRXErVjE4VXMveGhYRVFLWElnRHhoREpjU013dnNUYWZDZklZUlNwRFU1TDdnRDdTaGZhSjVkc29id2RTWjZNMkJWandnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDc1Mjg1CWZpbGU6UmFja1RvcF8xLjI2LjBfeDY0LXNldHVwLmV4ZQpwN1g2djNLeDU3MndoNDR5NXZsT0FJWUt0TWI4UWRGdzBLUmhVM2lJQ1RDSGJZMmtaMngzYURUS2MxSDFEVEZxL3JCMUlTa1Vtc1pQTzVUeGhjWnNCUT09Cg=="
+    },
+    "linux-x86_64": {
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.0/RackTop_1.26.0_amd64.AppImage",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaGQwK1hiSHhGMXluMlNtRmJXMGp6NVNLL0ZvQVdCUGR6bFZJb3pRM0pnbnR5KzBOWFVIbTZVNDBFNERVT0ZiNVZwaW1OMzlRdnhCRUFsTHNobnJlTlF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDc1MzEwCWZpbGU6UmFja1RvcF8xLjI2LjBfYW1kNjQuQXBwSW1hZ2UKd0JXWEpEL2RoaVp4aFZsMHR3WVdORFVzclEraDdRZWw2UUdiWnFlaTJXOU9BL3F3cGhSSSt0Z3ZYaG93YzlRaG96UEZydkJYVnZhRWtnWEJGRDArQkE9PQo="
     }
   }
 }
