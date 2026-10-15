@@ -1181,7 +1181,9 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
 /* Size cards from their actual layout width and the configured column limit.
    Card internals retain their own column counts. */
 .detail-page:not(.detail-page--terminal):has(.gpu-grid, .gpu-detail-list, .trend-grid, .resource-trend-grid, .history-heatmap-list, .usage-waffle-list, .fleet-grid, .idle-grid, .project-grid) {
-  width: min(var(--card-page-width, 1180px), calc(100% - 52px));
+  width: min(var(--card-page-width, 1180px), calc(100% - var(--card-page-inset, 52px)));
+  margin-left: calc((100% - min(var(--card-page-width, 1180px), calc(100% - var(--card-page-inset, 52px)))) / 2 + var(--card-page-offset, 0px));
+  margin-right: 0;
 }
 .gpu-grid, .gpu-detail-list, .trend-grid, .resource-trend-grid,
 .history-heatmap-list, .usage-waffle-list, .fleet-grid, .idle-grid, .project-grid {
@@ -1198,7 +1200,9 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
 
 /* Keep server tabs at a shared width independent of their current contents. */
 .app-shell[data-zoom-layout="fixed"] :is(.detail-page.server-detail-page, .terminal-workspace) {
-  width: min(var(--card-page-width, 1180px), calc(100% - 52px));
+  width: min(var(--card-page-width, 1180px), calc(100% - var(--card-page-inset, 52px)));
+  margin-left: calc((100% - min(var(--card-page-width, 1180px), calc(100% - var(--card-page-inset, 52px)))) / 2 + var(--card-page-offset, 0px));
+  margin-right: 0;
 }
 .app-shell[data-zoom-layout="enlarged"] :is(.detail-page.server-detail-page, .terminal-workspace) {
   width: min(1180px, calc(100% - 52px));

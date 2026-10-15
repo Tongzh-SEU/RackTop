@@ -1,13 +1,17 @@
 // @vitest-environment jsdom
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from '../App'
 import { api } from '../services/api'
 
 vi.mock('./SshTerminal', () => ({ SshTerminal: () => null }))
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 let root: ReturnType<typeof createRoot> | undefined
+
+beforeEach(() => {
+  vi.spyOn(api, 'listServers').mockResolvedValue([])
+})
 
 afterEach(() => {
   act(() => root?.unmount())
@@ -27,7 +31,7 @@ it.each([[2, '1048px'], [3, '1578px'], [4, '2108px'], [5, '2638px']])('respects 
   vi.stubGlobal('ResizeObserver', class {
     constructor(private callback: ResizeObserverCallback) {}
     observe(target: Element) {
-      if (target.classList.contains('workspace')) resize = () => this.callback([], this as unknown as ResizeObserver)
+      if (target.classList.contains('workspace__scroll')) resize = () => this.callback([], this as unknown as ResizeObserver)
     }
     unobserve() {}
     disconnect = disconnect
@@ -35,7 +39,10 @@ it.each([[2, '1048px'], [3, '1578px'], [4, '2108px'], [5, '2638px']])('respects 
   vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }))
   vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(1320)
   vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function (this: HTMLElement) {
-    return this.classList.contains('workspace') ? width : 0
+    return this.classList.contains('workspace__scroll') ? width : 0
+  })
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockImplementation(function (this: HTMLElement) {
+    return this.classList.contains('workspace__scroll') ? width : 0
   })
   const container = document.createElement('div')
   document.body.append(container)
@@ -65,4 +72,59 @@ it.each([[2, '1048px'], [3, '1578px'], [4, '2108px'], [5, '2638px']])('respects 
   act(() => root!.unmount())
   root = undefined
   expect(disconnect).toHaveBeenCalled()
+})
+
+it.each([0, 13, 17])('preserves the original card width with a %spx scrollbar', async (initialGutter) => {
+  let gutter = initialGutter
+  let clientWidth = 1100 - gutter
+  let resize: (() => void) | undefined
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(target: Element) {
+      if (target.classList.contains('workspace__scroll')) resize = () => this.callback([], this as unknown as ResizeObserver)
+    }
+    disconnect() {}
+  })
+  vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }))
+  vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(1320)
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function (this: HTMLElement) {
+    return this.classList.contains('workspace__scroll') ? clientWidth : 0
+  })
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockImplementation(function (this: HTMLElement) {
+    return this.classList.contains('workspace__scroll') ? clientWidth + gutter : 0
+  })
+  const container = document.createElement('div')
+  document.body.append(container)
+  root = createRoot(container)
+  await act(async () => { root!.render(<App />) })
+  const shell = container.querySelector<HTMLElement>('.app-shell')!
+  const style = shell.style
+  expect(style.getPropertyValue('--card-base-width')).toBe('518px')
+  expect(style.getPropertyValue('--card-page-width')).toBe('1048px')
+  expect(style.getPropertyValue('--card-page-inset')).toBe(`${52 - gutter}px`)
+  expect(style.getPropertyValue('--card-page-offset')).toBe(`${gutter / 2}px`)
+  // Content arriving later can add a classic scrollbar without resizing the window.
+  const previousGutter = gutter
+  gutter = gutter === 0 ? 13 : 0
+  clientWidth = 1100 - gutter
+  act(() => resize!())
+  expect(style.getPropertyValue('--card-page-width')).toBe('1048px')
+  expect(style.getPropertyValue('--card-base-width')).toBe('518px')
+  expect(style.getPropertyValue('--card-page-inset')).toBe(`${52 - gutter}px`)
+  gutter = previousGutter
+  clientWidth = 1100 - gutter
+  act(() => resize!())
+  act(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: '+', metaKey: true })))
+  expect(style.getPropertyValue('--card-page-inset')).toBe('52px')
+  expect(style.getPropertyValue('--card-page-offset')).toBe('0px')
+  act(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: '0', metaKey: true })))
+  expect(style.getPropertyValue('--card-page-width')).toBe('1048px')
+  expect(style.getPropertyValue('--card-page-inset')).toBe(`${52 - gutter}px`)
+  clientWidth -= 1
+  act(() => resize!())
+  expect(style.getPropertyValue('--card-page-width')).toBe('518px')
+  expect(style.getPropertyValue('--card-base-width')).toBe('518px')
+  act(() => root!.unmount())
+  root = undefined
+  expect(style.getPropertyValue('--card-page-inset')).toBe('')
 })

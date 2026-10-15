@@ -112,6 +112,7 @@ const browserPreviewState = api.isDesktop || typeof window === 'undefined' ? nul
 const releaseUrl = (version: string) => `https://github.com/Tongzh-SEU/RackTop/releases/tag/v${version.replace(/^v/i, '')}`
 
 const ONBOARDING_DISMISSED_KEY = 'racktop.onboardingDismissed.v1'
+const CARD_PAGE_HORIZONTAL_INSET = 52
 
 const tabs: Array<{ value: DetailTab; label: string }> = [
   { value: 'overview', label: '概览' },
@@ -1001,16 +1002,22 @@ function App() {
     // At or below 100%, resizing changes the column count, not the base width.
     // Above 100%, CSS uses the stable release's flexible card widths instead.
     const sidebarWidth = Math.min(248, Math.max(220, window.innerWidth * 0.16))
-    const originalContentWidth = Math.min(1180, window.innerWidth - sidebarWidth - 52)
+    const originalContentWidth = Math.min(1180, window.innerWidth - sidebarWidth - CARD_PAGE_HORIZONTAL_INSET)
     const cardWidth = Math.max(1, (originalContentWidth - 12) / 2)
     root.style.setProperty('--card-base-width', `${cardWidth}px`)
     let zoom = Math.min(2, Math.max(0.5, Math.round((Number(localStorage.getItem('racktop.uiZoom') ?? '1') || 1) * 20) / 20))
     let maxCardsPerRow = 3
-    // Observe the available workspace, not the fitted page, to avoid a resize loop.
-    const workspace = root.querySelector<HTMLElement>('.workspace')
+    const cardScroller = root.querySelector<HTMLElement>('.workspace__scroll')
     const fitCardPage = () => {
-      if (!workspace) return
-      const availableWidth = Math.max(0, workspace.clientWidth - 52)
+      if (!cardScroller) return
+      // Take scrollbar space out of the page margins, not the frozen card width.
+      // Overlay scrollbars need no compensation; enlarged layouts keep their margins.
+      const scrollbarWidth = Math.max(0, cardScroller.offsetWidth - cardScroller.clientWidth)
+      const pageInset = zoom > 1 ? CARD_PAGE_HORIZONTAL_INSET : Math.max(0, CARD_PAGE_HORIZONTAL_INSET - scrollbarWidth)
+      root.style.setProperty('--card-page-inset', `${pageInset}px`)
+      // Keep the same page center when switching to the scrollbar-free terminal.
+      root.style.setProperty('--card-page-offset', `${zoom > 1 ? 0 : (CARD_PAGE_HORIZONTAL_INSET - pageInset) / 2}px`)
+      const availableWidth = Math.max(0, cardScroller.clientWidth - pageInset)
       const columns = Math.max(1, Math.min(maxCardsPerRow, Math.floor((availableWidth + 12) / (cardWidth + 12))))
       root.style.setProperty('--card-page-width', `${zoom > 1 ? 1180 : columns * cardWidth + (columns - 1) * 12}px`)
     }
@@ -1020,7 +1027,7 @@ function App() {
       root.style.setProperty('--max-card-columns', String(maxCardsPerRow))
       fitCardPage()
     }
-    if (workspace) cardLayoutObserver.observe(workspace)
+    if (cardScroller) cardLayoutObserver.observe(cardScroller)
     fitCardPage()
     const applyZoom = () => {
       // Keep layout geometry stable while scaling the application surface. CSS zoom
@@ -1041,7 +1048,7 @@ function App() {
       else if (event.key === '0') { event.preventDefault(); zoom = 1; applyZoom() }
     }
     window.addEventListener('keydown', onKeyDown)
-    return () => { cardLayoutObserver.disconnect(); window.removeEventListener('keydown', onKeyDown); root.style.removeProperty('--ui-zoom'); root.style.removeProperty('--ui-zoom-inverse'); root.style.removeProperty('--card-page-width'); root.style.removeProperty('--card-base-width'); root.style.removeProperty('--max-card-columns'); delete root.dataset.zoomLayout; zoomAdjustRef.current = () => {}; cardLayoutRefreshRef.current = () => {} }
+    return () => { cardLayoutObserver.disconnect(); window.removeEventListener('keydown', onKeyDown); root.style.removeProperty('--ui-zoom'); root.style.removeProperty('--ui-zoom-inverse'); root.style.removeProperty('--card-page-width'); root.style.removeProperty('--card-page-inset'); root.style.removeProperty('--card-page-offset'); root.style.removeProperty('--card-base-width'); root.style.removeProperty('--max-card-columns'); delete root.dataset.zoomLayout; zoomAdjustRef.current = () => {}; cardLayoutRefreshRef.current = () => {} }
   }, [])
 
   useEffect(() => {
