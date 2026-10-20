@@ -52,6 +52,12 @@ mod tests {
         time::Duration,
     };
 
+    fn client_builder() -> reqwest::ClientBuilder {
+        // The updater installs ring before creating its clients; these tests bypass it.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        reqwest::Client::builder()
+    }
+
     struct Server {
         address: SocketAddr,
         stop: Arc<AtomicBool>,
@@ -112,7 +118,7 @@ mod tests {
             .iter()
             .map(|host| host.to_string())
             .collect::<Vec<_>>();
-        let client = reqwest::Client::builder()
+        let client = client_builder()
             // Isolate the test from the machine's own process proxy settings.
             .no_proxy()
             .proxy(
@@ -193,7 +199,7 @@ mod tests {
         let origin = Server::new("direct");
         let proxy = Server::new("proxy");
         let rules = vec![format!("*.github.com:{}", origin.address.port())];
-        let client = reqwest::Client::builder()
+        let client = client_builder()
             .no_proxy()
             .proxy(super::with_bypass(&format!("http://{}", proxy.address), &rules, None).unwrap())
             .resolve("api.github.com", origin.address)
@@ -243,7 +249,7 @@ mod tests {
                 }
                 .to_string(),
             ];
-            let client = reqwest::Client::builder()
+            let client = client_builder()
                 .no_proxy()
                 .proxy(
                     super::with_bypass(&format!("http://{}", proxy.address), &rules, None).unwrap(),

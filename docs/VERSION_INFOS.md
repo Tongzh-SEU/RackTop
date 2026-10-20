@@ -4,7 +4,7 @@
 
 ## 1.26.1 — Windows 自动更新、窗口图标与概览进程列表修复
 
-- 修改时间：2026-10-20 23:29:29 +08:00
+- 修改时间：2026-10-20 23:45:58 +08:00
 - 发布日期：未发布
 - 发布阶段：Bugfix / 待 Windows 验证
 - 桌面平台：macOS、Windows、Linux；窗口状态图标修复仅针对 Windows
@@ -39,6 +39,8 @@
 - 下载与签名验证失败不改变进程约束，错误沿用现有更新弹窗反馈；macOS、Linux 保留官方原有安装入口。
 
 ### 验证记录
+
+- Linux 代理测试补齐与 Tauri 更新器一致的 ring TLS provider 初始化，仅测试依赖和测试代码变化，产品更新逻辑不变。使用与 CI 一致的 reqwest `rustls-no-provider` 特性在独立工程复现 7 项 panic，修复后 7 项本地 HTTP 请求测试全部通过；Linux 原生测试和打包等待 Actions 验证。
 
 - Linux 代理绕过逻辑在 macOS 独立 Rust 测试工程中执行 7 项本地 HTTP 实际请求测试通过，覆盖规则合并、域名边界、通配符、端口、IP/CIDR 和跨域重定向双向切换；Linux 原生 GNOME 设置读取及完整下载安装尚未实机验证。 Linux 目标离线编译因缺少缓存的 `aes v0.8.4` 依赖未完成；当前 macOS 环境未验证 Linux 原生构建。
 
