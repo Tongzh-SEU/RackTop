@@ -10,7 +10,7 @@
     "windows-x86_64": {
       "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.25.5/RackTop_1.25.5_x64-setup.exe",
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaGFpK1NCREY5TGVvVGhyU1pvMnYxZnIzdTFPd3N1SlY0NnFOMjFwSkJCMkJXeVRzREVwMnNYMWthRUdmeGg3S01wL2RhL1Bla3g4Y0toLzR4aFpxMFFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5Mzg4MjM3CWZpbGU6UmFja1RvcF8xLjI1LjVfeDY0LXNldHVwLmV4ZQpZMXY3L09aVHA0dkYyRlhabXBWVVNoKzNLeE5raXE4cWlYbUYvdmgweXdDWW0zWUpiK3laejdxRytKNDdGVkY1ZDg1bFN3ZDh2N1hEUzBCZ05sZmpCQT09Cg=="
-    }
+    },
     "linux-x86_64": {
       "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.0/RackTop_1.26.0_amd64.AppImage",
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaGQwK1hiSHhGMXluMlNtRmJXMGp6NVNLL0ZvQVdCUGR6bFZJb3pRM0pnbnR5KzBOWFVIbTZVNDBFNERVT0ZiNVZwaW1OMzlRdnhCRUFsTHNobnJlTlF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDc1MzEwCWZpbGU6UmFja1RvcF8xLjI2LjBfYW1kNjQuQXBwSW1hZ2UKd0JXWEpEL2RoaVp4aFZsMHR3WVdORFVzclEraDdRZWw2UUdiWnFlaTJXOU9BL3F3cGhSSSt0Z3ZYaG93YzlRaG96UEZydkJYVnZhRWtnWEJGRDArQkE9PQo="
