@@ -11,7 +11,7 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "bundle:macos": "bash scripts/package-macos.sh",
-    "bundle:linux": "tauri build --bundles deb,appimage",
+    "bundle:linux": "python3 scripts/prepare-linux-icon.py && tauri build --bundles deb,appimage",
     "check": "npm run test && npm run build && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {

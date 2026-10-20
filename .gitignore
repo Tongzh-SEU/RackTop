@@ -5,3 +5,4 @@ src-tauri/target/
 output/playwright/
 .DS_Store
 *.log
+src-tauri/icons/linux.png

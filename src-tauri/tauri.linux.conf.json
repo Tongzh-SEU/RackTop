@@ -19,7 +19,7 @@
   },
   "bundle": {
     "targets": ["deb", "appimage"],
-    "icon": ["icons/icon.ico"],
+    "icon": ["icons/linux.png"],
     "linux": {
       "deb": {
         "depends": ["openssh-client", "xterm", "gnome-keyring"]
