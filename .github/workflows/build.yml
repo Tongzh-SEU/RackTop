@@ -40,11 +40,15 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev libdbus-1-dev openssh-client xterm gnome-keyring xvfb
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev libdbus-1-dev openssh-client xterm gnome-keyring xvfb python3-pil
       - run: npm ci
       - run: npm run test
       - name: Read package version
         run: echo "RACKTOP_VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
+      - name: Prepare Linux icon before Rust compilation
+        run: |
+          python3 scripts/prepare-linux-icon.py
+          /usr/bin/python3 scripts/check-linux-icon.py src-tauri/icons/linux.png
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Build signed Linux release packages
         env:
@@ -67,6 +71,7 @@ jobs:
           xvfb-run -a dbus-run-session -- bash scripts/smoke-linux.sh "$APP_PATH"
           mkdir -p "$RUNNER_TEMP/racktop-appimage"
           (cd "$RUNNER_TEMP/racktop-appimage" && "$APPIMAGE_PATH" --appimage-extract)
+          /usr/bin/python3 scripts/check-linux-icon.py "$RUNNER_TEMP/racktop-deb" "$RUNNER_TEMP/racktop-appimage/squashfs-root"
           xvfb-run -a dbus-run-session -- bash scripts/smoke-linux.sh "$RUNNER_TEMP/racktop-appimage/squashfs-root/AppRun"
       - name: Record package checksums
         run: sha256sum src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/appimage/*.AppImage > src-tauri/target/release/bundle/SHA256SUMS

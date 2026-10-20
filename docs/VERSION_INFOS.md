@@ -16,7 +16,7 @@
 
 ### 本版本修改
 
-- Linux 打包从 `src-tauri/icons/icon.ico` 提取最大的透明 PNG 作为 AppImage/DEB 图标，不再直接把 Windows ICO 交给 Linux AppImage 打包器。
+- Linux 打包从 `src-tauri/icons/icon.ico` 提取最大的透明 PNG 作为 AppImage/DEB 图标，不再直接把 Windows ICO 交给 Linux AppImage 打包器。CI 在 Rust 测试前生成图标，并检查生成图标及 DEB/AppImage 解包图标的透明边缘；发现不透明边缘时停止上传。尚待新版安装包 Linux 桌面外观实机确认。
 - Linux updater 增加按 `{{bundle_type}}` 选择清单的入口：AppImage 使用 AppImage 包并在当前文件可写时原地替换；DEB 使用 DEB 包并由 updater 先尝试 `pkexec`，必要时回退到图形密码框或 `sudo`。两种安装格式不能共用同一个下载附件，因此保留通用清单作为 macOS/Windows 回退路径。
 - macOS Actions 改用 xcode-27 runner，并显式选择 Xcode 27，输出实际 Xcode 和 macOS SDK 版本；沿用现有测试、签名及打包流程，最低系统版本保持不变。新版原生窗口按钮外观待 macOS 27 实机验证，runner 当前仍为 GitHub 预览镜像。
 
