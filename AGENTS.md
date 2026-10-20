@@ -419,12 +419,12 @@ RackTop 的 macOS、Windows、Linux 安装包和自动更新附件统一由 `.gi
 启用 Tauri Updater 的版本必须按以下固定顺序发布，避免客户端读取到附件尚未就绪的清单：
 
 1. 确认`main`包含发布提交，npm、Cargo、Tauri 版本一致，updater 公钥正确，GitHub Actions 中 `TAURI_SIGNING_PRIVATE_KEY` 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 已配置；私钥和密码不得写入 Git、日志、Artifact 或 Release。
-2. 构建并验证 macOS DMG、macOS `.app.tar.gz`、Windows NSIS `setup.exe`、Windows MSI、Linux DEB 和 AppImage；记录六个发布文件的 SHA-256，并保留 `.app.tar.gz.sig`、`setup.exe.sig` 和 `.AppImage.sig` 供生成清单。
+2. 构建并验证 macOS DMG、macOS `.app.tar.gz`、Windows NSIS `setup.exe`、Windows MSI、Linux DEB 和 AppImage；记录六个发布文件的 SHA-256，并保留 `.app.tar.gz.sig`、`setup.exe.sig`、`.deb.sig` 和 `.AppImage.sig` 供生成清单。
 3. 创建指向`main`发布提交的 `vX.Y.Z` 标签和 GitHub Release，上传且仅上传用户安装包与 macOS updater 技术附件：DMG、NSIS EXE、MSI、`.app.tar.gz`、DEB、AppImage。不得把 `latest.json` 或任何 `.sig` 作为 Release 附件。
 4. 验证 Release 中六个附件真实可下载，文件名、版本、架构、大小和 SHA-256 与 Actions 产物一致；Release 正文的“下载”模块必须列出全部六个文件，但不得手动列出 SHA-256，校验值以 GitHub Assets 自动显示的 Digest 为准。
-5. 最后创建或更新独立 `updater` 分支根目录的 `latest.json`；没有该文件或没有当前平台条目时，已安装的 RackTop 无法识别和安装新版本。`darwin-aarch64` 指向 Release 的 `.app.tar.gz`，`windows-x86_64` 指向同一 Release 的 NSIS `setup.exe`，`linux-x86_64` 指向同一 Release 的 AppImage，对应 `.sig` 的完整内容内嵌到各平台 `signature` 字段。
-6. 从 GitHub Raw 地址重新读取 `latest.json`，确认 JSON 有效、版本正确、三个平台 URL 可下载且签名字段非空；清单提交与产品 Release 提交相互独立，不得把 updater 分支合并到 `main`。
-7. 使用保留原应用标识和数据目录的上一稳定版 App 实际升级到当前稳定版。macOS、Windows 和 Linux AppImage 分别验证能通过 `latest.json` 发现更新，并完成下载进度、签名校验、安装、重启、版本变化与原有数据保留；Linux DEB 使用新 DEB 升级，首次发布 Linux 时验证初次安装，后续版本再验证升级；未完成的平台必须明确记录。
+5. 最后创建或更新独立 `updater` 分支根目录的 `latest.json`；没有该文件或没有当前平台条目时，已安装的 RackTop 无法识别和安装新版本。`darwin-aarch64` 指向 Release 的 `.app.tar.gz`，`windows-x86_64` 指向同一 Release 的 NSIS `setup.exe`，`linux-x86_64-appimage` 指向同一 Release 的 AppImage，`linux-x86_64-deb` 指向同一 Release 的 DEB，对应 `.sig` 的完整内容内嵌到各平台 `signature` 字段。
+6. 从 GitHub Raw 地址重新读取 `latest.json`，确认 JSON 有效、版本正确、四种更新目标的 URL 可下载且签名字段非空；清单提交与产品 Release 提交相互独立，不得把 updater 分支合并到 `main`。
+7. 使用保留原应用标识和数据目录的上一稳定版 App 实际升级到当前稳定版。macOS、Windows、Linux AppImage 和 Linux DEB 分别验证能通过 `latest.json` 发现更新，并完成下载进度、签名校验、安装、重启、版本变化与原有数据保留；Linux DEB 安装需要系统授权，必须使用 DEB 更新包，不能以 AppImage 覆盖；未完成的平台必须明确记录。
 
 `updater` 分支的 `latest.json` 必须使用以下结构；`signature` 直接写入对应 `.sig` 文件的完整内容，不填写 `.sig` 下载地址：
 
@@ -442,15 +442,19 @@ RackTop 的 macOS、Windows、Linux 安装包和自动更新附件统一由 `.gi
       "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/vX.Y.Z/RackTop_X.Y.Z_x64-setup.exe",
       "signature": "<RackTop_X.Y.Z_x64-setup.exe.sig 的完整内容>"
     },
-    "linux-x86_64": {
+    "linux-x86_64-appimage": {
       "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/vX.Y.Z/RackTop_X.Y.Z_amd64.AppImage",
       "signature": "<RackTop_X.Y.Z_amd64.AppImage.sig 的完整内容>"
+    },
+    "linux-x86_64-deb": {
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/vX.Y.Z/RackTop_X.Y.Z_amd64.deb",
+      "signature": "<RackTop_X.Y.Z_amd64.deb.sig 的完整内容>"
     }
   }
 }
 ```
 
-`latest.json` 的 `version` 必须高于客户端当前版本；平台键必须与 Tauri Updater 使用的 `darwin-aarch64`、`windows-x86_64` 和 `linux-x86_64` 完全一致。Release 附件尚未全部上传并验证可下载前，不得提前更新该文件。
+`latest.json` 的 `version` 必须高于客户端当前版本；平台键必须与 Tauri Updater 使用的 `darwin-aarch64`、`windows-x86_64`、`linux-x86_64-appimage` 和 `linux-x86_64-deb` 完全一致。`linux-x86_64` 仅可作为旧 AppImage 客户端的兼容条目，不得指向 DEB。Release 附件尚未全部上传并验证可下载前，不得提前更新该文件。
 
 自动更新正式 Release 的附件固定为：
 
