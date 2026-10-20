@@ -19,6 +19,7 @@
   },
   "bundle": {
     "targets": ["deb", "appimage"],
+    "icon": ["icons/icon.ico"],
     "linux": {
       "deb": {
         "depends": ["openssh-client", "xterm", "gnome-keyring"]

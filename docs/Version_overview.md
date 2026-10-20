@@ -4,6 +4,8 @@
 
 ## 1.26.1
 
+- Linux 打包复用现有 Windows `icon.ico`，避免应用图标出现白色方形背景。
+- Linux 自动更新按 DEB 和 AppImage 安装格式分别读取更新清单；DEB 安装时通过系统授权安装，AppImage 直接替换可写的应用文件。
 - 更新 macOS 构建工具链至 Xcode 27 和 macOS 27 SDK。
 
 - 修复用户占用显示为零时仍出现指针和标签的问题。

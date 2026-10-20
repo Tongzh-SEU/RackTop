@@ -31,6 +31,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
+        "https://raw.githubusercontent.com/Tongzh-SEU/RackTop/updater/latest-{{bundle_type}}.json",
         "https://raw.githubusercontent.com/Tongzh-SEU/RackTop/updater/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg1NkFGREM4Q0QyN0U2RkYKUldULzVpZk55UDFxaFNWL0VQL1dXNUNtRHJyam5jUDdYSFZJZU5rZnpiMWtEYUpKNGI0YjE4b0IK",
