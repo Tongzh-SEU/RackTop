@@ -369,6 +369,102 @@ fn parse_usage_line(line: &str) -> Result<UsagePoint, String> {
 mod tests {
     use super::*;
 
+    // Execute the shipped collector, including its history/usage pipeline, in an
+    // isolated home with synthetic procfs and accelerator commands. No SSH/GPU.
+    #[cfg(unix)]
+    fn collect_fixture_history(gpus: &str, meminfo: &str) -> HistoryPoint {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        let proc = root.join("proc");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&proc).unwrap();
+        std::fs::write(proc.join("stat"), "cpu 100 0 20 880 0 0 0\n").unwrap();
+        std::fs::write(proc.join("meminfo"), meminfo).unwrap();
+        let gpu_file = root.join("gpus.csv");
+        std::fs::write(&gpu_file, gpus).unwrap();
+        for (name, body) in [
+            ("flock", "exit 0"),
+            ("sleep", "exit 0"),
+            ("npu-smi", "exit 1"),
+            ("nvidia-smi", "case \"$*\" in *--query-gpu=*) cat \"$RACKTOP_TEST_GPUS\" ;; esac"),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let script = REMOTE_COLLECTOR_SCRIPT.replace("/proc/", &format!("{}/", proc.display()));
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", root)
+            .env("RACKTOP_COLLECTOR_BOUNDED", "1")
+            .env("RACKTOP_TEST_GPUS", gpu_file)
+            .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
+        let history = std::fs::read_to_string(root.join(".racktop/.history-v1.tsv")).unwrap();
+        let points = parse_history(&history).unwrap();
+        assert_eq!(points.len(), 1);
+        points.into_iter().next().unwrap()
+    }
+
+    #[cfg(unix)]
+    const SHARED_MEMINFO: &str = "MemTotal: 125829120 kB\nMemAvailable: 41943040 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n";
+
+    #[cfg(unix)]
+    #[test]
+    fn collector_records_gb10_shared_memory_and_utilization() {
+        for name in ["NVIDIA GB10", "DGX Spark", "nvidia gb10"] {
+            let point = collect_fixture_history(
+                &format!("GPU-test, 25, [N/A], [N/A], {name}\n"),
+                SHARED_MEMINFO,
+            );
+            assert_eq!(point.gpu_utilizations["GPU-test"], 25.0);
+            assert_eq!(point.gpu_memory_utilizations["GPU-test"], 66.67);
+            assert_eq!(point.gpu_memory_utilizations["GPU-test"], point.memory_utilization);
+            assert!(!point.gpu_other_user_occupancies["GPU-test"]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collector_keeps_mixed_gpu_history_when_one_memory_query_is_na() {
+        let point = collect_fixture_history(
+            "GPU-shared, 25, [N/A], [N/A], NVIDIA GB10\nGPU-discrete, 80, 10240, 40960, NVIDIA A100\nGPU-unknown, 15, [N/A], [N/A], NVIDIA Future GPU\nGPU-gb100, 10, [N/A], [N/A], NVIDIA GB100\n",
+            SHARED_MEMINFO,
+        );
+        assert_eq!(point.gpu_utilizations.len(), 4);
+        assert_eq!(point.gpu_memory_utilizations["GPU-shared"], 66.67);
+        assert_eq!(point.gpu_memory_utilizations["GPU-discrete"], 25.0);
+        for uuid in ["GPU-unknown", "GPU-gb100"] {
+            assert_eq!(point.gpu_memory_utilizations[uuid], 0.0);
+            assert!(point.gpu_utilizations[uuid] > 0.0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collector_requires_host_available_memory_and_preserves_numeric_gpu_memory() {
+        let missing = collect_fixture_history(
+            "GPU-test, 25, [N/A], [N/A], NVIDIA GB10\n",
+            "MemTotal: 125829120 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+        );
+        assert_eq!(missing.gpu_memory_utilizations["GPU-test"], 0.0);
+        assert_eq!(missing.gpu_utilizations["GPU-test"], 25.0);
+        let full = collect_fixture_history(
+            "GPU-test, 0, [N/A], [N/A], NVIDIA GB10\n",
+            "MemTotal: 125829120 kB\nMemAvailable: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+        );
+        assert_eq!(full.gpu_memory_utilizations["GPU-test"], 100.0);
+        let numeric = collect_fixture_history("GPU-test, 25, 10240, 40960, NVIDIA GB10\n", SHARED_MEMINFO);
+        assert_eq!(numeric.gpu_memory_utilizations["GPU-test"], 25.0);
+    }
+
     #[test]
     fn parses_remote_history_with_multiple_gpus() {
         let points =

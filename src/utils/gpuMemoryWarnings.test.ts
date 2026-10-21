@@ -56,4 +56,32 @@ describe('deriveGpuMemoryStallWarnings', () => {
     expect(result.warnings).toEqual([])
     expect(result.since).toEqual({})
   })
+
+  it.each(['NVIDIA GB10', 'DGX Spark', 'nvidia gb10'])('does not treat %s shared DRAM as stalled GPU memory and clears old timers', (name) => {
+    const current = snapshot(1000 + GPU_MEMORY_STALL_SECONDS, 0, 3072)
+    current.gpus[0].name = name
+    current.gpus[0].memoryTotalMb = 124544
+    current.processes = []
+    const result = deriveGpuMemoryStallWarnings([server], { s1: current }, { 'gpu-memory-stall:s1:gpu-0': 1000 }, new Set(), current.timestamp)
+    expect(result.warnings).toEqual([])
+    expect(result.since).toEqual({})
+  })
+
+  it('does not use the GB10 shared pool as evidence even with a cached or defunct process', () => {
+    const current = snapshot(1000 + GPU_MEMORY_STALL_SECONDS, 0, 3072)
+    current.gpus[0].name = 'NVIDIA GB10'
+    current.processes[0].command = '[python] <defunct>'
+    current.processesSampled = false
+    const result = deriveGpuMemoryStallWarnings([server], { s1: current }, { 'gpu-memory-stall:s1:gpu-0': 1000 }, new Set(), current.timestamp)
+    expect(result.warnings).toEqual([])
+    expect(result.since).toEqual({})
+  })
+
+  it('preserves unattributed-memory warnings on GPUs whose names merely contain GB10', () => {
+    const current = snapshot(1000 + GPU_MEMORY_STALL_SECONDS, 0, 3072)
+    current.gpus[0].name = 'NVIDIA GB100'
+    current.processes = []
+    const result = deriveGpuMemoryStallWarnings([server], { s1: current }, { 'gpu-memory-stall:s1:gpu-0': 1000 }, new Set(), current.timestamp)
+    expect(result.warnings).toHaveLength(1)
+  })
 })

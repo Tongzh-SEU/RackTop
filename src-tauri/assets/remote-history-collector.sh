@@ -44,7 +44,7 @@ query_history_gpus() {
     [ "$racktop_npu_status" -eq 0 ] || return 1
     racktop_npu_metrics | awk -F, '$3 !~ /unavailable-/ { printf "%s,%s,%s,%s\n", $3,$4,$6,$7 }'
   else
-    nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null
+    nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used,memory.total,name --format=csv,noheader,nounits 2>/dev/null
   fi
 }
 query_history_processes() {
@@ -62,12 +62,28 @@ if [ "$racktop_accelerator" = ascend ] || command -v nvidia-smi >/dev/null 2>&1;
   : > "$gpu_sample"
   printf '__none__|0\n' > "$occupancy_sample"
   query_history_gpus | awk -F, '
+    FILENAME != "-" {
+      split($0, fields, /[[:space:]]+/)
+      if (fields[1] == "MemTotal:") host_total = fields[2] + 0
+      if (fields[1] == "MemAvailable:") { host_available = fields[2] + 0; has_available = 1 }
+      next
+    }
     {
       for (i=1; i<=NF; i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i) }
-      memory = $4 > 0 ? $3 / $4 * 100 : 0
-      printf "%s|%.2f|%.2f|%.2f\n", $1, $2 + 0, memory, $4 + 0
+      used = $3 + 0
+      total = $4 + 0
+      name = tolower($5)
+      unified = (name ~ /(^|[^a-z0-9])gb10([^a-z0-9]|$)/ || name ~ /(^|[^a-z0-9])dgx[[:space:]]+spark([^a-z0-9]|$)/)
+      # GB10 reports N/A for framebuffer memory; CPU and GPU share host DRAM.
+      if (unified && (total <= 0 || $3 !~ /^[0-9]+([.][0-9]+)?$/) && host_total > 0 && has_available) {
+        available = host_available < 0 ? 0 : (host_available > host_total ? host_total : host_available)
+        total = host_total / 1024
+        used = (host_total - available) / 1024
+      }
+      memory = total > 0 ? used / total * 100 : 0
+      printf "%s|%.2f|%.2f|%.2f\n", $1, $2 + 0, memory, total
     }
-  ' > "$gpu_sample" || true
+  ' /proc/meminfo - > "$gpu_sample" || true
   current_user="$(id -un 2>/dev/null || printf '')"
   query_history_processes | while IFS=, read -r gpu_uuid pid memory_mb; do
     gpu_uuid="$(printf '%s' "$gpu_uuid" | tr -d '[:space:]')"
