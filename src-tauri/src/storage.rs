@@ -2245,9 +2245,14 @@ impl Database {
         {
             let mut statement = transaction.prepare(
                 "INSERT INTO snapshots(server_id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,gpu_other_user_occupancy_json,payload_json)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'{}') ON CONFLICT(server_id,timestamp) DO NOTHING"
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(server_id,timestamp) DO NOTHING"
             ).map_err(|error| error.to_string())?;
             for point in points.iter().filter(|point| point.timestamp >= cutoff) {
+                let payload = serde_json::json!({
+                    "gpuTemperatures": &point.gpu_temperatures_celsius,
+                    "gpuPower": &point.gpu_power_watts,
+                    "gpuFan": &point.gpu_fan_speeds_percent,
+                });
                 let inserted = statement
                     .execute(params![
                         server_id,
@@ -2261,6 +2266,7 @@ impl Database {
                             .map_err(|error| error.to_string())?,
                         serde_json::to_string(&point.gpu_other_user_occupancies)
                             .map_err(|error| error.to_string())?,
+                        serde_json::to_string(&payload).map_err(|error| error.to_string())?,
                     ])
                     .map_err(|error| error.to_string())?;
                 imported += inserted;
@@ -4453,9 +4459,9 @@ mod tests {
             swap_utilization: 3.0,
             gpu_utilizations: HashMap::from([("GPU-a".into(), 80.0)]),
             gpu_memory_utilizations: HashMap::from([("GPU-a".into(), 50.0)]),
-            gpu_temperatures_celsius: HashMap::new(),
-            gpu_power_watts: HashMap::new(),
-            gpu_fan_speeds_percent: HashMap::new(),
+            gpu_temperatures_celsius: HashMap::from([("GPU-a".into(), 58.0)]),
+            gpu_power_watts: HashMap::from([("GPU-a".into(), 155.5)]),
+            gpu_fan_speeds_percent: HashMap::from([("GPU-a".into(), Some(42.0))]),
             gpu_other_user_occupancies: HashMap::from([("GPU-a".into(), false)]),
             cpu_min: 12.5,
             cpu_max: 12.5,
@@ -4479,7 +4485,11 @@ mod tests {
                 .unwrap(),
             0
         );
-        assert_eq!(db.get_history(&server.id, 0).unwrap().len(), 1);
+        let history = db.get_history(&server.id, 0).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].gpu_temperatures_celsius.get("GPU-a"), Some(&58.0));
+        assert_eq!(history[0].gpu_power_watts.get("GPU-a"), Some(&155.5));
+        assert_eq!(history[0].gpu_fan_speeds_percent.get("GPU-a"), Some(&Some(42.0)));
         let heatmap = db
             .get_history_heatmap(&server.id, 0, 0, &["GPU-a".into()])
             .unwrap();
@@ -4508,6 +4518,48 @@ mod tests {
         assert_eq!(db.import_remote_data(&server.id, std::slice::from_ref(&newer), std::slice::from_ref(&usage), newer.timestamp + 3600).unwrap(), 2);
         assert_eq!(db.import_remote_data(&server.id, &[newer.clone()], &[usage], newer.timestamp + 3600).unwrap(), 0);
         assert_eq!(db.get_server(&server.id).unwrap().remote_history_last_sync_at, Some(newer.timestamp));
+    }
+
+    #[test]
+    fn keeps_remote_gpu_telemetry_when_old_samples_are_compacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let server = db.save_server(ServerDraft {
+            remote_history_enabled: true,
+            ..draft("Remote telemetry", 30)
+        }).unwrap();
+        let old = HistoryPoint {
+            telemetry_ranges: GpuTelemetryRanges::default(),
+            timestamp: 1_722_700_800,
+            is_compacted: false,
+            cpu_utilization: 12.5,
+            memory_utilization: 40.0,
+            swap_utilization: 3.0,
+            gpu_utilizations: HashMap::from([("GPU-a".into(), 80.0)]),
+            gpu_memory_utilizations: HashMap::from([("GPU-a".into(), 50.0)]),
+            gpu_temperatures_celsius: HashMap::from([("GPU-a".into(), 58.0)]),
+            gpu_power_watts: HashMap::from([("GPU-a".into(), 155.5)]),
+            gpu_fan_speeds_percent: HashMap::from([("GPU-a".into(), Some(42.0))]),
+            gpu_other_user_occupancies: HashMap::from([("GPU-a".into(), false)]),
+            cpu_min: 12.5,
+            cpu_max: 12.5,
+            memory_min: 40.0,
+            memory_max: 40.0,
+            swap_min: 3.0,
+            swap_max: 3.0,
+            gpu_mins: HashMap::from([("GPU-a".into(), 80.0)]),
+            gpu_maxes: HashMap::from([("GPU-a".into(), 80.0)]),
+            gpu_memory_mins: HashMap::from([("GPU-a".into(), 50.0)]),
+            gpu_memory_maxes: HashMap::from([("GPU-a".into(), 50.0)]),
+        };
+        let latest = HistoryPoint { timestamp: old.timestamp + 4 * 3600, ..old.clone() };
+
+        assert_eq!(db.import_remote_history(&server.id, &[old, latest]).unwrap(), 2);
+        let history = db.get_history(&server.id, 0).unwrap();
+        let compacted = history.iter().find(|point| point.is_compacted).unwrap();
+        assert_eq!(compacted.gpu_temperatures_celsius.get("GPU-a"), Some(&58.0));
+        assert_eq!(compacted.gpu_power_watts.get("GPU-a"), Some(&155.5));
+        assert_eq!(compacted.gpu_fan_speeds_percent.get("GPU-a"), Some(&Some(42.0)));
     }
 
     #[test]

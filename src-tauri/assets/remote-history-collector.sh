@@ -47,6 +47,25 @@ query_history_gpus() {
     nvidia-smi --query-gpu=uuid,utilization.gpu,memory.used,memory.total,name --format=csv,noheader,nounits 2>/dev/null
   fi
 }
+query_history_telemetry() {
+  if [ "$racktop_accelerator" = ascend ]; then
+    [ "$racktop_npu_status" -eq 0 ] || return 1
+    racktop_npu_metrics | awk -F, '$3 !~ /unavailable-/ { printf "%s|%s|%s|\n", $3,$8,$9 }'
+  else
+    nvidia-smi --query-gpu=uuid,temperature.gpu,power.draw,fan.speed --format=csv,noheader,nounits 2>/dev/null | awk -F, '
+      function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value }
+      function number(value) { return value ~ /^-?[0-9]+([.][0-9]+)?$/ }
+      {
+        uuid=trim($1); temperature=trim($2); power=trim($3); fan=trim($4)
+        if (uuid == "") next
+        if (!number(temperature)) temperature=""
+        if (!number(power)) power=""
+        if (!number(fan) || fan + 0 < 0 || fan + 0 > 100) fan=""
+        printf "%s|%s|%s|%s\n", uuid,temperature,power,fan
+      }
+    '
+  fi
+}
 query_history_processes() {
   if [ "$racktop_accelerator" = ascend ]; then
     [ "$racktop_npu_status" -eq 0 ] || return 1
@@ -58,8 +77,10 @@ query_history_processes() {
 gpu_values=""
 if [ "$racktop_accelerator" = ascend ] || command -v nvidia-smi >/dev/null 2>&1; then
   gpu_sample="$state_dir/.gpu-history-sample.$$"
+  telemetry_sample="$state_dir/.gpu-telemetry-sample.$$"
   occupancy_sample="$state_dir/.gpu-occupancy-sample.$$"
   : > "$gpu_sample"
+  : > "$telemetry_sample"
   printf '__none__|0\n' > "$occupancy_sample"
   query_history_gpus | awk -F, '
     FILENAME != "-" {
@@ -84,6 +105,7 @@ if [ "$racktop_accelerator" = ascend ] || command -v nvidia-smi >/dev/null 2>&1;
       printf "%s|%.2f|%.2f|%.2f\n", $1, $2 + 0, memory, total
     }
   ' /proc/meminfo - > "$gpu_sample" || true
+  query_history_telemetry >> "$telemetry_sample" || true
   current_user="$(id -un 2>/dev/null || printf '')"
   query_history_processes | while IFS=, read -r gpu_uuid pid memory_mb; do
     gpu_uuid="$(printf '%s' "$gpu_uuid" | tr -d '[:space:]')"
@@ -99,17 +121,18 @@ if [ "$racktop_accelerator" = ascend ] || command -v nvidia-smi >/dev/null 2>&1;
     printf '%s|%s\n' "$gpu_uuid" "${memory_mb:-0}" >> "$occupancy_sample"
   done
   gpu_values="$(awk -F '|' '
-    NR == FNR { occupied_memory[$1] += $2; next }
+    FILENAME == ARGV[1] { occupied_memory[$1] += $2; next }
+    FILENAME == ARGV[2] { temperature[$1]=$2; power[$1]=$3; fan[$1]=$4; next }
     {
       if (count++ > 0) printf ";"
       occupied = ($4 > 0 && occupied_memory[$1] / $4 * 100 > 3) ? 1 : 0
-      printf "%s,%.2f,%.2f,%d", $1, $2, $3, occupied
+      printf "%s,%.2f,%.2f,%d,%s,%s,%s", $1, $2, $3, occupied, temperature[$1], power[$1], fan[$1]
     }
-  ' "$occupancy_sample" "$gpu_sample")"
-  rm -f "$gpu_sample" "$occupancy_sample"
+  ' "$occupancy_sample" "$telemetry_sample" "$gpu_sample")"
+  rm -f "$gpu_sample" "$telemetry_sample" "$occupancy_sample"
 fi
 
-printf 'v2|%s|%s|%s|%s|%s\n' "$bucket" "$cpu_percent" "$memory_percent" "$swap_percent" "$gpu_values" >> "$history_file"
+printf 'v3|%s|%s|%s|%s|%s\n' "$bucket" "$cpu_percent" "$memory_percent" "$swap_percent" "$gpu_values" >> "$history_file"
 
 if [ "$racktop_accelerator" = ascend ] || command -v nvidia-smi >/dev/null 2>&1; then
   usage_tmp="$state_dir/.usage-sample.$$"
@@ -136,7 +159,7 @@ if [ "$racktop_accelerator" = ascend ] || command -v nvidia-smi >/dev/null 2>&1;
 fi
 cutoff=$((now - 2592000))
 temporary="$history_file.tmp.$$"
-awk -F '|' -v cutoff="$cutoff" '($1 == "v1" || $1 == "v2") && $2 >= cutoff' "$history_file" > "$temporary"
+awk -F '|' -v cutoff="$cutoff" '($1 == "v1" || $1 == "v2" || $1 == "v3") && $2 >= cutoff' "$history_file" > "$temporary"
 mv "$temporary" "$history_file"
 if [ -r "$usage_file" ]; then
   compact_before=$((now - 7200))
