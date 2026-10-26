@@ -5,26 +5,78 @@ use crate::{
     models::{HistoryPoint, Server, UsagePoint},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use sha2::{Digest, Sha256};
 use std::process::Stdio;
 use tokio::time::{Duration, timeout};
 
-const REMOTE_DIRECTORY: &str = "$HOME/.racktop";
 const REMOTE_COLLECTOR_SCRIPT: &str = concat!(include_str!("../assets/ascend-collector.sh"), include_str!("../assets/remote-history-collector.sh"));
 const REMOTE_DAEMON_SCRIPT: &str = include_str!("../assets/remote-history-daemon.sh");
 const REMOTE_USAGE_SCRIPT: &str = include_str!("../assets/remote-history-usage.sh");
 const REMOTE_REMOVE_SCRIPT: &str = r#"set -eu
-state=$HOME/.racktop
+state="${RACKTOP_STATE_DIR:?}"
 if [ -r "$state/.daemon.pid" ]; then
   pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "$state/.daemon.sh" >/dev/null 2>&1; then
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "sh $state/.daemon.sh" >/dev/null 2>&1; then
     kill "$pid" 2>/dev/null || true
     sleep 1
-    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    if kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "sh $state/.daemon.sh" >/dev/null 2>&1; then kill -KILL "$pid" 2>/dev/null || true; fi
   fi
 fi
 rm -rf -- "$state"
 printf '__RACKTOP_REMOTE_HISTORY_REMOVED__\n'
 "#;
+
+pub(crate) fn remote_state_directory(server: &Server) -> String {
+    remote_state_directory_for_endpoint(&server.host, server.port)
+}
+
+fn remote_state_directory_for_endpoint(host: &str, port: u16) -> String {
+    let normalized_host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let digest = Sha256::digest(format!("{normalized_host}:{port}").as_bytes());
+    let host_slug: String = normalized_host
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .take(48)
+        .collect();
+    format!("$HOME/.racktop/remote-history/{host_slug}-{port}-{digest:x}")
+}
+
+fn stop_verified_daemon(state_dir: &str) -> String {
+    format!(r#"state="{state_dir}"
+if [ -r "$state/.daemon.pid" ]; then
+  pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "sh $state/.daemon.sh" >/dev/null 2>&1; then
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "sh $state/.daemon.sh" >/dev/null 2>&1; then kill -KILL "$pid" 2>/dev/null || true; fi
+  fi
+fi
+"#)
+}
+
+fn stop_legacy_shared_daemon() -> &'static str {
+    r#"legacy="$HOME/.racktop"
+if [ -r "$legacy/.daemon.pid" ]; then
+  legacy_pid="$(cat "$legacy/.daemon.pid" 2>/dev/null || true)"
+  if [ -n "$legacy_pid" ] && kill -0 "$legacy_pid" 2>/dev/null && ps -p "$legacy_pid" -o args= 2>/dev/null | grep -F "sh $legacy/.daemon.sh" >/dev/null 2>&1; then
+    kill "$legacy_pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$legacy_pid" 2>/dev/null && ps -p "$legacy_pid" -o args= 2>/dev/null | grep -F "sh $legacy/.daemon.sh" >/dev/null 2>&1; then kill -KILL "$legacy_pid" 2>/dev/null || true; fi
+  fi
+fi
+"#
+}
 
 pub async fn configure(server: &Server, password: Option<&str>) -> Result<(), String> {
     if server.remote_history_enabled {
@@ -39,7 +91,7 @@ pub async fn remove(
     password: Option<&str>,
     managed_public_key: Option<&str>,
 ) -> Result<(), String> {
-    let script = build_remove_script(managed_public_key)?;
+    let script = build_remove_script(&remote_state_directory(server), managed_public_key)?;
     let output =
         run_remote_cleanup_command(server, password, &script, Duration::from_secs(8)).await?;
     if !output
@@ -58,9 +110,10 @@ pub async fn remove(
     Ok(())
 }
 
-fn build_remove_script(managed_public_key: Option<&str>) -> Result<String, String> {
+fn build_remove_script(state_dir: &str, managed_public_key: Option<&str>) -> Result<String, String> {
+    let scoped_script = format!("RACKTOP_STATE_DIR=\"{state_dir}\"; {REMOTE_REMOVE_SCRIPT}");
     let Some(public_key) = managed_public_key else {
-        return Ok(REMOTE_REMOVE_SCRIPT.to_string());
+        return Ok(scoped_script);
     };
     let key_blob = public_key
         .split_whitespace()
@@ -76,7 +129,7 @@ fn build_remove_script(managed_public_key: Option<&str>) -> Result<String, Strin
         .decode(key_blob)
         .map_err(|_| "RackTop 专用公钥格式无效，无法撤销免密登录".to_string())?;
     Ok(format!(
-        r#"{REMOTE_REMOVE_SCRIPT}
+        r#"RACKTOP_STATE_DIR="{state_dir}"; {REMOTE_REMOVE_SCRIPT}
 authorized_keys="$HOME/.ssh/authorized_keys"
 if [ -f "$authorized_keys" ]; then
   key_blob='{key_blob}'
@@ -99,8 +152,9 @@ pub async fn fetch(
         return Ok(Vec::new());
     }
     let since = since_timestamp.max(0);
+    let state_dir = remote_state_directory(server);
     let script = format!(
-        "history={REMOTE_DIRECTORY}/.history-v1.tsv; if [ -r \"$history\" ]; then awk -F '|' -v since={since} '($1 == \"v1\" || $1 == \"v2\" || $1 == \"v3\") && $2 >= since' \"$history\"; fi"
+        "history=\"{state_dir}/.history-v1.tsv\"; if [ -r \"$history\" ]; then awk -F '|' -v since={since} '($1 == \"v1\" || $1 == \"v2\" || $1 == \"v3\") && $2 >= since' \"$history\"; fi"
     );
     let output = run_remote_command(server, password, &script, Duration::from_secs(20)).await?;
     parse_history(&output)
@@ -115,7 +169,8 @@ pub async fn fetch_usage(
         return Ok(Vec::new());
     }
     let since = since_timestamp.max(0);
-    let script = format!("set -- {since}\n{}", REMOTE_USAGE_SCRIPT.replace("\r\n", "\n"));
+    let state_dir = remote_state_directory(server);
+    let script = format!("RACKTOP_STATE_DIR=\"{state_dir}\"; set -- {since}\n{}", REMOTE_USAGE_SCRIPT.replace("\r\n", "\n"));
     let output = run_remote_command(server, password, &script, Duration::from_secs(20)).await?;
     Ok(output
         .lines()
@@ -129,16 +184,19 @@ async fn install(server: &Server, password: Option<&str>) -> Result<(), String> 
     // sending them to Linux, where a trailing CR changes `set -e` into an invalid option.
     let collector_script = REMOTE_COLLECTOR_SCRIPT.replace("\r\n", "\n");
     let daemon_script = REMOTE_DAEMON_SCRIPT.replace("\r\n", "\n");
+    let state_dir = remote_state_directory(server);
     let encoded = STANDARD.encode(collector_script);
     let daemon_encoded = STANDARD.encode(daemon_script);
     let script = format!(
         r#"set -e
 set -u
-state={REMOTE_DIRECTORY}
+state="{state_dir}"
 command -v flock >/dev/null 2>&1 || {{ printf '远端历史需要 util-linux 的 flock 命令' >&2; exit 1; }}
 command -v timeout >/dev/null 2>&1 || {{ printf '远端历史需要 timeout 命令' >&2; exit 1; }}
+{}
 mkdir -p "$state"
 chmod 700 "$state"
+export RACKTOP_STATE_DIR="$state"
 printf '%s' '{encoded}' | base64 -d > "$state/.collector.sh"
 printf '%s' '{daemon_encoded}' | base64 -d > "$state/.daemon.sh"
 chmod 700 "$state/.collector.sh" "$state/.daemon.sh"
@@ -146,7 +204,7 @@ touch "$state/.client-heartbeat"
 running=0
 if [ -r "$state/.daemon.pid" ]; then
   pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "$state/.daemon.sh" >/dev/null 2>&1; then running=1; fi
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "sh $state/.daemon.sh" >/dev/null 2>&1; then running=1; fi
 fi
 if [ "$running" -ne 1 ]; then
   rm -f "$state/.daemon.pid"
@@ -169,7 +227,8 @@ if [ "$running" -ne 1 ]; then
   fi
 fi
 printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
-"#
+"#,
+        stop_legacy_shared_daemon()
     );
     let output = run_remote_command(server, password, &script, Duration::from_secs(25)).await?;
     if output
@@ -183,17 +242,12 @@ printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
 }
 
 async fn disable(server: &Server, password: Option<&str>) -> Result<(), String> {
-    let script = r#"state=$HOME/.racktop
-if [ -r "$state/.daemon.pid" ]; then
-  pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "$state/.daemon.sh" >/dev/null 2>&1; then
-    kill "$pid" 2>/dev/null || true
-  fi
-  rm -f "$state/.daemon.pid"
-fi
-printf '__RACKTOP_REMOTE_HISTORY_DISABLED__\n'
-"#;
-    let output = run_remote_command(server, password, script, Duration::from_secs(15)).await?;
+    let state_dir = remote_state_directory(server);
+    let script = format!(
+        "{}rm -f \"$state/.daemon.pid\"\nprintf '__RACKTOP_REMOTE_HISTORY_DISABLED__\\n'\n",
+        stop_verified_daemon(&state_dir),
+    );
+    let output = run_remote_command(server, password, &script, Duration::from_secs(15)).await?;
     if output
         .lines()
         .any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_DISABLED__")
@@ -530,6 +584,19 @@ mod tests {
         assert!(!points[2].gpu_fan_speeds_percent.contains_key("GPU-b"));
     }
 
+    #[test]
+    fn remote_state_directory_is_stable_and_unique_per_endpoint() {
+        let first = remote_state_directory_for_endpoint("GPU.EXAMPLE.", 22);
+        let normalized = remote_state_directory_for_endpoint("gpu.example", 22);
+        let different_port = remote_state_directory_for_endpoint("gpu.example", 2222);
+        let different_host = remote_state_directory_for_endpoint("gpu2.example", 22);
+
+        assert_eq!(first, normalized);
+        assert_ne!(first, different_port);
+        assert_ne!(first, different_host);
+        assert!(first.starts_with("$HOME/.racktop/remote-history/"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn daemon_collects_gpu_telemetry_after_client_heartbeat_expires() {
@@ -541,10 +608,15 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        let state = root.join(".racktop");
+        let state = root.join(".racktop/remote-history/endpoint-a");
+        let other_state = root.join(".racktop/remote-history/endpoint-b");
         let bin = root.join("bin");
         let proc = root.join("proc");
         std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&other_state).unwrap();
+        std::fs::write(other_state.join(".history-v1.tsv"), "other-endpoint-history\n").unwrap();
+        std::fs::create_dir_all(root.join(".racktop")).unwrap();
+        std::fs::write(root.join(".racktop/.history-v1.tsv"), "legacy-shared-history\n").unwrap();
         std::fs::create_dir(&bin).unwrap();
         std::fs::create_dir(&proc).unwrap();
         std::fs::write(proc.join("stat"), "cpu 100 0 20 880 0 0 0\n").unwrap();
@@ -576,6 +648,7 @@ mod tests {
         let mut daemon = std::process::Command::new("sh")
             .arg(state.join(".daemon.sh"))
             .env("HOME", root)
+            .env("RACKTOP_STATE_DIR", &state)
             .env("RACKTOP_COLLECTOR_BOUNDED", "1")
             .env("RACKTOP_TEST_GPUS", root.join("gpus.csv"))
             .env("RACKTOP_TEST_TELEMETRY", root.join("telemetry.csv"))
@@ -603,6 +676,15 @@ mod tests {
         assert_eq!(point.gpu_temperatures_celsius["GPU-daemon"], 56.0);
         assert_eq!(point.gpu_power_watts["GPU-daemon"], 145.7);
         assert_eq!(point.gpu_fan_speeds_percent["GPU-daemon"], Some(42.0));
+        assert_eq!(
+            std::fs::read_to_string(other_state.join(".history-v1.tsv")).unwrap(),
+            "other-endpoint-history\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(".racktop/.history-v1.tsv")).unwrap(),
+            "legacy-shared-history\n"
+        );
+        assert!(history_path.exists());
     }
 
     #[test]
@@ -682,11 +764,36 @@ mod tests {
 
     #[test]
     fn remote_cleanup_script_targets_only_racktop_state() {
-        assert!(REMOTE_REMOVE_SCRIPT.contains("state=$HOME/.racktop"));
-        assert!(REMOTE_REMOVE_SCRIPT.contains("grep -F \"$state/.daemon.sh\""));
+        assert!(REMOTE_REMOVE_SCRIPT.contains("state=\"${RACKTOP_STATE_DIR:?}\""));
+        assert!(REMOTE_REMOVE_SCRIPT.contains("grep -F \"sh $state/.daemon.sh\""));
         assert!(REMOTE_REMOVE_SCRIPT.contains("kill -KILL \"$pid\""));
         assert!(REMOTE_REMOVE_SCRIPT.contains("rm -rf -- \"$state\""));
         assert!(!REMOTE_REMOVE_SCRIPT.contains("rm -rf -- $HOME"));
+    }
+
+    #[test]
+    fn removing_one_server_preserves_legacy_and_other_endpoint_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = directory.path().join(".racktop");
+        let first = legacy.join("remote-history/endpoint-a");
+        let second = legacy.join("remote-history/endpoint-b");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(legacy.join(".history-v1.tsv"), "legacy\n").unwrap();
+        std::fs::write(first.join(".history-v1.tsv"), "first\n").unwrap();
+        std::fs::write(second.join(".history-v1.tsv"), "second\n").unwrap();
+
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(build_remove_script("$HOME/.racktop/remote-history/endpoint-a", None).unwrap())
+            .env("HOME", directory.path())
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(!first.exists());
+        assert_eq!(std::fs::read_to_string(legacy.join(".history-v1.tsv")).unwrap(), "legacy\n");
+        assert_eq!(std::fs::read_to_string(second.join(".history-v1.tsv")).unwrap(), "second\n");
     }
 
     #[test]
@@ -703,9 +810,10 @@ mod tests {
         );
         std::fs::write(&authorized_keys, original).unwrap();
 
-        let script = build_remove_script(Some(&format!(
-            "ssh-ed25519 {matching_blob} ignored-comment"
-        )))
+        let script = build_remove_script(
+            "$HOME/.racktop/remote-history/test-endpoint",
+            Some(&format!("ssh-ed25519 {matching_blob} ignored-comment")),
+        )
         .unwrap();
         let output = std::process::Command::new("sh")
             .arg("-c")
@@ -733,7 +841,11 @@ mod tests {
 
     #[test]
     fn revocation_rejects_an_invalid_key_blob_before_running_ssh() {
-        assert!(build_remove_script(Some("ssh-ed25519 not-a/base64'value")).is_err());
+        assert!(build_remove_script(
+            "$HOME/.racktop/remote-history/test-endpoint",
+            Some("ssh-ed25519 not-a/base64'value")
+        )
+        .is_err());
     }
 
     #[test]

@@ -723,7 +723,7 @@ async fn sync_remote_history(
     database: State<'_, Database>,
     server_id: String,
 ) -> Result<RemoteHistorySyncResult, String> {
-    let server = database.get_server(&server_id)?;
+    let mut server = database.get_server(&server_id)?;
     if !server.remote_history_enabled {
         return Ok(RemoteHistorySyncResult {
             imported_count: 0,
@@ -735,6 +735,22 @@ async fn sync_remote_history(
             imported_count: 0,
             latest_timestamp: server.remote_history_last_sync_at,
         });
+    }
+    let latest_gpu_uuids = database.list_latest_gpu_uuids()?;
+    let current_gpu_uuids = latest_gpu_uuids
+        .get(&server_id)
+        .cloned()
+        .unwrap_or_default();
+    if !current_gpu_uuids.is_empty() {
+        let foreign_gpu_uuids: std::collections::HashSet<String> = latest_gpu_uuids
+            .iter()
+            .filter(|(other_server_id, _)| *other_server_id != &server_id)
+            .flat_map(|(_, uuids)| uuids.iter())
+            .filter(|uuid| !current_gpu_uuids.contains(*uuid))
+            .cloned()
+            .collect();
+        database.quarantine_foreign_remote_history(&server_id, &foreign_gpu_uuids)?;
+        server = database.get_server(&server_id)?;
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -6,7 +6,7 @@ if [ "${RACKTOP_COLLECTOR_BOUNDED:-0}" != 1 ]; then
   exec timeout -k 5 60 env RACKTOP_COLLECTOR_BOUNDED=1 sh "$0"
 fi
 
-state_dir="$HOME/.racktop"
+state_dir="${RACKTOP_STATE_DIR:-$HOME/.racktop}"
 history_file="$state_dir/.history-v1.tsv"
 usage_file="$state_dir/.usage-v1.tsv"
 mkdir -p "$state_dir"

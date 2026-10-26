@@ -45,7 +45,7 @@ if [ ! -e "$cleanup_marker" ]; then
     command -v ionice >/dev/null 2>&1 && ionice -c 3 -p "$cleanup_pid" >/dev/null 2>&1 || true;
   fi;
 fi;
-if [ "${RACKTOP_REMOTE_HISTORY:-0}" = "1" ]; then mkdir -p "$HOME/.racktop" && touch "$HOME/.racktop/.client-heartbeat"; fi;
+if [ "${RACKTOP_REMOTE_HISTORY:-0}" = "1" ]; then history_state="${RACKTOP_STATE_DIR:?}"; mkdir -p "$history_state" && touch "$history_state/.client-heartbeat"; fi;
 printf '__RACKTOP_USER__\n'; id -un;
 uid_min="$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null)"; uid_min="${uid_min:-1000}";
 printf '__RACKTOP_UIDMIN__\n%s\n' "$uid_min";
@@ -185,10 +185,11 @@ pub struct CollectionResult {
 pub async fn collect_with_password_detailed(server: &Server, password: Option<&str>, include_processes: bool, include_disks: bool) -> Result<CollectionResult, String> {
     let (mut command, target) = configured_ssh_command(server, password)?;
     command.arg(target).arg(format!(
-        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{remote_script}",
+        "{history_state}RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{remote_script}",
         if include_processes { 1 } else { 0 },
         if include_disks { 1 } else { 0 },
         if server.remote_history_enabled { 1 } else { 0 },
+        history_state = remote_history_state_assignment(server),
         remote_script = REMOTE_SCRIPT.replace("\r\n", "\n"),
     )).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = timeout(Duration::from_secs(30), command.output()).await.map_err(|_| format!("连接 {} 超时（30 秒）", server.name))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
@@ -202,6 +203,14 @@ pub async fn collect_with_password_detailed(server: &Server, password: Option<&s
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn remote_history_state_assignment(server: &Server) -> String {
+    if server.remote_history_enabled {
+        format!("RACKTOP_STATE_DIR=\"{}\" ", crate::remote_history::remote_state_directory(server))
+    } else {
+        String::new()
+    }
 }
 
 // Runs on a separate SSH request: slow directory traversal never gates a snapshot.
@@ -309,10 +318,11 @@ pub fn collection_display_command(server: &Server, include_processes: bool, incl
         format!("{}@{}", server.username, server.host)
     });
     let remote_command = format!(
-        "RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{remote_script}",
+        "{history_state}RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{remote_script}",
         if include_processes { 1 } else { 0 },
         if include_disks { 1 } else { 0 },
         if server.remote_history_enabled { 1 } else { 0 },
+        history_state = remote_history_state_assignment(server),
         remote_script = REMOTE_SCRIPT.replace("\r\n", "\n"),
     );
     format!("ssh {} {} {}", arguments.join(" "), shell_quote(&target), shell_quote(&remote_command))
@@ -1148,6 +1158,22 @@ mod tests {
         assert_eq!(explicit_identity_file(&server), Some("~/.ssh/id_ed25519"));
         assert!(command.contains("-o IdentitiesOnly=yes"));
         assert!(command.contains("-i '~/.ssh/id_ed25519'"));
+    }
+
+    #[test]
+    fn remote_history_heartbeat_uses_the_endpoint_state_directory() {
+        let server = Server {
+            id: "server-1".into(), name: "GPU".into(), location: None, host: "coolas-12".into(), port: 22,
+            username: "user".into(), ssh_alias: None, identity_file: None, proxy_jump: None,
+            tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: true,
+            remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(), status: "unknown".into(),
+            last_error: None, last_seen_at: None,
+        };
+        let state_dir = crate::remote_history::remote_state_directory(&server);
+        let command = collection_display_command(&server, false, false);
+
+        assert!(command.contains(&format!("RACKTOP_STATE_DIR=\"{state_dir}\"")));
+        assert!(REMOTE_SCRIPT.contains("history_state=\"${RACKTOP_STATE_DIR:?}\""));
     }
 
     #[test]

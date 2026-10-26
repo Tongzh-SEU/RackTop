@@ -956,6 +956,17 @@ fn update_hourly_history_bucket(
     previous: Option<&StoredHistorySample>,
     next: &StoredHistorySample,
 ) -> Result<(), String> {
+    update_hourly_history_bucket_weighted(connection, server_id, timestamp, previous, next, 1)
+}
+
+fn update_hourly_history_bucket_weighted(
+    connection: &Connection,
+    server_id: &str,
+    timestamp: i64,
+    previous: Option<&StoredHistorySample>,
+    next: &StoredHistorySample,
+    weight: i64,
+) -> Result<(), String> {
     let bucket_timestamp = hour_start(timestamp);
     let mut bucket = connection.query_row(
         "SELECT sample_count,cpu_sum,memory_sum,gpu_utilization_sums_json,gpu_utilization_counts_json,gpu_memory_sums_json,gpu_memory_counts_json
@@ -975,36 +986,36 @@ fn update_hourly_history_bucket(
     ).optional().map_err(|error| error.to_string())?.unwrap_or_default();
 
     if let Some(previous) = previous {
-        bucket.cpu_sum -= previous.cpu_utilization;
-        bucket.memory_sum -= previous.memory_utilization;
+        bucket.cpu_sum -= previous.cpu_utilization * weight as f64;
+        bucket.memory_sum -= previous.memory_utilization * weight as f64;
         adjust_metric_totals(
             &mut bucket.gpu_utilization_sums,
             &mut bucket.gpu_utilization_counts,
             &previous.gpu_utilizations,
-            -1,
+            -weight,
         );
         adjust_metric_totals(
             &mut bucket.gpu_memory_sums,
             &mut bucket.gpu_memory_counts,
             &previous.gpu_memory_utilizations,
-            -1,
+            -weight,
         );
     } else {
-        bucket.sample_count += 1;
+        bucket.sample_count += weight;
     }
-    bucket.cpu_sum += next.cpu_utilization;
-    bucket.memory_sum += next.memory_utilization;
+    bucket.cpu_sum += next.cpu_utilization * weight as f64;
+    bucket.memory_sum += next.memory_utilization * weight as f64;
     adjust_metric_totals(
         &mut bucket.gpu_utilization_sums,
         &mut bucket.gpu_utilization_counts,
         &next.gpu_utilizations,
-        1,
+        weight,
     );
     adjust_metric_totals(
         &mut bucket.gpu_memory_sums,
         &mut bucket.gpu_memory_counts,
         &next.gpu_memory_utilizations,
-        1,
+        weight,
     );
 
     connection.execute(
@@ -1080,6 +1091,110 @@ fn rebuild_hourly_history_buckets(connection: &mut Connection) -> Result<(), Str
         ).map_err(|error| error.to_string())?;
     }
     transaction.commit().map_err(|error| error.to_string())
+}
+
+fn rebuild_server_hourly_history_buckets(
+    connection: &Connection,
+    server_id: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM history_hourly_buckets WHERE server_id=?1",
+            [server_id],
+        )
+        .map_err(|error| error.to_string())?;
+    let samples = {
+        let mut statement = connection
+            .prepare("SELECT timestamp,cpu_utilization,memory_utilization,gpu_json,gpu_memory_json,payload_json FROM snapshots WHERE server_id=?1 ORDER BY timestamp")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([server_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    StoredHistorySample {
+                        cpu_utilization: row.get(1)?,
+                        memory_utilization: row.get(2)?,
+                        gpu_utilizations: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+                        gpu_memory_utilizations: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+                    },
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    for (timestamp, sample, payload_json) in samples {
+        let payload: serde_json::Value = serde_json::from_str(&payload_json).unwrap_or_default();
+        let is_compacted = payload
+            .get("historyRangeVersion")
+            .and_then(serde_json::Value::as_i64)
+            == Some(1);
+        let weight = if is_compacted {
+            payload
+                .get("sampleCount")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(1)
+                .max(1)
+        } else {
+            1
+        };
+        update_hourly_history_bucket_weighted(connection, server_id, timestamp, None, &sample, weight)?;
+    }
+    Ok(())
+}
+
+fn collect_json_map_keys(value: &serde_json::Value, keys: &mut HashSet<String>) {
+    if let Some(object) = value.as_object() {
+        keys.extend(object.keys().cloned());
+    }
+}
+
+fn row_foreign_gpu_uuids(
+    gpu_json_columns: &[&str],
+    payload_json: &str,
+    foreign_gpu_uuids: &HashSet<String>,
+) -> Vec<String> {
+    let mut keys = HashSet::new();
+    for column in gpu_json_columns {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(column) {
+            collect_json_map_keys(&value, &mut keys);
+        }
+    }
+    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(payload_json) {
+        if let Some(gpus) = payload.get("gpus").and_then(serde_json::Value::as_array) {
+            keys.extend(gpus.iter().filter_map(|gpu| {
+                gpu.get("uuid")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            }));
+        }
+        for field in [
+            "gpuTemperatures",
+            "gpuPower",
+            "gpuFan",
+            "gpuMins",
+            "gpuMaxes",
+            "gpuMemoryMins",
+            "gpuMemoryMaxes",
+            "gpuTemperatureMins",
+            "gpuTemperatureMaxes",
+            "gpuPowerMins",
+            "gpuPowerMaxes",
+            "gpuFanMins",
+            "gpuFanMaxes",
+        ] {
+            if let Some(values) = payload.get(field) {
+                collect_json_map_keys(values, &mut keys);
+            }
+        }
+    }
+    let mut matches: Vec<_> = keys
+        .intersection(foreign_gpu_uuids)
+        .cloned()
+        .collect();
+    matches.sort();
+    matches
 }
 
 fn migrate_projects_to_detached_sources(connection: &mut Connection) -> Result<(), String> {
@@ -2197,6 +2312,29 @@ impl Database {
             .collect())
     }
 
+    pub fn list_latest_gpu_uuids(&self) -> Result<HashMap<String, HashSet<String>>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT current.server_id,current.gpu_json FROM snapshots current
+                 WHERE current.timestamp=(SELECT MAX(candidate.timestamp) FROM snapshots candidate WHERE candidate.server_id=current.server_id)",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut latest = HashMap::new();
+        for row in rows {
+            let (server_id, gpu_json) = row.map_err(|error| error.to_string())?;
+            let gpu_values: HashMap<String, f64> =
+                serde_json::from_str(&gpu_json).unwrap_or_default();
+            latest.insert(server_id, gpu_values.into_keys().collect());
+        }
+        Ok(latest)
+    }
+
     pub fn import_remote_data(
         &self,
         server_id: &str,
@@ -2215,6 +2353,209 @@ impl Database {
             .remote_history_last_sync_at
             .unwrap_or(now - 30 * 86_400)
             .saturating_sub(60))
+    }
+
+    /// Archive whole samples when their GPU UUID proves they came from another server.
+    pub fn quarantine_foreign_remote_history(
+        &self,
+        server_id: &str,
+        foreign_gpu_uuids: &HashSet<String>,
+    ) -> Result<usize, String> {
+        if foreign_gpu_uuids.is_empty() {
+            return Ok(0);
+        }
+        let quarantined_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_secs() as i64;
+        let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS remote_history_quarantine (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    record_key TEXT NOT NULL,
+                    foreign_gpu_uuids_json TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    quarantined_at INTEGER NOT NULL
+                 );",
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS remote_history_quarantine_scans (
+                    server_id TEXT PRIMARY KEY,
+                    foreign_gpu_uuids_json TEXT NOT NULL,
+                    scanned_at INTEGER NOT NULL,
+                    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+                 );",
+            )
+            .map_err(|error| error.to_string())?;
+        let mut ordered_foreign_uuids: Vec<_> = foreign_gpu_uuids.iter().cloned().collect();
+        ordered_foreign_uuids.sort();
+        let foreign_uuids_json =
+            serde_json::to_string(&ordered_foreign_uuids).map_err(|error| error.to_string())?;
+        let previous_scan: Option<String> = transaction
+            .query_row(
+                "SELECT foreign_gpu_uuids_json FROM remote_history_quarantine_scans WHERE server_id=?1",
+                [server_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if previous_scan.as_deref() == Some(foreign_uuids_json.as_str()) {
+            transaction.commit().map_err(|error| error.to_string())?;
+            return Ok(0);
+        }
+
+        let snapshots = {
+            let mut statement = transaction
+                .prepare("SELECT id,timestamp,cpu_utilization,memory_utilization,swap_utilization,gpu_json,gpu_memory_json,gpu_other_user_occupancy_json,payload_json FROM snapshots WHERE server_id=?1 ORDER BY timestamp")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([server_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, f64>(3)?,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?
+        };
+        let mut quarantined = 0usize;
+        let mut removed_snapshots = false;
+        for (id, timestamp, cpu, memory, swap, gpu_json, gpu_memory_json, occupancy_json, payload_json) in snapshots {
+            let foreign_ids = row_foreign_gpu_uuids(
+                &[&gpu_json, &gpu_memory_json, &occupancy_json],
+                &payload_json,
+                foreign_gpu_uuids,
+            );
+            if foreign_ids.is_empty() {
+                continue;
+            }
+            let archived = serde_json::json!({
+                "id": id,
+                "timestamp": timestamp,
+                "cpuUtilization": cpu,
+                "memoryUtilization": memory,
+                "swapUtilization": swap,
+                "gpuJson": gpu_json,
+                "gpuMemoryJson": gpu_memory_json,
+                "gpuOtherUserOccupancyJson": occupancy_json,
+                "payloadJson": payload_json,
+            });
+            transaction
+                .execute(
+                    "INSERT INTO remote_history_quarantine(server_id,entity_type,record_key,foreign_gpu_uuids_json,payload_json,quarantined_at) VALUES(?1,'snapshot',?2,?3,?4,?5)",
+                    params![
+                        server_id,
+                        timestamp.to_string(),
+                        serde_json::to_string(&foreign_ids).map_err(|error| error.to_string())?,
+                        serde_json::to_string(&archived).map_err(|error| error.to_string())?,
+                        quarantined_at,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "DELETE FROM snapshots WHERE server_id=?1 AND timestamp=?2",
+                    params![server_id, timestamp],
+                )
+                .map_err(|error| error.to_string())?;
+            removed_snapshots = true;
+            quarantined += 1;
+        }
+
+        let usage_rows = {
+            let mut statement = transaction
+                .prepare("SELECT timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds FROM usage_buckets WHERE server_id=?1 ORDER BY timestamp,gpu_uuid,username")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([server_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?
+        };
+        for (timestamp, gpu_uuid, username, active_seconds, memory_mb_seconds, coverage_seconds) in usage_rows {
+            if !foreign_gpu_uuids.contains(&gpu_uuid) {
+                continue;
+            }
+            let archived = serde_json::json!({
+                "timestamp": timestamp,
+                "gpuUuid": gpu_uuid,
+                "username": username,
+                "activeSeconds": active_seconds,
+                "memoryMbSeconds": memory_mb_seconds,
+                "coverageSeconds": coverage_seconds,
+            });
+            transaction
+                .execute(
+                    "INSERT INTO remote_history_quarantine(server_id,entity_type,record_key,foreign_gpu_uuids_json,payload_json,quarantined_at) VALUES(?1,'usage',?2,?3,?4,?5)",
+                    params![
+                        server_id,
+                        format!("{timestamp}|{gpu_uuid}|{username}"),
+                        serde_json::to_string(std::slice::from_ref(&gpu_uuid)).map_err(|error| error.to_string())?,
+                        serde_json::to_string(&archived).map_err(|error| error.to_string())?,
+                        quarantined_at,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "DELETE FROM usage_buckets WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid=?3 AND username=?4",
+                    params![server_id, timestamp, gpu_uuid, username],
+                )
+                .map_err(|error| error.to_string())?;
+            quarantined += 1;
+        }
+        if removed_snapshots {
+            rebuild_server_hourly_history_buckets(&transaction, server_id)?;
+        }
+        if quarantined > 0 {
+            let latest_trusted_snapshot = transaction
+                .query_row(
+                    "SELECT MAX(timestamp) FROM snapshots WHERE server_id=?1 AND timestamp<=?2",
+                    params![server_id, quarantined_at + 300],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "UPDATE servers SET remote_history_last_sync_at=?2 WHERE id=?1",
+                    params![server_id, latest_trusted_snapshot],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO remote_history_quarantine_scans(server_id,foreign_gpu_uuids_json,scanned_at) VALUES(?1,?2,?3)
+                 ON CONFLICT(server_id) DO UPDATE SET foreign_gpu_uuids_json=excluded.foreign_gpu_uuids_json,scanned_at=excluded.scanned_at",
+                params![server_id, foreign_uuids_json, quarantined_at],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(quarantined)
     }
 
     pub fn import_remote_history(
@@ -4518,6 +4859,134 @@ mod tests {
         assert_eq!(db.import_remote_data(&server.id, std::slice::from_ref(&newer), std::slice::from_ref(&usage), newer.timestamp + 3600).unwrap(), 2);
         assert_eq!(db.import_remote_data(&server.id, &[newer.clone()], &[usage], newer.timestamp + 3600).unwrap(), 0);
         assert_eq!(db.get_server(&server.id).unwrap().remote_history_last_sync_at, Some(newer.timestamp));
+    }
+
+    #[test]
+    fn quarantines_foreign_gpu_rows_and_rebuilds_server_history_without_losing_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.sqlite")).unwrap();
+        let server = db.save_server(ServerDraft {
+            remote_history_enabled: true,
+            ..draft("Shared home", 30)
+        }).unwrap();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64 - 7_200;
+
+        let mut mixed = snapshot(&server.id, timestamp);
+        mixed.system.cpu_utilization = 44.0;
+        mixed.system.memory_total_bytes = 1_000;
+        mixed.system.memory_used_bytes = 500;
+        mixed.gpus = vec![
+            GpuMetric { uuid: "GPU-own".into(), utilization: 35.0, ..Default::default() },
+            GpuMetric { uuid: "GPU-foreign".into(), utilization: 90.0, ..Default::default() },
+        ];
+        db.save_snapshot(&mixed).unwrap();
+
+        let compacted_timestamp = timestamp - 3_600;
+        let mut compacted_snapshot = snapshot(&server.id, compacted_timestamp);
+        compacted_snapshot.system.cpu_utilization = 25.0;
+        compacted_snapshot.gpus = vec![GpuMetric {
+            uuid: "GPU-own".into(),
+            utilization: 30.0,
+            ..Default::default()
+        }];
+        db.save_snapshot(&compacted_snapshot).unwrap();
+        db.connection.lock().unwrap().execute(
+            "UPDATE snapshots SET payload_json=?3 WHERE server_id=?1 AND timestamp=?2",
+            params![server.id, compacted_timestamp, serde_json::json!({"historyRangeVersion": 1, "sampleCount": 60, "cpuMin": 20.0, "cpuMax": 30.0}).to_string()],
+        ).unwrap();
+
+        let mut local = snapshot(&server.id, timestamp + 60);
+        local.system.cpu_utilization = 10.0;
+        local.gpus = vec![GpuMetric { uuid: "GPU-own".into(), utilization: 20.0, ..Default::default() }];
+        db.save_snapshot(&local).unwrap();
+        let mut other_draft = draft("Other endpoint", 30);
+        other_draft.host = "10.0.0.2".into();
+        let other_server = db.save_server(other_draft).unwrap();
+        let mut other_snapshot = snapshot(&other_server.id, timestamp + 120);
+        other_snapshot.gpus = vec![GpuMetric {
+            uuid: "GPU-foreign".into(),
+            utilization: 80.0,
+            ..Default::default()
+        }];
+        db.save_snapshot(&other_snapshot).unwrap();
+        let latest_gpu_uuids = db.list_latest_gpu_uuids().unwrap();
+        assert_eq!(latest_gpu_uuids[&server.id], HashSet::from(["GPU-own".to_string()]));
+        let detected_foreign: HashSet<_> = latest_gpu_uuids
+            .iter()
+            .filter(|(server_id, _)| *server_id != &server.id)
+            .flat_map(|(_, uuids)| uuids.iter().cloned())
+            .filter(|uuid| !latest_gpu_uuids[&server.id].contains(uuid))
+            .collect();
+        assert_eq!(detected_foreign, HashSet::from(["GPU-foreign".to_string()]));
+
+        {
+            let connection = db.connection.lock().unwrap();
+            connection.execute(
+                "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds) VALUES(?1,?2,'GPU-own','alice',60,60000,60)",
+                params![server.id, hour_start(timestamp)],
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds) VALUES(?1,?2,'GPU-foreign','bob',60,90000,60)",
+                params![server.id, hour_start(timestamp)],
+            ).unwrap();
+        }
+
+        let foreign = HashSet::from(["GPU-foreign".to_string()]);
+        assert_eq!(db.quarantine_foreign_remote_history(&server.id, &foreign).unwrap(), 2);
+        assert_eq!(db.quarantine_foreign_remote_history(&server.id, &foreign).unwrap(), 0);
+
+        let history = db.get_history(&server.id, 0).unwrap();
+        assert_eq!(history.len(), 2);
+        let remaining = history.iter().find(|point| point.timestamp == timestamp + 60).unwrap();
+        assert_eq!(remaining.cpu_utilization, 10.0);
+        assert_eq!(remaining.gpu_utilizations.get("GPU-own"), Some(&20.0));
+        assert!(history.iter().any(|point| point.timestamp == compacted_timestamp));
+        let distribution = db.get_usage_distribution(&server.id, 0, 90).unwrap();
+        assert_eq!(distribution.users.len(), 1);
+        assert_eq!(distribution.users[0].username, "alice");
+
+        let connection = db.connection.lock().unwrap();
+        let archived: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM remote_history_quarantine WHERE server_id=?1",
+            [&server.id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(archived, 2);
+        let scan_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM remote_history_quarantine_scans WHERE server_id=?1",
+            [&server.id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(scan_count, 1);
+        let archived_snapshot: String = connection.query_row(
+            "SELECT payload_json FROM remote_history_quarantine WHERE server_id=?1 AND entity_type='snapshot'",
+            [&server.id],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(archived_snapshot.contains("GPU-foreign"));
+        let cursor: Option<i64> = connection.query_row(
+            "SELECT remote_history_last_sync_at FROM servers WHERE id=?1",
+            [&server.id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(cursor, Some(timestamp + 60));
+        let (sample_count, cpu_sum, gpu_json): (i64, f64, String) = connection.query_row(
+            "SELECT sample_count,cpu_sum,gpu_utilization_sums_json FROM history_hourly_buckets WHERE server_id=?1 AND timestamp=?2",
+            params![server.id, hour_start(timestamp + 60)],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(sample_count, 1);
+        assert_eq!(cpu_sum, 10.0);
+        assert_eq!(serde_json::from_str::<HashMap<String, f64>>(&gpu_json).unwrap().get("GPU-own"), Some(&20.0));
+        let compacted_bucket_count: i64 = connection.query_row(
+            "SELECT sample_count FROM history_hourly_buckets WHERE server_id=?1 AND timestamp=?2",
+            params![server.id, hour_start(compacted_timestamp)],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(compacted_bucket_count, 60);
     }
 
     #[test]

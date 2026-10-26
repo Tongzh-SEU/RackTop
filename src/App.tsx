@@ -832,7 +832,7 @@ function App() {
         if (result.expiredNames.length > 0 && !remoteCleanupNoticeKeys.current.has('expired')) {
           remoteCleanupNoticeKeys.current.add('expired')
           const names = result.expiredNames.map(serverDisplayName).join('、')
-          void api.notify(`${names} 远端数据需要手动清理`, `自动清理已超过 24 小时。请 SSH 登录后执行：if [ -f ~/.racktop/.daemon.pid ]; then kill "$(cat ~/.racktop/.daemon.pid)" 2>/dev/null || true; fi; rm -rf -- ~/.racktop`)
+          void api.notify(`${names} 远端数据需要手动清理`, '自动清理已超过 24 小时。请先核对 ~/.racktop/remote-history/ 下对应服务器的目录；不要删除整个 ~/.racktop，以免影响其他服务器。')
           setToast(`${names} 的远端自动清理已超过 24 小时，请查看系统通知并手动清理`)
         }
       } catch (error) {
