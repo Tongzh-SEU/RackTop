@@ -38,13 +38,13 @@ RackTop 是面向个人研究者和小型团队的 GPU 服务器桌面工作台�
 
 ## 下载
 
-当前稳定版：**v1.26.1**
+当前稳定版：**v1.26.2**
 
 | 平台 | 安装包 | 下载 |
 | --- | --- | --- |
-| macOS Apple Silicon | `RackTop_1.26.1_macos-arm64-unsigned.dmg` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.1/RackTop_1.26.1_macos-arm64-unsigned.dmg) |
-| Windows x64 | `RackTop_1.26.1_x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.1/RackTop_1.26.1_x64-setup.exe) |
-| Linux Ubuntu/Debian x64 | `RackTop_1.26.1_amd64.deb` | [下载 Linux 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.1/RackTop_1.26.1_amd64.deb) |
+| macOS Apple Silicon | `RackTop_1.26.2_macos-arm64-unsigned.dmg` | [下载 macOS 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.2/RackTop_1.26.2_macos-arm64-unsigned.dmg) |
+| Windows x64 | `RackTop_1.26.2_x64-setup.exe` | [下载 Windows 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.2/RackTop_1.26.2_x64-setup.exe) |
+| Linux Ubuntu/Debian x64 | `RackTop_1.26.2_amd64.deb` | [下载 Linux 版本](https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.2/RackTop_1.26.2_amd64.deb) |
 
 更多版本见 [GitHub Releases](https://github.com/Tongzh-SEU/RackTop/releases)。
 
