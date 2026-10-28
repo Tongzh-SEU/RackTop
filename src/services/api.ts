@@ -73,6 +73,7 @@ const defaultSettings: AppSettings = {
   idleMemoryThresholdMb: 40960,
   idleDurationMinutes: 10,
   idleNotificationsEnabled: true,
+  systemMemoryThresholdPercent: 90,
   temperatureThresholdCelsius: 85,
   currentUserAccent: '#0a84ff',
   theme: 'system',
@@ -294,7 +295,8 @@ let browserProjects: Project[] = [
   },
 ]
 const browserProjectSyncProgress: ProjectSyncProgress[] = [{ projectId: 'demo-project-waterflower', targetServerId: 'demo-h100', transferredBytes: 31 * 1024, resumedBytes: 12 * 1024, totalBytes: 48 * 1024, startedAt: now - 12, state: 'transferring' }]
-const historyRequests = new Map<string, { expiresAt: number; request: Promise<HistoryPoint[]> }>()
+const historyRequests = new Map<string, { expiresAt: number; request: Promise<HistoryPoint[]>; timer: ReturnType<typeof setTimeout> }>()
+const MAX_HISTORY_REQUESTS = 32
 const browserInteractionSummary: InteractionLogSummary = { sentBytes: 0, responseBytes: 0, storedBytes: 0, localStorageBytes: 36.3 * 1024 ** 2, failureCount: 0, servers: [] }
 
 function rollingHistory(snapshot: Snapshot, fromTimestamp?: number): HistoryPoint[] {
@@ -453,8 +455,23 @@ export const api = {
       if (!bucketSeconds) return points
       return aggregateTelemetryPreview(points, bucketSeconds)
     })()
-    historyRequests.set(cacheKey, { expiresAt: Date.now() + 5_000, request })
-    request.catch(() => historyRequests.delete(cacheKey))
+    if (cached) clearTimeout(cached.timer)
+    historyRequests.delete(cacheKey)
+    // Expiry must release resolved arrays even when no further requests arrive.
+    const remove = () => {
+      if (historyRequests.get(cacheKey)?.request === request) {
+        clearTimeout(timer)
+        historyRequests.delete(cacheKey)
+      }
+    }
+    const timer = setTimeout(remove, 5_000)
+    historyRequests.set(cacheKey, { expiresAt: Date.now() + 5_000, request, timer })
+    while (historyRequests.size > MAX_HISTORY_REQUESTS) {
+      const oldest = historyRequests.keys().next().value!
+      clearTimeout(historyRequests.get(oldest)!.timer)
+      historyRequests.delete(oldest)
+    }
+    void request.catch(remove)
     return request
   },
   async getHistoryHeatmap(serverId: string, fromTimestamp: number, timezoneOffsetSeconds: number, gpuUuids: string[]): Promise<HistoryHeatmapPoint[]> {

@@ -226,6 +226,7 @@ export interface AppSettings {
   idleMemoryThresholdMb: number
   idleDurationMinutes: number
   idleNotificationsEnabled?: boolean
+  systemMemoryThresholdPercent?: number
   temperatureThresholdCelsius: number
   currentUserAccent: string
   theme: 'system' | 'light' | 'dark'

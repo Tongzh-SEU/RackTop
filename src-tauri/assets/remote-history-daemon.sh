@@ -3,7 +3,7 @@ set -e
 set -u
 umask 077
 
-state_dir="$HOME/.racktop"
+state_dir="${RACKTOP_STATE_DIR:-$HOME/.racktop}"
 pid_file="$state_dir/.daemon.pid"
 collector="$state_dir/.collector.sh"
 heartbeat="$state_dir/.client-heartbeat"

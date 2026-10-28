@@ -27,6 +27,12 @@ export function deriveGpuMemoryStallWarnings(
     const observedAt = Math.min(now, snapshot.timestamp)
     for (const gpu of snapshot.gpus) {
       const id = gpuMemoryStallWarningId(server.id, gpu.uuid)
+      // GB10 memoryUsedMb includes CPU/system DRAM. It cannot establish that a
+      // GPU workload holds memory, even when no process can be attributed.
+      if (/\bGB10\b|\bDGX\s+Spark\b/i.test(gpu.name)) {
+        delete since[id]
+        continue
+      }
       const gpuProcesses = snapshot.processes.filter((process) => process.gpuUuid === gpu.uuid && process.memoryUsedMb > 0)
       const defunctProcesses = gpuProcesses.filter((process) => process.command.toLowerCase().includes('<defunct>'))
       if (!(gpu.memoryUsedMb >= GPU_MEMORY_STALL_MINIMUM_MB && gpu.utilization <= 0.5)) {
@@ -53,6 +59,11 @@ export function deriveGpuMemoryStallWarnings(
       })
     }
   }
-  for (const id of Object.keys(since)) if (!activeIds.has(id)) delete since[id]
+  // Missing samples (for example during reconnect) cannot establish recovery.
+  const unobservedPrefixes = servers.filter((server) => !snapshots[server.id])
+    .map((server) => `gpu-memory-stall:${server.id}:`)
+  for (const id of Object.keys(since)) {
+    if (!activeIds.has(id) && !unobservedPrefixes.some((prefix) => id.startsWith(prefix))) delete since[id]
+  }
   return { warnings, since }
 }

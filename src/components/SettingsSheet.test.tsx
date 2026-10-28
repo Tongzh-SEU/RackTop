@@ -95,4 +95,25 @@ describe('SettingsSheet onboarding settings', () => {
     await act(async () => { saveButton?.click(); await Promise.resolve() })
     expect(onSave).toHaveBeenCalledWith(settings, false)
   })
+  it('offers system MEM thresholds from 80 to 100 and hides them with the master switch', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => root?.render(<SettingsSheet settings={settings} onboardingVisible onClose={vi.fn()} onSave={onSave} />))
+    const slider = container.querySelector<HTMLInputElement>('[aria-label="系统 MEM 告警阈值"]')!
+    expect([slider.min, slider.max, slider.step, slider.value]).toEqual(['80','100','1','90'])
+    const setNativeValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    for (const percent of ['80','100']) {
+      await act(async () => { setNativeValue.call(slider, percent); slider.dispatchEvent(new Event('input', {bubbles:true})) })
+      expect(slider.closest('label')?.textContent).toContain(`${percent}%`)
+    }
+    const master = [...container.querySelectorAll('label')].find(label=>label.textContent?.includes('启用空闲与告警通知'))!.querySelector<HTMLInputElement>('input')!
+    await act(async () => master.click())
+    expect(container.querySelector('[aria-label="系统 MEM 告警阈值"]')).toBeNull()
+    const save = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent==='保存设置')!
+    await act(async () => save.click())
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({systemMemoryThresholdPercent:100,idleNotificationsEnabled:false}),true)
+  })
+
 })

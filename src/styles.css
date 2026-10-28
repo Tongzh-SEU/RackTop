@@ -259,9 +259,7 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .managed-process-summary { display: flex; align-items: center; min-height: 30px; color: var(--text-secondary); font-size: calc(9px + var(--font-adjust, 0px)); }
 .managed-process-summary span { padding: 0 12px; border-right: 1px solid var(--border); }
 .managed-process-summary span:first-child { padding-left: 1px; }.managed-process-summary span:last-child { border: 0; }
-.managed-process-summary strong { color: var(--text); }.managed-process-summary .is-warning { color: var(--orange); font-weight: 650; }
-.managed-process-warning { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 7px 10px; border: 1px solid color-mix(in srgb, var(--orange) 32%, var(--border)); border-radius: 7px; color: var(--orange); background: color-mix(in srgb, var(--orange) 7%, var(--surface)); font-size: calc(9px + var(--font-adjust, 0px)); }
-.managed-process-warning > span { min-width: 0; flex: 1; }.managed-process-warning .icon-button { width: 24px; height: 24px; color: currentColor; }
+.managed-process-summary strong { color: var(--text); }
 .managed-server-group { display: grid; gap: 7px; min-width: 0; }
 .managed-server-group > header { display: flex; align-items: center; justify-content: space-between; min-height: 32px; padding: 0 2px; }
 .managed-server-group > header > div { display: flex; align-items: center; gap: 7px; min-width: 0; }.managed-server-group > header strong { font-size: calc(11px + var(--font-adjust, 0px)); }.managed-server-group > header small { overflow: hidden; color: var(--text-tertiary); font-size: calc(8px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }
@@ -310,7 +308,7 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 
 .managed-process-tabs button, .managed-process-launch { min-height: 32px; font-size: calc(11px + var(--font-adjust, 0px)); }
 .managed-process-tabs button span, .managed-server-group > header small, .managed-run-identity p, .managed-run-placement small, .managed-run-details dd, .managed-process-tree > div, .managed-run-waiting, .unmanaged-processes > button small, .unmanaged-processes > div > section > header small, .managed-profile-row small, .managed-recent-list small, .managed-recent-list time { font-size: calc(9px + var(--font-adjust, 0px)); }
-.managed-process-summary, .managed-process-warning, .managed-run-metrics dd, .unmanaged-processes > button strong, .unmanaged-processes > div > section > header strong, .managed-profile-view p, .managed-recent-view p, .managed-profile-row strong, .managed-recent-list strong { font-size: calc(10px + var(--font-adjust, 0px)); }
+.managed-process-summary, .managed-run-metrics dd, .unmanaged-processes > button strong, .unmanaged-processes > div > section > header strong, .managed-profile-view p, .managed-recent-view p, .managed-profile-row strong, .managed-recent-list strong { font-size: calc(10px + var(--font-adjust, 0px)); }
 .managed-server-group > header strong, .managed-run-identity strong { font-size: calc(12px + var(--font-adjust, 0px)); }
 .managed-run-placement strong, .managed-process-empty p, .managed-launch-body > aside span, .managed-launch-form > section > header strong, .managed-launch-fields label, .managed-resource-fields label, .managed-launch-server-list strong, .managed-preflight strong, .managed-save-profile, .managed-launch-readiness, .managed-stop-sheet > p { font-size: calc(10px + var(--font-adjust, 0px)); }
 .managed-process-empty strong, .managed-profile-view h2, .managed-recent-view h2 { font-size: calc(14px + var(--font-adjust, 0px)); }
@@ -1033,7 +1031,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
 .managed-profile-template { display: grid; gap: 10px; padding: 12px 13px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .managed-profile-template > header { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .managed-profile-template > header > div:first-child { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.managed-profile-template > header > div:first-child strong { overflow: hidden; font-size: calc(11px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }
+.managed-profile-template > header > div:first-child strong { max-width: 24ch; overflow: hidden; font-size: calc(11px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }
 .managed-profile-template > header > div:first-child span { flex: 0 0 auto; padding: 2px 6px; border-radius: 5px; color: var(--text-tertiary); background: var(--surface-subtle); font-size: calc(8px + var(--font-adjust, 0px)); }
 .managed-profile-template > header > div:last-child { display: flex; align-items: center; gap: 4px; }
 .managed-profile-template > code { overflow: hidden; color: var(--text-tertiary); font-size: calc(9px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }

@@ -540,6 +540,8 @@ pub struct AppSettings {
     pub idle_duration_minutes: u64,
     #[serde(default = "default_true")]
     pub idle_notifications_enabled: bool,
+    #[serde(default = "default_system_memory_threshold")]
+    pub system_memory_threshold_percent: f64,
     pub temperature_threshold_celsius: f64,
     pub current_user_accent: String,
     pub theme: String,
@@ -567,6 +569,10 @@ fn default_max_cards_per_row() -> u8 {
     3
 }
 
+fn default_system_memory_threshold() -> f64 {
+    90.0
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -580,6 +586,7 @@ impl Default for AppSettings {
             idle_memory_threshold_mb: 40960.0,
             idle_duration_minutes: 10,
             idle_notifications_enabled: true,
+            system_memory_threshold_percent: default_system_memory_threshold(),
             temperature_threshold_celsius: 85.0,
             current_user_accent: "#0a84ff".into(),
             theme: "system".into(),
@@ -649,5 +656,18 @@ mod tests {
         assert_eq!(value["idleNotificationsEnabled"], false);
         let restored: AppSettings = serde_json::from_value(value).unwrap();
         assert!(!restored.idle_notifications_enabled);
+    }
+
+    #[test]
+    fn memory_alert_threshold_defaults_for_old_settings_and_round_trips() {
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("systemMemoryThresholdPercent");
+        let old: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(old.system_memory_threshold_percent, 90.0);
+        for threshold in [80.0, 90.0, 100.0] {
+            let settings = AppSettings { system_memory_threshold_percent: threshold, ..AppSettings::default() };
+            let restored: AppSettings = serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+            assert_eq!(restored.system_memory_threshold_percent, threshold);
+        }
     }
 }

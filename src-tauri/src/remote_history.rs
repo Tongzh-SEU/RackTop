@@ -5,27 +5,78 @@ use crate::{
     models::{HistoryPoint, Server, UsagePoint},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
 use std::process::Stdio;
 use tokio::time::{Duration, timeout};
 
-const REMOTE_DIRECTORY: &str = "$HOME/.racktop";
 const REMOTE_COLLECTOR_SCRIPT: &str = concat!(include_str!("../assets/ascend-collector.sh"), include_str!("../assets/remote-history-collector.sh"));
 const REMOTE_DAEMON_SCRIPT: &str = include_str!("../assets/remote-history-daemon.sh");
 const REMOTE_USAGE_SCRIPT: &str = include_str!("../assets/remote-history-usage.sh");
 const REMOTE_REMOVE_SCRIPT: &str = r#"set -eu
-state=$HOME/.racktop
+state="${RACKTOP_STATE_DIR:?}"
 if [ -r "$state/.daemon.pid" ]; then
   pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "$state/.daemon.sh" >/dev/null 2>&1; then
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "sh $state/.daemon.sh" >/dev/null 2>&1; then
     kill "$pid" 2>/dev/null || true
     sleep 1
-    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    if kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "sh $state/.daemon.sh" >/dev/null 2>&1; then kill -KILL "$pid" 2>/dev/null || true; fi
   fi
 fi
 rm -rf -- "$state"
 printf '__RACKTOP_REMOTE_HISTORY_REMOVED__\n'
 "#;
+
+pub(crate) fn remote_state_directory(server: &Server) -> String {
+    remote_state_directory_for_endpoint(&server.host, server.port)
+}
+
+fn remote_state_directory_for_endpoint(host: &str, port: u16) -> String {
+    let normalized_host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let digest = Sha256::digest(format!("{normalized_host}:{port}").as_bytes());
+    let host_slug: String = normalized_host
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .take(48)
+        .collect();
+    format!("$HOME/.racktop/remote-history/{host_slug}-{port}-{digest:x}")
+}
+
+fn stop_verified_daemon(state_dir: &str) -> String {
+    format!(r#"state="{state_dir}"
+if [ -r "$state/.daemon.pid" ]; then
+  pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "sh $state/.daemon.sh" >/dev/null 2>&1; then
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "sh $state/.daemon.sh" >/dev/null 2>&1; then kill -KILL "$pid" 2>/dev/null || true; fi
+  fi
+fi
+"#)
+}
+
+fn stop_legacy_shared_daemon() -> &'static str {
+    r#"legacy="$HOME/.racktop"
+if [ -r "$legacy/.daemon.pid" ]; then
+  legacy_pid="$(cat "$legacy/.daemon.pid" 2>/dev/null || true)"
+  if [ -n "$legacy_pid" ] && kill -0 "$legacy_pid" 2>/dev/null && ps -p "$legacy_pid" -o args= 2>/dev/null | grep -F "sh $legacy/.daemon.sh" >/dev/null 2>&1; then
+    kill "$legacy_pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$legacy_pid" 2>/dev/null && ps -p "$legacy_pid" -o args= 2>/dev/null | grep -F "sh $legacy/.daemon.sh" >/dev/null 2>&1; then kill -KILL "$legacy_pid" 2>/dev/null || true; fi
+  fi
+fi
+"#
+}
 
 pub async fn configure(server: &Server, password: Option<&str>) -> Result<(), String> {
     if server.remote_history_enabled {
@@ -40,7 +91,7 @@ pub async fn remove(
     password: Option<&str>,
     managed_public_key: Option<&str>,
 ) -> Result<(), String> {
-    let script = build_remove_script(managed_public_key)?;
+    let script = build_remove_script(&remote_state_directory(server), managed_public_key)?;
     let output =
         run_remote_cleanup_command(server, password, &script, Duration::from_secs(8)).await?;
     if !output
@@ -59,9 +110,10 @@ pub async fn remove(
     Ok(())
 }
 
-fn build_remove_script(managed_public_key: Option<&str>) -> Result<String, String> {
+fn build_remove_script(state_dir: &str, managed_public_key: Option<&str>) -> Result<String, String> {
+    let scoped_script = format!("RACKTOP_STATE_DIR=\"{state_dir}\"; {REMOTE_REMOVE_SCRIPT}");
     let Some(public_key) = managed_public_key else {
-        return Ok(REMOTE_REMOVE_SCRIPT.to_string());
+        return Ok(scoped_script);
     };
     let key_blob = public_key
         .split_whitespace()
@@ -77,7 +129,7 @@ fn build_remove_script(managed_public_key: Option<&str>) -> Result<String, Strin
         .decode(key_blob)
         .map_err(|_| "RackTop 专用公钥格式无效，无法撤销免密登录".to_string())?;
     Ok(format!(
-        r#"{REMOTE_REMOVE_SCRIPT}
+        r#"RACKTOP_STATE_DIR="{state_dir}"; {REMOTE_REMOVE_SCRIPT}
 authorized_keys="$HOME/.ssh/authorized_keys"
 if [ -f "$authorized_keys" ]; then
   key_blob='{key_blob}'
@@ -100,8 +152,9 @@ pub async fn fetch(
         return Ok(Vec::new());
     }
     let since = since_timestamp.max(0);
+    let state_dir = remote_state_directory(server);
     let script = format!(
-        "history={REMOTE_DIRECTORY}/.history-v1.tsv; if [ -r \"$history\" ]; then awk -F '|' -v since={since} '($1 == \"v1\" || $1 == \"v2\") && $2 >= since' \"$history\"; fi"
+        "history=\"{state_dir}/.history-v1.tsv\"; if [ -r \"$history\" ]; then awk -F '|' -v since={since} '($1 == \"v1\" || $1 == \"v2\" || $1 == \"v3\") && $2 >= since' \"$history\"; fi"
     );
     let output = run_remote_command(server, password, &script, Duration::from_secs(20)).await?;
     parse_history(&output)
@@ -116,7 +169,8 @@ pub async fn fetch_usage(
         return Ok(Vec::new());
     }
     let since = since_timestamp.max(0);
-    let script = format!("set -- {since}\n{}", REMOTE_USAGE_SCRIPT.replace("\r\n", "\n"));
+    let state_dir = remote_state_directory(server);
+    let script = format!("RACKTOP_STATE_DIR=\"{state_dir}\"; set -- {since}\n{}", REMOTE_USAGE_SCRIPT.replace("\r\n", "\n"));
     let output = run_remote_command(server, password, &script, Duration::from_secs(20)).await?;
     Ok(output
         .lines()
@@ -130,16 +184,19 @@ async fn install(server: &Server, password: Option<&str>) -> Result<(), String> 
     // sending them to Linux, where a trailing CR changes `set -e` into an invalid option.
     let collector_script = REMOTE_COLLECTOR_SCRIPT.replace("\r\n", "\n");
     let daemon_script = REMOTE_DAEMON_SCRIPT.replace("\r\n", "\n");
+    let state_dir = remote_state_directory(server);
     let encoded = STANDARD.encode(collector_script);
     let daemon_encoded = STANDARD.encode(daemon_script);
     let script = format!(
         r#"set -e
 set -u
-state={REMOTE_DIRECTORY}
+state="{state_dir}"
 command -v flock >/dev/null 2>&1 || {{ printf '远端历史需要 util-linux 的 flock 命令' >&2; exit 1; }}
 command -v timeout >/dev/null 2>&1 || {{ printf '远端历史需要 timeout 命令' >&2; exit 1; }}
+{}
 mkdir -p "$state"
 chmod 700 "$state"
+export RACKTOP_STATE_DIR="$state"
 printf '%s' '{encoded}' | base64 -d > "$state/.collector.sh"
 printf '%s' '{daemon_encoded}' | base64 -d > "$state/.daemon.sh"
 chmod 700 "$state/.collector.sh" "$state/.daemon.sh"
@@ -147,7 +204,7 @@ touch "$state/.client-heartbeat"
 running=0
 if [ -r "$state/.daemon.pid" ]; then
   pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "$state/.daemon.sh" >/dev/null 2>&1; then running=1; fi
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "sh $state/.daemon.sh" >/dev/null 2>&1; then running=1; fi
 fi
 if [ "$running" -ne 1 ]; then
   rm -f "$state/.daemon.pid"
@@ -170,7 +227,8 @@ if [ "$running" -ne 1 ]; then
   fi
 fi
 printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
-"#
+"#,
+        stop_legacy_shared_daemon()
     );
     let output = run_remote_command(server, password, &script, Duration::from_secs(25)).await?;
     if output
@@ -184,17 +242,12 @@ printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
 }
 
 async fn disable(server: &Server, password: Option<&str>) -> Result<(), String> {
-    let script = r#"state=$HOME/.racktop
-if [ -r "$state/.daemon.pid" ]; then
-  pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "$state/.daemon.sh" >/dev/null 2>&1; then
-    kill "$pid" 2>/dev/null || true
-  fi
-  rm -f "$state/.daemon.pid"
-fi
-printf '__RACKTOP_REMOTE_HISTORY_DISABLED__\n'
-"#;
-    let output = run_remote_command(server, password, script, Duration::from_secs(15)).await?;
+    let state_dir = remote_state_directory(server);
+    let script = format!(
+        "{}rm -f \"$state/.daemon.pid\"\nprintf '__RACKTOP_REMOTE_HISTORY_DISABLED__\\n'\n",
+        stop_verified_daemon(&state_dir),
+    );
+    let output = run_remote_command(server, password, &script, Duration::from_secs(15)).await?;
     if output
         .lines()
         .any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_DISABLED__")
@@ -265,7 +318,7 @@ fn parse_history(output: &str) -> Result<Vec<HistoryPoint>, String> {
 
 fn parse_history_line(line: &str) -> Result<HistoryPoint, String> {
     let fields: Vec<&str> = line.split('|').collect();
-    if fields.len() != 6 || !matches!(fields[0], "v1" | "v2") {
+    if fields.len() != 6 || !matches!(fields[0], "v1" | "v2" | "v3") {
         return Err("远端历史包含无法识别的记录".into());
     }
     let timestamp = fields[1]
@@ -276,16 +329,24 @@ fn parse_history_line(line: &str) -> Result<HistoryPoint, String> {
     let swap_utilization = parse_percent(fields[4])?;
     let mut gpu_utilizations = std::collections::HashMap::new();
     let mut gpu_memory_utilizations = std::collections::HashMap::new();
+    let mut gpu_temperatures_celsius = std::collections::HashMap::new();
+    let mut gpu_power_watts = std::collections::HashMap::new();
+    let mut gpu_fan_speeds_percent = std::collections::HashMap::new();
     let mut gpu_other_user_occupancies = std::collections::HashMap::new();
     for gpu in fields[5].split(';').filter(|value| !value.is_empty()) {
         let values: Vec<&str> = gpu.split(',').collect();
-        let expected_values = if fields[0] == "v2" { 4 } else { 3 };
+        let expected_values = match fields[0] {
+            "v1" => 3,
+            "v2" => 4,
+            "v3" => 7,
+            _ => unreachable!(),
+        };
         if values.len() != expected_values || values[0].is_empty() {
             return Err("远端 GPU 历史记录无效".into());
         }
         gpu_utilizations.insert(values[0].to_string(), parse_percent(values[1])?);
         gpu_memory_utilizations.insert(values[0].to_string(), parse_percent(values[2])?);
-        if fields[0] == "v2" {
+        if matches!(fields[0], "v2" | "v3") {
             gpu_other_user_occupancies.insert(
                 values[0].to_string(),
                 match values[3] {
@@ -294,6 +355,17 @@ fn parse_history_line(line: &str) -> Result<HistoryPoint, String> {
                     _ => return Err("远端 GPU 占用状态无效".into()),
                 },
             );
+        }
+        if fields[0] == "v3" {
+            if let Some(value) = parse_optional_number(values[4]) {
+                gpu_temperatures_celsius.insert(values[0].to_string(), value);
+            }
+            if let Some(value) = parse_optional_number(values[5]).filter(|value| *value >= 0.0) {
+                gpu_power_watts.insert(values[0].to_string(), value);
+            }
+            if let Some(value) = parse_optional_number(values[6]).filter(|value| (0.0..=100.0).contains(value)) {
+                gpu_fan_speeds_percent.insert(values[0].to_string(), Some(value));
+            }
         }
     }
     Ok(HistoryPoint {
@@ -315,11 +387,16 @@ fn parse_history_line(line: &str) -> Result<HistoryPoint, String> {
         gpu_memory_maxes: gpu_memory_utilizations.clone(),
         gpu_utilizations,
         gpu_memory_utilizations,
-        gpu_temperatures_celsius: HashMap::new(),
-        gpu_power_watts: HashMap::new(),
-        gpu_fan_speeds_percent: HashMap::new(),
+        gpu_temperatures_celsius,
+        gpu_power_watts,
+        gpu_fan_speeds_percent,
         gpu_other_user_occupancies,
     })
+}
+
+fn parse_optional_number(value: &str) -> Option<f64> {
+    let number = value.trim().parse::<f64>().ok()?;
+    number.is_finite().then_some(number)
 }
 
 fn parse_percent(value: &str) -> Result<f64, String> {
@@ -368,6 +445,247 @@ fn parse_usage_line(line: &str) -> Result<UsagePoint, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Execute the shipped collector, including its history/usage pipeline, in an
+    // isolated home with synthetic procfs and accelerator commands. No SSH/GPU.
+    #[cfg(unix)]
+    fn collect_fixture_history(gpus: &str, meminfo: &str) -> HistoryPoint {
+        collect_fixture_history_with_telemetry(gpus, meminfo, "")
+    }
+
+    #[cfg(unix)]
+    fn collect_fixture_history_with_telemetry(gpus: &str, meminfo: &str, telemetry: &str) -> HistoryPoint {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        let proc = root.join("proc");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&proc).unwrap();
+        std::fs::write(proc.join("stat"), "cpu 100 0 20 880 0 0 0\n").unwrap();
+        std::fs::write(proc.join("meminfo"), meminfo).unwrap();
+        let gpu_file = root.join("gpus.csv");
+        let telemetry_file = root.join("telemetry.csv");
+        std::fs::write(&gpu_file, gpus).unwrap();
+        std::fs::write(&telemetry_file, telemetry).unwrap();
+        for (name, body) in [
+            ("flock", "exit 0"),
+            ("sleep", "exit 0"),
+            ("npu-smi", "exit 1"),
+            ("nvidia-smi", "case \"$*\" in *--query-compute-apps=*) exit 0 ;; *temperature.gpu*) cat \"$RACKTOP_TEST_TELEMETRY\" ;; *--query-gpu=*) cat \"$RACKTOP_TEST_GPUS\" ;; esac"),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let script = REMOTE_COLLECTOR_SCRIPT.replace("/proc/", &format!("{}/", proc.display()));
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", root)
+            .env("RACKTOP_COLLECTOR_BOUNDED", "1")
+            .env("RACKTOP_TEST_GPUS", gpu_file)
+            .env("RACKTOP_TEST_TELEMETRY", telemetry_file)
+            .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
+        let history = std::fs::read_to_string(root.join(".racktop/.history-v1.tsv")).unwrap();
+        let points = parse_history(&history).unwrap();
+        assert_eq!(points.len(), 1);
+        points.into_iter().next().unwrap()
+    }
+
+    #[cfg(unix)]
+    const SHARED_MEMINFO: &str = "MemTotal: 125829120 kB\nMemAvailable: 41943040 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n";
+
+    #[cfg(unix)]
+    #[test]
+    fn collector_records_gb10_shared_memory_and_utilization() {
+        for name in ["NVIDIA GB10", "DGX Spark", "nvidia gb10"] {
+            let point = collect_fixture_history(
+                &format!("GPU-test, 25, [N/A], [N/A], {name}\n"),
+                SHARED_MEMINFO,
+            );
+            assert_eq!(point.gpu_utilizations["GPU-test"], 25.0);
+            assert_eq!(point.gpu_memory_utilizations["GPU-test"], 66.67);
+            assert_eq!(point.gpu_memory_utilizations["GPU-test"], point.memory_utilization);
+            assert!(!point.gpu_other_user_occupancies["GPU-test"]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collector_keeps_mixed_gpu_history_when_one_memory_query_is_na() {
+        let point = collect_fixture_history(
+            "GPU-shared, 25, [N/A], [N/A], NVIDIA GB10\nGPU-discrete, 80, 10240, 40960, NVIDIA A100\nGPU-unknown, 15, [N/A], [N/A], NVIDIA Future GPU\nGPU-gb100, 10, [N/A], [N/A], NVIDIA GB100\n",
+            SHARED_MEMINFO,
+        );
+        assert_eq!(point.gpu_utilizations.len(), 4);
+        assert_eq!(point.gpu_memory_utilizations["GPU-shared"], 66.67);
+        assert_eq!(point.gpu_memory_utilizations["GPU-discrete"], 25.0);
+        for uuid in ["GPU-unknown", "GPU-gb100"] {
+            assert_eq!(point.gpu_memory_utilizations[uuid], 0.0);
+            assert!(point.gpu_utilizations[uuid] > 0.0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collector_requires_host_available_memory_and_preserves_numeric_gpu_memory() {
+        let missing = collect_fixture_history(
+            "GPU-test, 25, [N/A], [N/A], NVIDIA GB10\n",
+            "MemTotal: 125829120 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+        );
+        assert_eq!(missing.gpu_memory_utilizations["GPU-test"], 0.0);
+        assert_eq!(missing.gpu_utilizations["GPU-test"], 25.0);
+        let full = collect_fixture_history(
+            "GPU-test, 0, [N/A], [N/A], NVIDIA GB10\n",
+            "MemTotal: 125829120 kB\nMemAvailable: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+        );
+        assert_eq!(full.gpu_memory_utilizations["GPU-test"], 100.0);
+        let numeric = collect_fixture_history("GPU-test, 25, 10240, 40960, NVIDIA GB10\n", SHARED_MEMINFO);
+        assert_eq!(numeric.gpu_memory_utilizations["GPU-test"], 25.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collector_persists_nvidia_temperature_power_and_fan_with_optional_metrics() {
+        let point = collect_fixture_history_with_telemetry(
+            "GPU-test, 25, 10240, 40960, NVIDIA RTX 4090\nGPU-no-fan, 10, 1024, 8192, NVIDIA RTX\n",
+            SHARED_MEMINFO,
+            "GPU-test, 58, 155.5, 42\nGPU-no-fan, 43, 90.2, [N/A]\n",
+        );
+
+        assert_eq!(point.gpu_temperatures_celsius["GPU-test"], 58.0);
+        assert_eq!(point.gpu_power_watts["GPU-test"], 155.5);
+        assert_eq!(point.gpu_fan_speeds_percent["GPU-test"], Some(42.0));
+        assert_eq!(point.gpu_temperatures_celsius["GPU-no-fan"], 43.0);
+        assert_eq!(point.gpu_power_watts["GPU-no-fan"], 90.2);
+        assert!(!point.gpu_fan_speeds_percent.contains_key("GPU-no-fan"));
+    }
+
+    #[test]
+    fn parses_v3_telemetry_and_keeps_legacy_rows_compatible() {
+        let points = parse_history(
+            "v1|1722700740|10|20|0|GPU-a,25,40\nv2|1722700800|11|21|0|GPU-a,30,50,1\nv3|1722700860|12|22|0|GPU-a,35,60,0,58.5,155.25,42;GPU-b,5,10,1,[N/A],[N/A],[N/A]\n",
+        ).unwrap();
+
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0].gpu_temperatures_celsius.get("GPU-a"), None);
+        assert_eq!(points[1].gpu_power_watts.get("GPU-a"), None);
+        assert_eq!(points[2].gpu_temperatures_celsius["GPU-a"], 58.5);
+        assert_eq!(points[2].gpu_power_watts["GPU-a"], 155.25);
+        assert_eq!(points[2].gpu_fan_speeds_percent["GPU-a"], Some(42.0));
+        assert!(!points[2].gpu_temperatures_celsius.contains_key("GPU-b"));
+        assert!(!points[2].gpu_power_watts.contains_key("GPU-b"));
+        assert!(!points[2].gpu_fan_speeds_percent.contains_key("GPU-b"));
+    }
+
+    #[test]
+    fn remote_state_directory_is_stable_and_unique_per_endpoint() {
+        let first = remote_state_directory_for_endpoint("GPU.EXAMPLE.", 22);
+        let normalized = remote_state_directory_for_endpoint("gpu.example", 22);
+        let different_port = remote_state_directory_for_endpoint("gpu.example", 2222);
+        let different_host = remote_state_directory_for_endpoint("gpu2.example", 22);
+
+        assert_eq!(first, normalized);
+        assert_ne!(first, different_port);
+        assert_ne!(first, different_host);
+        assert!(first.starts_with("$HOME/.racktop/remote-history/"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_collects_gpu_telemetry_after_client_heartbeat_expires() {
+        use std::{
+            os::unix::fs::PermissionsExt,
+            thread,
+            time::{Duration, Instant},
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let state = root.join(".racktop/remote-history/endpoint-a");
+        let other_state = root.join(".racktop/remote-history/endpoint-b");
+        let bin = root.join("bin");
+        let proc = root.join("proc");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&other_state).unwrap();
+        std::fs::write(other_state.join(".history-v1.tsv"), "other-endpoint-history\n").unwrap();
+        std::fs::create_dir_all(root.join(".racktop")).unwrap();
+        std::fs::write(root.join(".racktop/.history-v1.tsv"), "legacy-shared-history\n").unwrap();
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&proc).unwrap();
+        std::fs::write(proc.join("stat"), "cpu 100 0 20 880 0 0 0\n").unwrap();
+        std::fs::write(proc.join("meminfo"), SHARED_MEMINFO).unwrap();
+        std::fs::write(root.join("gpus.csv"), "GPU-daemon, 25, 1024, 8192, NVIDIA RTX\n").unwrap();
+        std::fs::write(root.join("telemetry.csv"), "GPU-daemon, 56, 145.7, 42\n").unwrap();
+        let collector = REMOTE_COLLECTOR_SCRIPT.replace("/proc/", &format!("{}/", proc.display()));
+        std::fs::write(state.join(".collector.sh"), collector).unwrap();
+        std::fs::write(state.join(".daemon.sh"), REMOTE_DAEMON_SCRIPT).unwrap();
+        std::fs::write(state.join(".client-heartbeat"), "").unwrap();
+        let stale_heartbeat = std::process::Command::new("touch")
+            .args(["-t", "200001010000"])
+            .arg(state.join(".client-heartbeat"))
+            .status()
+            .unwrap();
+        assert!(stale_heartbeat.success());
+
+        for (name, body) in [
+            ("flock", "exit 0"),
+            ("sleep", "case \"$1\" in 60) /bin/sleep 0.1 ;; *) /bin/sleep \"$@\" ;; esac"),
+            ("npu-smi", "exit 1"),
+            ("nvidia-smi", "case \"$*\" in *--query-compute-apps=*) exit 0 ;; *temperature.gpu*) cat \"$RACKTOP_TEST_TELEMETRY\" ;; *--query-gpu=*) cat \"$RACKTOP_TEST_GPUS\" ;; esac"),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let mut daemon = std::process::Command::new("sh")
+            .arg(state.join(".daemon.sh"))
+            .env("HOME", root)
+            .env("RACKTOP_STATE_DIR", &state)
+            .env("RACKTOP_COLLECTOR_BOUNDED", "1")
+            .env("RACKTOP_TEST_GPUS", root.join("gpus.csv"))
+            .env("RACKTOP_TEST_TELEMETRY", root.join("telemetry.csv"))
+            .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let history_path = state.join(".history-v1.tsv");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut collected = None;
+        while Instant::now() < deadline {
+            if let Ok(history) = std::fs::read_to_string(&history_path) {
+                collected = parse_history(&history).ok().and_then(|points| {
+                    points.into_iter().find(|point| point.gpu_temperatures_celsius.contains_key("GPU-daemon"))
+                });
+                if collected.is_some() { break; }
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+
+        let point = collected.expect("expired heartbeat should trigger a remote telemetry sample");
+        assert_eq!(point.gpu_temperatures_celsius["GPU-daemon"], 56.0);
+        assert_eq!(point.gpu_power_watts["GPU-daemon"], 145.7);
+        assert_eq!(point.gpu_fan_speeds_percent["GPU-daemon"], Some(42.0));
+        assert_eq!(
+            std::fs::read_to_string(other_state.join(".history-v1.tsv")).unwrap(),
+            "other-endpoint-history\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(".racktop/.history-v1.tsv")).unwrap(),
+            "legacy-shared-history\n"
+        );
+        assert!(history_path.exists());
+    }
 
     #[test]
     fn parses_remote_history_with_multiple_gpus() {
@@ -446,11 +764,36 @@ mod tests {
 
     #[test]
     fn remote_cleanup_script_targets_only_racktop_state() {
-        assert!(REMOTE_REMOVE_SCRIPT.contains("state=$HOME/.racktop"));
-        assert!(REMOTE_REMOVE_SCRIPT.contains("grep -F \"$state/.daemon.sh\""));
+        assert!(REMOTE_REMOVE_SCRIPT.contains("state=\"${RACKTOP_STATE_DIR:?}\""));
+        assert!(REMOTE_REMOVE_SCRIPT.contains("grep -F \"sh $state/.daemon.sh\""));
         assert!(REMOTE_REMOVE_SCRIPT.contains("kill -KILL \"$pid\""));
         assert!(REMOTE_REMOVE_SCRIPT.contains("rm -rf -- \"$state\""));
         assert!(!REMOTE_REMOVE_SCRIPT.contains("rm -rf -- $HOME"));
+    }
+
+    #[test]
+    fn removing_one_server_preserves_legacy_and_other_endpoint_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = directory.path().join(".racktop");
+        let first = legacy.join("remote-history/endpoint-a");
+        let second = legacy.join("remote-history/endpoint-b");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(legacy.join(".history-v1.tsv"), "legacy\n").unwrap();
+        std::fs::write(first.join(".history-v1.tsv"), "first\n").unwrap();
+        std::fs::write(second.join(".history-v1.tsv"), "second\n").unwrap();
+
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(build_remove_script("$HOME/.racktop/remote-history/endpoint-a", None).unwrap())
+            .env("HOME", directory.path())
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(!first.exists());
+        assert_eq!(std::fs::read_to_string(legacy.join(".history-v1.tsv")).unwrap(), "legacy\n");
+        assert_eq!(std::fs::read_to_string(second.join(".history-v1.tsv")).unwrap(), "second\n");
     }
 
     #[test]
@@ -467,9 +810,10 @@ mod tests {
         );
         std::fs::write(&authorized_keys, original).unwrap();
 
-        let script = build_remove_script(Some(&format!(
-            "ssh-ed25519 {matching_blob} ignored-comment"
-        )))
+        let script = build_remove_script(
+            "$HOME/.racktop/remote-history/test-endpoint",
+            Some(&format!("ssh-ed25519 {matching_blob} ignored-comment")),
+        )
         .unwrap();
         let output = std::process::Command::new("sh")
             .arg("-c")
@@ -497,7 +841,11 @@ mod tests {
 
     #[test]
     fn revocation_rejects_an_invalid_key_blob_before_running_ssh() {
-        assert!(build_remove_script(Some("ssh-ed25519 not-a/base64'value")).is_err());
+        assert!(build_remove_script(
+            "$HOME/.racktop/remote-history/test-endpoint",
+            Some("ssh-ed25519 not-a/base64'value")
+        )
+        .is_err());
     }
 
     #[test]

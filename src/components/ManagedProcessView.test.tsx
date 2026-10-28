@@ -30,8 +30,6 @@ describe('ManagedProcessView layout boundary', () => {
       servers={[]}
       snapshots={{}}
       projects={[]}
-      warnings={[]}
-      onDismissWarning={() => {}}
       onOpenTerminal={() => {}}
       onNotice={() => {}}
       onRefreshServer={async () => {}}
@@ -65,9 +63,7 @@ describe('ManagedProcessView layout boundary', () => {
         updatedAt: 1,
         status: 'found',
       }]}
-      warnings={[]}
       initialTab="profiles"
-      onDismissWarning={() => {}}
       onOpenTerminal={() => {}}
       onNotice={() => {}}
       onRefreshServer={async () => {}}

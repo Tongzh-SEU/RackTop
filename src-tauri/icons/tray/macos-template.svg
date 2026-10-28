@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 1024 1024">
+  <defs><mask id="cutout" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+    <rect x="72" y="72" width="880" height="880" rx="212" fill="white"/>
+    <path d="M218 552h128l74-232 116 392 84-270 58 110h128" fill="none" stroke="black" stroke-width="68" stroke-linecap="round" stroke-linejoin="round"/>
+  </mask></defs>
+  <rect width="1024" height="1024" fill="black" mask="url(#cutout)"/>
+</svg>

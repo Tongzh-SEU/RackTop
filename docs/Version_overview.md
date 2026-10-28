@@ -2,6 +2,34 @@
 
 面向用户的简明更新说明，最新版本位于最上方。
 
+## 1.26.2
+
+- macOS 菜单栏图标采用波形镂空的单色 RackTop 标志，随菜单栏深浅背景显示。
+- Windows 和 Linux 托盘采用透明圆角的彩色 RackTop 标志。
+- Windows 托盘左键打开主窗口，右键显示菜单；Linux 保持原有点击行为。
+- 修复 macOS 托盘菜单因重复刷新而自动关闭的问题。
+
+- 精简“我的进程”运行页，移除异常汇总模块；任务结果在“最近结束”查看，保留任务结束通知与服务器告警。
+
+- 新增系统 MEM 超限告警，阈值可在“空闲与告警”中设置为 80%–100%，默认 90%。
+- 系统 MEM 告警遵守通知总开关，持续超限仅通知一次，并支持忽略、恢复及异常消失后自动清除。
+- 修复纯 CPU 服务器忽略 GPU 异常提醒后，总览仍显示无加速卡提醒的问题。感谢 [ChenxuLi-cxli](https://github.com/ChenxuLi-cxli) 提出 [Issue #108](https://github.com/Tongzh-SEU/RackTop/issues/108)。
+- 配置页恢复列表统一显示“已忽略的提醒”，忽略提示明确指向服务器“配置”页。
+- 保留重新打开时的显存预警忽略状态，确认异常恢复后自动移除对应恢复入口。
+- 修复 Windows 深色任务栏托盘图标看不清的问题，使用彩色标志，计数和告警角标随系统任务栏深浅主题切换颜色。感谢 [Tommie-P-xl](https://github.com/Tommie-P-xl) 提出 [Issue #146](https://github.com/Tongzh-SEU/RackTop/issues/146)。
+- 修复“我的进程”启动配置名称过长撑宽卡片的问题，过长名称显示省略号。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #150](https://github.com/Tongzh-SEU/RackTop/pull/150)。
+- 优化启动配置的 GPU 数量和每卡最低空闲显存输入，支持清空编辑并在失焦时去除多余前导零。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #150](https://github.com/Tongzh-SEU/RackTop/pull/150)。
+
+- 修复 NVIDIA GB10 / DGX Spark 共享内存设备远端历史中的 GPU 显存与利用率记录，显存字段不可用时按共享内存池估算容量与占用。
+- 修复 GB10 / DGX Spark 把共享系统内存误判为专用 GPU 显存持续占用告警的问题。
+- 感谢 [CAN230921](https://github.com/CAN230921) 提交 [PR #147](https://github.com/Tongzh-SEU/RackTop/pull/147)，并关联 [Issue #93](https://github.com/Tongzh-SEU/RackTop/issues/93)。
+- 按 SSH 主机和端口隔离远端历史、用量、心跳、采集器 PID 与锁文件，修复共享用户目录造成的历史串台和采集互相抑制问题。
+- App 关闭后远端继续采集 GPU 温度、功耗和风扇数据，重新打开 App 时同步最新历史。感谢 [JustHeart31](https://github.com/JustHeart31) 在 [Issue #148](https://github.com/Tongzh-SEU/RackTop/issues/148) 中反馈 GPU 温度趋势问题。
+
+- 修复历史缓存过期后未释放导致的内存持续增长。感谢 [JustHeart31](https://github.com/JustHeart31) 通过 [Issue #153](https://github.com/Tongzh-SEU/RackTop/issues/153) 反馈 Windows 长时间闲置白屏；白屏恢复情况仍待 Windows 实机验证。
+- 概览页 CPU 进程默认显示前 5 个，支持展开全部和收起。
+- Issue #148 中温度曲线卡顿及鼠标跟随提示的问题尚待独立验证。
+
 ## 1.26.1
 
 - 修复 Linux 应用图标透明圆角和桌面图标显示异常。

@@ -5,7 +5,6 @@ import type { LaunchProfile, ManagedRun, ManagedRunRemoteStatus, Project, Server
 import { hasOtherUserGpuWorkload } from '../utils/gpu'
 import { currentUserProcessCount } from '../utils/processRelations'
 import { loadLaunchProfiles, loadManagedRuns, processBelongsToManagedRun, projectPathOnServer, projectWorkingDirectory, runIsObserved, runProcesses, saveLaunchProfiles, saveManagedRuns } from '../utils/managedRuns'
-import type { MineProcessWarning } from '../utils/mineProcessWarnings'
 import { elapsedSeconds, isGpuProcess, unmanagedProcessGroups } from '../utils/unmanagedProcessGroups'
 import type { UnmanagedProcessGroup } from '../utils/unmanagedProcessGroups'
 import { normalizeLaunchCommand, parseTaskParameters, replaceLaunchContext, resolveProjectLogPath, updateLaunchParameter } from '../utils/launchCommand'
@@ -110,15 +109,13 @@ function currentUserSnapshot(snapshot: Snapshot, runs: ManagedRun[]) {
   }
 }
 
-export function ManagedProcessView({ servers, snapshots, projects, warnings, launchIntent, initialTab = 'running', onLaunchIntentConsumed, onDismissWarning, onOpenTerminal, onNotice, onRefreshServer }: {
+export function ManagedProcessView({ servers, snapshots, projects, launchIntent, initialTab = 'running', onLaunchIntentConsumed, onOpenTerminal, onNotice, onRefreshServer }: {
   servers: Server[]
   snapshots: Record<string, Snapshot>
   projects: Project[]
-  warnings: MineProcessWarning[]
   launchIntent?: ManagedLaunchIntent | null
   initialTab?: ViewTab
   onLaunchIntentConsumed?: () => void
-  onDismissWarning: (warningId: string) => void
   onOpenTerminal: (serverId: string) => void
   onNotice: (message: string) => void
   onRefreshServer: (serverId: string) => Promise<void>
@@ -138,6 +135,8 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
   const [unmanagedOpen, setUnmanagedOpen] = useState(false)
   const [launchOpen, setLaunchOpen] = useState(false)
   const [launchProfile, setLaunchProfile] = useState<LaunchProfile>(() => defaultProfile(projects))
+  const [gpuCountInput, setGpuCountInput] = useState(String(launchProfile.gpuCount))
+  const [gpuMemoryInput, setGpuMemoryInput] = useState(String(launchProfile.minimumGpuMemoryGb))
   const [launchProjectContextId, setLaunchProjectContextId] = useState<string | null>(null)
   const [selectedServerId, setSelectedServerId] = useState('')
   const [assignmentMode, setAssignmentMode] = useState<'automatic' | 'manual'>('automatic')
@@ -291,7 +290,10 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
   }, [launchOpen, requestedGpuIndices, selectedSnapshot])
 
   function openLaunch(profile?: LaunchProfile, intent?: ManagedLaunchIntent, projectContextId: string | null = null) {
-    setLaunchProfile(profile ? { ...profile } : defaultProfile(projects))
+    const nextProfile = profile ? { ...profile } : defaultProfile(projects)
+    setLaunchProfile(nextProfile)
+    setGpuCountInput(String(nextProfile.gpuCount))
+    setGpuMemoryInput(String(nextProfile.minimumGpuMemoryGb))
     setLaunchProjectContextId(projectContextId)
     setSelectedServerId(intent?.serverId ?? '')
     setAssignmentMode(intent?.gpuUuid ? 'manual' : 'automatic')
@@ -313,6 +315,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
     const pastedCommand = patch.command
     const normalized = normalizeLaunchCommand(pastedCommand)
     if (normalized.detectedCudaVisibleDevices) {
+      setGpuCountInput(String(normalized.detectedCudaVisibleDevices.length))
       setRequestedGpuIndices(normalized.detectedCudaVisibleDevices)
       setAssignmentMode('manual')
       setSelectedGpuUuids([])
@@ -497,8 +500,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
     </div>
 
     {tab === 'running' && <>
-      <div className="managed-process-summary"><span><strong>{activeRuns.length}</strong> 个任务</span><span><strong>{activeServerIds.size}</strong> 台服务器</span><span><strong>{activeRuns.reduce((sum, run) => sum + run.gpuUuids.length, 0)}</strong> 张 GPU</span>{warnings.some((warning) => warning.tone === 'warning') && <span className="is-warning">{warnings.filter((warning) => warning.tone === 'warning').length} 项需要注意</span>}</div>
-      {warnings.filter((warning) => warning.tone === 'warning').map((warning) => <div className="managed-process-warning" key={warning.id}><AlertCircle size={15} /><span>{warning.message}</span><button className="icon-button" onClick={() => onDismissWarning(warning.id)} aria-label="忽略"><X size={13} /></button></div>)}
+      <div className="managed-process-summary"><span><strong>{activeRuns.length}</strong> 个任务</span><span><strong>{activeServerIds.size}</strong> 台服务器</span><span><strong>{activeRuns.reduce((sum, run) => sum + run.gpuUuids.length, 0)}</strong> 张 GPU</span></div>
       {servers.filter((server) => activeRuns.some((run) => run.serverId === server.id)).map((server) => {
         const snapshot = snapshots[server.id]
         const serverRuns = activeRuns.filter((run) => run.serverId === server.id)
@@ -559,9 +561,9 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
               <button className="managed-profile-group__header" onClick={() => setCollapsedProfileGroups((current) => { const next = new Set(current); if (next.has(group.id)) next.delete(group.id); else next.add(group.id); return next })} aria-expanded={!collapsedProfileGroups.has(group.id)}>
                 <span>{group.name}<small>{group.profiles.length}</small></span>{collapsedProfileGroups.has(group.id) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
               </button>
-              {!collapsedProfileGroups.has(group.id) && <div className="managed-profile-group__items">{group.profiles.map((profile) => <button className={profile.id === launchProfile.id ? 'is-selected' : ''} key={profile.id} onClick={() => { setLaunchProfile({ ...profile }); setSelectedServerId(''); setLaunchError(null); setParametersOpen(false) }}><span>{profile.name}</span></button>)}</div>}
+              {!collapsedProfileGroups.has(group.id) && <div className="managed-profile-group__items">{group.profiles.map((profile) => <button className={profile.id === launchProfile.id ? 'is-selected' : ''} key={profile.id} onClick={() => { setLaunchProfile({ ...profile }); setGpuCountInput(String(profile.gpuCount)); setGpuMemoryInput(String(profile.minimumGpuMemoryGb)); setSelectedServerId(''); setLaunchError(null); setParametersOpen(false) }}><span>{profile.name}</span></button>)}</div>}
             </div>)}
-            <button className={!profiles.some((profile) => profile.id === launchProfile.id) ? 'is-selected' : ''} onClick={() => { setLaunchProfile(defaultProfile(projects, launchProjectContextId)); setParametersOpen(false) }}><span>{launchProjectContextId ? '添加启动配置' : '临时任务'}</span><small>{launchProjectContextId ? '为当前项目创建模板' : '可选择保存配置'}</small></button>
+            <button className={!profiles.some((profile) => profile.id === launchProfile.id) ? 'is-selected' : ''} onClick={() => { const profile = defaultProfile(projects, launchProjectContextId); setLaunchProfile(profile); setGpuCountInput(String(profile.gpuCount)); setGpuMemoryInput(String(profile.minimumGpuMemoryGb)); setParametersOpen(false) }}><span>{launchProjectContextId ? '添加启动配置' : '临时任务'}</span><small>{launchProjectContextId ? '为当前项目创建模板' : '可选择保存配置'}</small></button>
           </aside>
           <div className="managed-launch-form">
             <section><header><span>1</span><div><strong>任务与命令</strong><small>工作目录、运行位置与后台日志由 RackTop 统一处理。</small></div></header>
@@ -577,7 +579,7 @@ export function ManagedProcessView({ servers, snapshots, projects, warnings, lau
                 {parametersOpen && <div className="managed-parameter-editor__list" id="managed-parameter-list"><div className="managed-parameter-editor__head"><span>名称</span><span>值</span></div>{launchParameters.map((parameter) => <div className="managed-parameter-editor__row" key={`${parameter.start}-${parameter.name}`}><code title={parameter.name}>{parameter.name}</code>{parameter.hasValue ? <input aria-label={`${parameter.name} 的值`} value={parameter.value} onChange={(event) => updateLaunchProfile({ command: updateLaunchParameter(launchProfile.command, parameter, event.target.value) })} /> : <label><input type="checkbox" checked onChange={(event) => updateLaunchProfile({ command: updateLaunchParameter(launchProfile.command, parameter, '', event.target.checked) })} />启用</label>}</div>)}</div>}
               </div>}
             </section>
-            <section><header><span>2</span><div><strong>运行位置</strong><small>{selectedProject ? '仅显示已配置当前项目的服务器。' : `自动推荐按空闲显存排序，也可以指定具体 ${selectedAccelerator}。`}</small></div></header><div className="managed-launch-server-list">{launchServers.map((server) => { const snapshot = snapshots[server.id]; const system = snapshot?.system; const accelerator = snapshot ? acceleratorLabel(snapshot) : 'GPU'; const availableMemoryBytes = system?.memoryAvailableBytes ?? Math.max(0, (system?.memoryTotalBytes ?? 0) - (system?.memoryUsedBytes ?? 0)); return <button className={server.id === selectedServerId ? 'is-selected' : ''} key={server.id} onClick={() => { setSelectedServerId(server.id); setSelectedGpuUuids([]); setLaunchError(null) }}><span><i className={`server-row__status server-row__status--${server.status}`} /><strong>{server.name}</strong></span><small>{snapshot?.gpus.length ?? 0} 张 {accelerator} · {formatMemoryBytes(availableMemoryBytes).replace(' GB', '')} / {formatMemoryBytes(system?.memoryTotalBytes ?? 0)} 系统 MEM 可用</small></button>})}{launchServers.length === 0 && <p className="managed-launch-server-empty">当前没有已配置该项目且在线的服务器，请先在“我的项目”中配置同步目标。</p>}</div><div className="managed-assignment-mode"><button className={assignmentMode === 'automatic' ? 'is-selected' : ''} onClick={() => setAssignmentMode('automatic')}>自动推荐</button><button className={assignmentMode === 'manual' ? 'is-selected' : ''} onClick={() => setAssignmentMode('manual')}>指定 {selectedAccelerator}</button></div><div className="managed-gpu-list">{availableGpus.map((gpu, index) => { const selected = selectedGpuUuids.includes(gpu.uuid); return <label className={selected ? 'is-selected' : ''} key={gpu.uuid}><input type="checkbox" checked={selected} disabled={assignmentMode === 'automatic'} onChange={(event) => setSelectedGpuUuids((current) => event.target.checked ? [...current, gpu.uuid] : current.filter((uuid) => uuid !== gpu.uuid))} /><span><strong>{selectedAccelerator} {gpu.index}</strong><small>{((gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024).toFixed(1)} / {(gpu.memoryTotalMb / 1024).toFixed(1)} GB MEM 可用</small></span>{assignmentMode === 'automatic' && index < launchProfile.gpuCount && <em>推荐</em>}</label>})}{selectedServerId && availableGpus.length === 0 && <p>没有满足当前筛选条件的 {selectedAccelerator}。</p>}</div><div className="managed-resource-fields"><label>{selectedAccelerator} 数量<input type="number" min="0" max="16" value={launchProfile.gpuCount} onChange={(event) => updateLaunchProfile({ gpuCount: Math.max(0, Number(event.target.value) || 0) })} /></label><label>每卡最低空闲显存<input type="number" min="0" value={launchProfile.minimumGpuMemoryGb} onChange={(event) => updateLaunchProfile({ minimumGpuMemoryGb: Math.max(0, Number(event.target.value) || 0) })} /></label><label className="managed-resource-occupancy"><span>{selectedAccelerator} 使用情况</span><span className="managed-resource-occupancy__control"><span>是否独占</span><input type="checkbox" checked={excludeOccupiedGpus} onChange={(event) => setExcludeOccupiedGpus(event.target.checked)} /></span></label></div></section>
+            <section><header><span>2</span><div><strong>运行位置</strong><small>{selectedProject ? '仅显示已配置当前项目的服务器。' : `自动推荐按空闲显存排序，也可以指定具体 ${selectedAccelerator}。`}</small></div></header><div className="managed-launch-server-list">{launchServers.map((server) => { const snapshot = snapshots[server.id]; const system = snapshot?.system; const accelerator = snapshot ? acceleratorLabel(snapshot) : 'GPU'; const availableMemoryBytes = system?.memoryAvailableBytes ?? Math.max(0, (system?.memoryTotalBytes ?? 0) - (system?.memoryUsedBytes ?? 0)); return <button className={server.id === selectedServerId ? 'is-selected' : ''} key={server.id} onClick={() => { setSelectedServerId(server.id); setSelectedGpuUuids([]); setLaunchError(null) }}><span><i className={`server-row__status server-row__status--${server.status}`} /><strong>{server.name}</strong></span><small>{snapshot?.gpus.length ?? 0} 张 {accelerator} · {formatMemoryBytes(availableMemoryBytes).replace(' GB', '')} / {formatMemoryBytes(system?.memoryTotalBytes ?? 0)} 系统 MEM 可用</small></button>})}{launchServers.length === 0 && <p className="managed-launch-server-empty">当前没有已配置该项目且在线的服务器，请先在“我的项目”中配置同步目标。</p>}</div><div className="managed-assignment-mode"><button className={assignmentMode === 'automatic' ? 'is-selected' : ''} onClick={() => setAssignmentMode('automatic')}>自动推荐</button><button className={assignmentMode === 'manual' ? 'is-selected' : ''} onClick={() => setAssignmentMode('manual')}>指定 {selectedAccelerator}</button></div><div className="managed-gpu-list">{availableGpus.map((gpu, index) => { const selected = selectedGpuUuids.includes(gpu.uuid); return <label className={selected ? 'is-selected' : ''} key={gpu.uuid}><input type="checkbox" checked={selected} disabled={assignmentMode === 'automatic'} onChange={(event) => setSelectedGpuUuids((current) => event.target.checked ? [...current, gpu.uuid] : current.filter((uuid) => uuid !== gpu.uuid))} /><span><strong>{selectedAccelerator} {gpu.index}</strong><small>{((gpu.memoryTotalMb - gpu.memoryUsedMb) / 1024).toFixed(1)} / {(gpu.memoryTotalMb / 1024).toFixed(1)} GB MEM 可用</small></span>{assignmentMode === 'automatic' && index < launchProfile.gpuCount && <em>推荐</em>}</label>})}{selectedServerId && availableGpus.length === 0 && <p>没有满足当前筛选条件的 {selectedAccelerator}。</p>}</div><div className="managed-resource-fields"><label>{selectedAccelerator} 数量<input type="number" min="0" max="16" value={gpuCountInput} onChange={(event) => { setGpuCountInput(event.target.value); updateLaunchProfile({ gpuCount: Math.max(0, Number(event.target.value) || 0) }) }} onBlur={() => setGpuCountInput(String(launchProfile.gpuCount))} /></label><label>每卡最低空闲显存<input type="number" min="0" value={gpuMemoryInput} onChange={(event) => { setGpuMemoryInput(event.target.value); updateLaunchProfile({ minimumGpuMemoryGb: Math.max(0, Number(event.target.value) || 0) }) }} onBlur={() => setGpuMemoryInput(String(launchProfile.minimumGpuMemoryGb))} /></label><label className="managed-resource-occupancy"><span>{selectedAccelerator} 使用情况</span><span className="managed-resource-occupancy__control"><span>是否独占</span><input type="checkbox" checked={excludeOccupiedGpus} onChange={(event) => setExcludeOccupiedGpus(event.target.checked)} /></span></label></div></section>
             <section><header><span>3</span><div><strong>启动前检查</strong><small>项目、数据集和模型只在确实缺少副本时同步。</small></div></header><div className="managed-preflight"><div><CheckCircle2 size={15} /><span><strong>{selectedProject?.name ?? '临时命令'}</strong><small>{selectedProject ? selectedProjectPath || '所选服务器没有项目副本' : launchProfile.workingDirectory}</small></span></div>{selectedProject?.datasetIds.map((id) => { const dataset = projects.find((item) => item.id === id); const path = dataset && selectedServerId ? projectPathOnServer(dataset, selectedServerId) : ''; return dataset ? <div key={id}><Database size={15} /><span><strong>{dataset.name}</strong><small>{path || '所选服务器尚未配置数据集副本'}</small></span></div> : null })}{selectedProject?.modelIds.map((id) => { const model = projects.find((item) => item.id === id); const path = model && selectedServerId ? projectPathOnServer(model, selectedServerId) : ''; return model ? <div key={id}><Box size={15} /><span><strong>{model.name}</strong><small>{path || '所选服务器尚未配置模型副本'}</small></span></div> : null })}<label><input type="checkbox" checked={syncDependencies} onChange={(event) => setSyncDependencies(event.target.checked)} /><span><strong>启动前补齐待更新副本</strong><small>遇到冲突时停止启动，不覆盖远端修改。</small></span></label></div><pre className="managed-command-preview"><code>{replaceLaunchContext(launchProfile.command, selectedProjectPath || launchProfile.workingDirectory, selectedGpuIndices)}{'\n\n'}# RackTop 受管日志: ~/.racktop/runs/&lt;task-id&gt;/output.log{launchProfile.projectLogPath ? `\n# 同步到项目: ${resolveProjectLogPath(launchProfile.projectLogPath, launchProfile.command)}` : ''}</code></pre><label className="managed-save-profile"><input type="checkbox" checked={saveProfile} onChange={(event) => setSaveProfile(event.target.checked)} />启动后保存为启动配置</label>{launchError && <p className="form-error" role="alert">{launchError}</p>}</section>
           </div>
         </div>

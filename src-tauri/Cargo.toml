@@ -1,6 +1,6 @@
 [package]
 name = "racktop"
-version = "1.26.1"
+version = "1.26.2"
 description = "Live GPU & CPU monitoring for every server"
 authors = ["RackTop"]
 edition = "2024"
@@ -47,7 +47,7 @@ tauri-plugin-process = "2"
 
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-single-instance = "2"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gio = "0.18"
