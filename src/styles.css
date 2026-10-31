@@ -544,7 +544,8 @@ button.gpu-card:active { transform: scale(.99); }
 .segmented-control { display: grid; grid-template-columns: repeat(2, 44px); padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-subtle); }
 .segmented-control button { min-height: 24px; padding: 0; border: 0; border-radius: 5px; color: var(--text-tertiary); background: transparent; font-size: calc(9px + var(--font-adjust, 0px)); font-weight: 700; }
 .segmented-control button[aria-pressed="true"] { color: var(--text); background: var(--surface-solid); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-.history-heatmap__scroll { overflow-x: auto; overflow-y: hidden; padding: 1px 0 5px; scrollbar-color: color-mix(in srgb, var(--text-tertiary) 20%, transparent) transparent; scrollbar-width: thin; }
+/* Reserve classic scrollbar space on first layout. */
+.history-heatmap__scroll { overflow-x: scroll; overflow-y: hidden; padding: 1px 0 5px; scrollbar-color: color-mix(in srgb, var(--text-tertiary) 20%, transparent) transparent; scrollbar-width: thin; }
 .history-heatmap__grid { display: grid; align-items: center; gap: 2px; width: 100%; }
 .history-heatmap__day { overflow: visible; color: var(--text-tertiary); font-size: calc(8px + var(--font-adjust, 0px)); line-height: 12px; white-space: nowrap; }
 .history-heatmap__time { position: sticky; inset-inline-start: 0; z-index: 2; padding: 0 2px 0 0; color: var(--text-tertiary); background: var(--surface); font-size: calc(8px + var(--font-adjust, 0px)); line-height: 12px; text-align: left; font-variant-numeric: tabular-nums; }
