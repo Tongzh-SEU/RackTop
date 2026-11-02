@@ -2,6 +2,14 @@
 
 面向用户的简明更新说明，最新版本位于最上方。
 
+## 1.26.3
+
+- 优化“我的项目”卡片的批量同步按钮位置，将其移至顶部操作区并统一文案为“批量同步 (N)”。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #159](https://github.com/Tongzh-SEU/RackTop/pull/159)。
+- 优化资源热力图横向滚动条的空间预留，避免传统占位式滚动条出现后挤占内容高度。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #159](https://github.com/Tongzh-SEU/RackTop/pull/159)。
+- 修复启动配置参数摘要换行的问题，空间不足时保持单行并通过“+N 项”显示剩余数量。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #161](https://github.com/Tongzh-SEU/RackTop/pull/161)。
+- 优化长参数标签的截断，优先保留较短的参数名或值，悬停可查看完整内容。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #161](https://github.com/Tongzh-SEU/RackTop/pull/161)。
+- 修复界面缩放时启动参数文字越界或过早隐藏标签的问题。
+
 ## 1.26.2
 
 - macOS 菜单栏图标采用波形镂空的单色 RackTop 标志，随菜单栏深浅背景显示。
