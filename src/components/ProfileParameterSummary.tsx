@@ -19,11 +19,12 @@ export function ProfileParameterSummary({ parameters }: { parameters: LaunchPara
           + parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth)
         const key = chip.querySelector('code')!
         const value = chip.querySelector('em')
-        // Measure natural widths, rounding up so fractional pixels do not cause ellipsis.
+        // Computed widths stay in CSS pixels under app-shell scaling, like clientWidth.
+        // Round natural text widths up so fractional pixels do not cause ellipsis.
         key.style.width = 'max-content'
         if (value) value.style.width = 'max-content'
-        const keyWidth = Math.ceil(key.getBoundingClientRect().width)
-        const valueWidth = value ? Math.ceil(value.getBoundingClientRect().width) : 0
+        const keyWidth = Math.ceil(parseFloat(getComputedStyle(key).width))
+        const valueWidth = value ? Math.ceil(parseFloat(getComputedStyle(value).width)) : 0
         const naturalWidth = keyWidth + valueWidth + (value ? textGap : 0) + inset
         if (naturalWidth > limit) {
           const contentWidth = limit - inset - (value ? textGap : 0)
@@ -32,7 +33,7 @@ export function ProfileParameterSummary({ parameters }: { parameters: LaunchPara
           key.style.width = `${allocatedKey}px`
           if (value) value.style.width = `${contentWidth - allocatedKey}px`
         }
-        return chip.getBoundingClientRect().width
+        return parseFloat(getComputedStyle(chip).width)
       })
       let count = chips.length
       for (; count >= 0; count--) {
@@ -40,7 +41,7 @@ export function ProfileParameterSummary({ parameters }: { parameters: LaunchPara
         more.textContent = `+${remaining} 项`
         more.hidden = remaining === 0
         const used = widths.slice(0, count).reduce((sum, width) => sum + width, 0)
-          + Math.max(0, count - 1) * gap + (remaining ? more.getBoundingClientRect().width + (count ? gap : 0) : 0)
+          + Math.max(0, count - 1) * gap + (remaining ? parseFloat(getComputedStyle(more).width) + (count ? gap : 0) : 0)
         if (used <= available || count === 0) break
       }
       chips.forEach((chip, index) => { chip.style.visibility = index < count ? 'visible' : 'hidden'; chip.style.position = index < count ? '' : 'absolute' })

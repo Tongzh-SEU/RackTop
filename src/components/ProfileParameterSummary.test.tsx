@@ -29,7 +29,7 @@ describe('profile parameter summary', () => {
 
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-it('allocates measured text widths and updates the hidden count on resize', () => {
+it.each([0.8, 1, 1.2])('allocates text widths and updates the hidden count at %s zoom', (zoom) => {
   let width = 1000
   let resize = () => {}
   const disconnect = vi.fn()
@@ -39,20 +39,28 @@ it('allocates measured text widths and updates the hidden count on resize', () =
     disconnect = disconnect
   })
   vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => width)
-  // Simulate long/short text independently of jsdom's missing layout engine.
-  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-    if (this.matches('.managed-profile-parameters > span')) {
-      const style = getComputedStyle(this)
-      const children = Array.from(this.children) as HTMLElement[]
+  const getStyle = globalThis.getComputedStyle
+  // Layout widths stay in CSS pixels while bounding rectangles include app zoom.
+  const layoutWidth = (element: HTMLElement): number => {
+    if (element.matches('.managed-profile-parameters > span')) {
+      const style = getStyle(element)
+      const children = Array.from(element.children) as HTMLElement[]
       const textWidth = children.reduce((sum, child) => sum + (child.style.width === 'max-content'
-        ? child.getBoundingClientRect().width : parseFloat(child.style.width)), 0)
-      return { width: Math.min(parseFloat(style.maxWidth), textWidth + parseFloat(style.columnGap)
+        ? layoutWidth(child) : parseFloat(child.style.width)), 0)
+      return Math.min(parseFloat(style.maxWidth), textWidth + parseFloat(style.columnGap)
         + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
-        + parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth)) } as DOMRect
+        + parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth))
     }
-    const width = this.textContent === '--runner' ? 40.4 : this.textContent === 'pooling' ? 30.4
-      : this.matches('code, em') ? (this.textContent!.includes('long') ? 300 : 10) : 35
-    return { width } as DOMRect
+    return element.textContent === '--runner' ? 40.4 : element.textContent === 'pooling' ? 30.4
+      : element.matches('code, em') ? (element.textContent!.includes('long') ? 300 : 10) : 35
+  }
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    return { width: layoutWidth(this) * zoom } as DOMRect
+  })
+  vi.spyOn(globalThis, 'getComputedStyle').mockImplementation((element) => {
+    const style = getStyle(element)
+    Object.defineProperty(style, 'width', { value: `${layoutWidth(element as HTMLElement)}px`, configurable: true })
+    return style
   })
   const stylesheet = document.createElement('style')
   // jsdom does not expand gap shorthand into computed columnGap as browsers do.
