@@ -1,4 +1,21 @@
-import type { Snapshot } from '../types/models'
+import type { Server, Snapshot } from '../types/models'
+
+export interface SystemMemoryWarning {
+  serverId: string
+  serverName: string
+  memoryUsedBytes: number
+  memoryTotalBytes: number
+  percent: number
+  threshold: number
+}
+
+export function deriveSystemMemoryWarnings(servers: Server[], snapshots: Record<string, Snapshot>, threshold: number | undefined, ignoredIds: Set<string>): SystemMemoryWarning[] {
+  return servers.flatMap((server) => {
+    const snapshot = snapshots[server.id]
+    if (!snapshot || ignoredIds.has(server.id) || !hasSystemMemoryWarning(snapshot, threshold)) return []
+    return [{ serverId: server.id, serverName: server.name, memoryUsedBytes: snapshot.system.memoryUsedBytes, memoryTotalBytes: snapshot.system.memoryTotalBytes, percent: systemMemoryPercent(snapshot)!, threshold: systemMemoryThreshold(threshold) }]
+  })
+}
 
 export const IGNORED_SYSTEM_MEMORY_KEY = 'racktop.ignoredSystemMemoryWarnings.v1'
 

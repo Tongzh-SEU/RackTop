@@ -4,6 +4,10 @@
 
 ## 1.26.3
 
+- 通知中心新增系统 MEM 预警，显示内存用量、使用率与阈值，并计入铃铛提示和预警数量。
+- 概览 CPU 卡片新增系统 MEM 超限的橙色描边与异常详情图标。
+- 统一通知中心、总览和概览的系统 MEM 预警详情弹窗。
+- 系统 MEM 预警在各入口同步忽略与恢复，内存恢复后自动清除。
 - 优化“我的项目”卡片的批量同步按钮位置，将其移至顶部操作区并统一文案为“批量同步 (N)”。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #159](https://github.com/Tongzh-SEU/RackTop/pull/159)。
 - 优化资源热力图横向滚动条的空间预留，避免传统占位式滚动条出现后挤占内容高度。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #159](https://github.com/Tongzh-SEU/RackTop/pull/159)。
 - 修复启动配置参数摘要换行的问题，空间不足时保持单行并通过“+N 项”显示剩余数量。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #161](https://github.com/Tongzh-SEU/RackTop/pull/161)。

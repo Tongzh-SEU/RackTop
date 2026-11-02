@@ -193,6 +193,9 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .notification-dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border: 1.5px solid var(--surface-solid); border-radius: 50%; background: var(--red); }
 .reservation-row--warning { border-color: var(--border); background: transparent; }
 .reservation-row--warning .reservation-row__content em { color: color-mix(in srgb, var(--orange) 78%, var(--text-secondary)); background: color-mix(in srgb, var(--orange) 7%, var(--surface-solid)); }
+.reservation-warning-open { display: inline-flex; align-items: center; min-width: 0; gap: 4px; padding: 0; border: 0; color: inherit; background: transparent; font: inherit; text-align: left; }
+.reservation-warning-open svg { flex: 0 0 auto; color: var(--text-tertiary); }
+.reservation-warning-open:focus-visible { border-radius: 3px; outline: 2px solid var(--blue); outline-offset: 3px; }
 .activity-log-sheet { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(940px, calc(100vw - 32px)); max-height: min(86vh, 820px); overflow: hidden; }
 .activity-log-body { min-height: 360px; overflow: auto; }
 .activity-log-totals { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; padding: 15px 20px 16px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); }

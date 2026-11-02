@@ -83,6 +83,105 @@ function useMemory(percent: number) {
 }
 
 describe('system MEM warnings', () => {
+  it('counts GPU and system memory warnings together and ignores them independently', async () => {
+    useMemory(95)
+    const gpu = { index: 0, uuid: 'GPU-mixed', name: 'NVIDIA A100', utilization: 0, memoryUtilization: 0, memoryUsedMb: 8192, memoryTotalMb: 81920, temperatureCelsius: 40, powerWatts: 50 }
+    snapshot = { ...snapshot, gpus: [gpu] }
+    vi.mocked(api.listLatestSnapshots).mockResolvedValue([snapshot])
+    const gpuWarningId = `gpu-memory-stall:${server.id}:${gpu.uuid}`
+    localStorage.setItem('racktop.gpuMemoryStallSince.v1', JSON.stringify({ [gpuWarningId]: start / 1000 - 18000 }))
+    await render()
+    const bell = container.querySelector<HTMLButtonElement>('[aria-label="预约与通知"]')!
+    await act(async () => bell.click())
+    expect(container.querySelector('.reservation-center-sheet h2')?.textContent).toContain('2 个预警')
+    const memoryRow = [...container.querySelectorAll('.reservation-row--warning')].find((row) => row.textContent?.includes('系统 MEM'))!
+    await act(async () => memoryRow.querySelector<HTMLButtonElement>('.reservation-row__actions button')!.click())
+    expect(container.querySelector('.reservation-center-sheet h2')?.textContent).toContain('1 个预警')
+    expect(container.querySelector('.reservation-row--warning')?.textContent).toContain('显存占用预警')
+    expect(bell.querySelector('.notification-dot')).not.toBeNull()
+    expect(JSON.parse(localStorage.getItem('racktop.ignoredGpuMemoryStallWarnings.v1') ?? '[]')).not.toContain(gpuWarningId)
+    await act(async () => container.querySelector<HTMLButtonElement>('.reservation-row--warning .reservation-row__actions button')!.click())
+    expect(container.querySelector('.reservation-row--warning')).toBeNull()
+    expect(bell.querySelector('.notification-dot')).toBeNull()
+    expect(JSON.parse(localStorage.getItem(IGNORED_SYSTEM_MEMORY_KEY)!)).toEqual([server.id])
+    expect(JSON.parse(localStorage.getItem('racktop.ignoredGpuMemoryStallWarnings.v1')!)).toEqual([gpuWarningId])
+  })
+
+  it('opens details from the fleet and card, contains keyboard focus and preserves CPU navigation', async () => {
+    useMemory(95)
+    await render()
+    const fleetWarning = [...container.querySelectorAll<HTMLButtonElement>('.fleet-no-gpu')].find((button) => button.textContent?.includes('系统 MEM'))!
+    fleetWarning.focus()
+    await act(async () => fleetWarning.click())
+    const dialog = container.querySelector<HTMLElement>('.gpu-warning-sheet')!
+    expect(dialog.textContent).toContain('95.0%')
+    const close = dialog.querySelector<HTMLButtonElement>('[aria-label="关闭"]')!
+    const done = dialog.querySelector<HTMLButtonElement>('footer button')!
+    expect(document.activeElement).toBe(close)
+    act(() => close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true })))
+    expect(document.activeElement).toBe(done)
+    act(() => done.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })))
+    expect(document.activeElement).toBe(close)
+    await act(async () => close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+    await act(async () => vi.advanceTimersByTimeAsync(20))
+    expect(container.querySelector('.gpu-warning-sheet')).toBeNull()
+    expect(document.activeElement).toBe(fleetWarning)
+    await act(async () => container.querySelector<HTMLButtonElement>('.fleet-card__header')!.click())
+    const warningButton = container.querySelector<HTMLButtonElement>('[aria-label="查看系统 MEM 异常详情"]')!
+    warningButton.focus()
+    await act(async () => warningButton.click())
+    expect(container.querySelector('.gpu-warning-sheet')?.textContent).toContain('系统内存')
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('概览')
+    await act(async () => container.querySelector<HTMLButtonElement>('.gpu-warning-sheet footer button')!.click())
+    await act(async () => vi.advanceTimersByTimeAsync(20))
+    expect(document.activeElement).toBe(warningButton)
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="查看 CPU 详情"]')!.click())
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('CPU')
+  })
+
+  it('shares active memory warnings between the bell, notification center and CPU card', async () => {
+    useMemory(95)
+    const settings = await api.getSettings()
+    vi.mocked(api.getSettings).mockResolvedValue({ ...settings, idleNotificationsEnabled: false })
+    await render()
+    const bell = container.querySelector<HTMLButtonElement>('[aria-label="预约与通知"]')!
+    expect(bell.querySelector('.notification-dot')).not.toBeNull()
+    await act(async () => bell.click())
+    expect(container.querySelector('.reservation-center-sheet h2')?.textContent).toContain('1 个预警')
+    const row = container.querySelector('.reservation-row--warning')!
+    expect(row.textContent).toContain('系统 MEM')
+    expect(row.textContent).toContain('95.0%')
+    const details = row.querySelector<HTMLButtonElement>('.reservation-warning-open')!
+    await act(async () => details.click())
+    expect(container.querySelector('.gpu-warning-sheet')?.textContent).toContain('90%')
+    expect(container.querySelector('.gpu-warning-sheet')?.textContent).toContain('95.0%')
+    const done = container.querySelector<HTMLButtonElement>('.gpu-warning-sheet footer button')!
+    await act(async () => done.click())
+    const ignore = row.querySelector<HTMLButtonElement>('.reservation-row__actions button')!
+    await act(async () => ignore.click())
+    expect(container.querySelector('.reservation-row--warning')).toBeNull()
+    expect(bell.querySelector('.notification-dot')).toBeNull()
+    expect(JSON.parse(localStorage.getItem(IGNORED_SYSTEM_MEMORY_KEY)!)).toEqual([server.id])
+    await act(async () => container.querySelector<HTMLButtonElement>('.reservation-center-sheet footer button')!.click())
+    await act(async () => container.querySelector<HTMLButtonElement>('.fleet-card__header')!.click())
+    expect(container.querySelector('.cpu-overview-card.gpu-card--warning')).toBeNull()
+    const config = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(b => b.textContent === '配置')!
+    await act(async () => config.click())
+    await act(async () => container.querySelector<HTMLButtonElement>('.ignored-warning-row button')!.click())
+    const overview = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(b => b.textContent === '概览')!
+    await act(async () => overview.click())
+    const card = container.querySelector('.cpu-overview-card.gpu-card--warning')!
+    expect(card).not.toBeNull()
+    const warningButton = card.querySelector<HTMLButtonElement>('[aria-label="查看系统 MEM 异常详情"]')!
+    await act(async () => warningButton.click())
+    expect(container.querySelector('.gpu-warning-sheet')?.textContent).toContain('系统内存')
+    useMemory(90)
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="刷新当前服务器"]')!.click())
+    expect(container.querySelector('.gpu-warning-sheet')).toBeNull()
+    expect(container.querySelector('.cpu-overview-card.gpu-card--warning')).toBeNull()
+    expect(api.notify).not.toHaveBeenCalled()
+  })
+
   it('notifies once per high-memory episode and rearms after recovery', async () => {
     useMemory(91)
     await render()
