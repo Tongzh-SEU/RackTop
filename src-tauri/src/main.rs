@@ -1,6 +1,11 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 fn main() {
+    let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|a| a == "--racktop-proxy") {
+        let result = if args.len() == 5 { racktop_lib::ssh_routes::run_proxy(&args[2], &args[3], &args[4]) } else { Err("跳板机参数无效".into()) };
+        match result { Ok(code) => std::process::exit(code), Err(error) => { eprintln!("{error}"); std::process::exit(1); } }
+    }
     if let Ok(password) = std::env::var("RACKTOP_ASKPASS_PASSWORD") {
         print!("{password}");
         return;

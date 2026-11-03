@@ -369,7 +369,9 @@ fn configured_ssh_command_with_control(server: &Server, password: Option<&str>, 
         command.args(["-o", "IdentitiesOnly=yes"]);
         command.arg("-i").arg(expand_identity_path(identity));
     }
-    if let Some(proxy) = server.proxy_jump.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(option) = crate::ssh_routes::proxy_option(&server.ssh_hops, &server.host)? {
+        command.args(["-o", &option]);
+    } else if let Some(proxy) = server.proxy_jump.as_deref().filter(|value| !value.is_empty()) {
         command.args(["-J", proxy]);
     }
     let target = if let Some(alias) = server.ssh_alias.as_deref().filter(|value| !value.is_empty()) {
@@ -1138,7 +1140,7 @@ mod tests {
     fn ssh_agent_ignores_stale_identity_file() {
         let server = Server {
             id: "server-1".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22,
-            username: "user".into(), ssh_alias: None, identity_file: Some("~/.ssh/stale_key".into()), proxy_jump: None,
+            username: "user".into(), ssh_alias: None, identity_file: Some("~/.ssh/stale_key".into()), proxy_jump: None, ssh_hops: Vec::new(),
             tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
             remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(), status: "unknown".into(),
             last_error: None, last_seen_at: None,
@@ -1152,7 +1154,7 @@ mod tests {
     fn explicit_private_key_is_restricted_to_that_identity() {
         let server = Server {
             id: "server-1".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22,
-            username: "user".into(), ssh_alias: None, identity_file: Some("~/.ssh/id_ed25519".into()), proxy_jump: None,
+            username: "user".into(), ssh_alias: None, identity_file: Some("~/.ssh/id_ed25519".into()), proxy_jump: None, ssh_hops: Vec::new(),
             tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
             remote_history_last_sync_at: None, sort_order: 0, auth_method: "privateKey".into(), status: "unknown".into(),
             last_error: None, last_seen_at: None,
@@ -1168,7 +1170,7 @@ mod tests {
     fn remote_history_heartbeat_uses_the_endpoint_state_directory() {
         let server = Server {
             id: "server-1".into(), name: "GPU".into(), location: None, host: "coolas-12".into(), port: 22,
-            username: "user".into(), ssh_alias: None, identity_file: None, proxy_jump: None,
+            username: "user".into(), ssh_alias: None, identity_file: None, proxy_jump: None, ssh_hops: Vec::new(),
             tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: true,
             remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(), status: "unknown".into(),
             last_error: None, last_seen_at: None,

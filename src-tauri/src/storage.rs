@@ -1,7 +1,7 @@
 use crate::models::GpuTelemetryRanges;
 use crate::disk_scan::{DiskScanState, MountScanStatus};
 use crate::models::{
-    AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Project, ProjectDraft,
+    AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Project, ProjectDraft, SshHop,
     ProjectTarget, Server, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution,
     UsagePoint, UsageUserAggregate,
 };
@@ -1482,6 +1482,9 @@ impl Database {
                 .map_err(|error| error.to_string())?;
             columns.filter_map(Result::ok).collect::<HashSet<_>>()
         };
+        if !server_columns.contains("ssh_hops_json") {
+            connection.execute("ALTER TABLE servers ADD COLUMN ssh_hops_json TEXT NOT NULL DEFAULT '[]'", []).map_err(|e| e.to_string())?;
+        }
         if !server_columns.contains("location") {
             connection
                 .execute("ALTER TABLE servers ADD COLUMN location TEXT", [])
@@ -1748,7 +1751,7 @@ impl Database {
     pub fn list_servers(&self) -> Result<Vec<Server>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection
-            .prepare("SELECT id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,remote_history_last_sync_at,auth_method,status,last_error,last_seen_at,sort_order FROM servers ORDER BY sort_order,name COLLATE NOCASE")
+            .prepare("SELECT id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,remote_history_last_sync_at,auth_method,status,last_error,last_seen_at,sort_order,ssh_hops_json FROM servers ORDER BY sort_order,name COLLATE NOCASE")
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], |row| {
@@ -1762,7 +1765,7 @@ impl Database {
                     username: row.get(5)?,
                     ssh_alias: row.get(6)?,
                     identity_file: row.get(7)?,
-                    proxy_jump: row.get(8)?,
+                    proxy_jump: row.get(8)?, ssh_hops: serde_json::from_str(&row.get::<_, String>(19)?).map_err(|e| rusqlite::Error::FromSqlConversionFailure(19, rusqlite::types::Type::Text, Box::new(e)))?,
                     tags: serde_json::from_str(&tags).unwrap_or_default(),
                     sampling_interval_seconds: row.get(10)?,
                     history_retention_days: row.get(11)?,
@@ -1865,7 +1868,11 @@ impl Database {
             let old_key = self.connection.lock().map_err(|e| e.to_string())?
                 .query_row("SELECT identity_file FROM servers WHERE id=?1", [id], |row| row.get::<_, Option<String>>(0))
                 .optional().map_err(|e| e.to_string())?.flatten();
+            let old_hops = self.connection.lock().map_err(|e| e.to_string())?
+                .query_row("SELECT ssh_hops_json FROM servers WHERE id=?1", [id], |row| row.get::<_, String>(0))
+                .optional().map_err(|e| e.to_string())?.map(|s| serde_json::from_str::<Vec<SshHop>>(&s)).transpose().map_err(|e| e.to_string())?.unwrap_or_default();
             let saved = self.save_server_inner(draft)?;
+            self.reclaim_hops(&old_hops)?;
             self.reclaim_imported_key(old_key.as_deref())?;
             return Ok(saved);
         }
@@ -1886,6 +1893,7 @@ impl Database {
     }
 
     fn save_server_inner(&self, draft: ServerDraft) -> Result<Server, String> {
+        crate::ssh_routes::validate(&draft.ssh_hops)?;
         if draft.host.trim().is_empty() || draft.username.trim().is_empty() {
             return Err("主机地址和用户名不能为空".into());
         }
@@ -1929,10 +1937,10 @@ impl Database {
             ));
         }
         connection.execute(
-            "INSERT INTO servers (id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,auth_method,status,sort_order)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'unknown',COALESCE((SELECT MAX(sort_order)+1 FROM servers),0))
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name,location=excluded.location,host=excluded.host,port=excluded.port,username=excluded.username,ssh_alias=excluded.ssh_alias,identity_file=excluded.identity_file,proxy_jump=excluded.proxy_jump,tags_json=excluded.tags_json,sampling_interval_seconds=excluded.sampling_interval_seconds,history_retention_days=excluded.history_retention_days,remote_history_enabled=excluded.remote_history_enabled,auth_method=excluded.auth_method",
-            params![id, name, blank_to_none(draft.location), draft.host.trim(), draft.port, draft.username.trim(), blank_to_none(draft.ssh_alias), blank_to_none(draft.identity_file), blank_to_none(draft.proxy_jump), tags, draft.sampling_interval_seconds.max(2), draft.history_retention_days.max(1), draft.remote_history_enabled, draft.auth_method],
+            "INSERT INTO servers (id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,auth_method,status,sort_order,ssh_hops_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'unknown',COALESCE((SELECT MAX(sort_order)+1 FROM servers),0),?15)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name,location=excluded.location,host=excluded.host,port=excluded.port,username=excluded.username,ssh_alias=excluded.ssh_alias,identity_file=excluded.identity_file,proxy_jump=excluded.proxy_jump,tags_json=excluded.tags_json,sampling_interval_seconds=excluded.sampling_interval_seconds,history_retention_days=excluded.history_retention_days,remote_history_enabled=excluded.remote_history_enabled,auth_method=excluded.auth_method,ssh_hops_json=excluded.ssh_hops_json",
+            params![id, name, blank_to_none(draft.location), draft.host.trim(), draft.port, draft.username.trim(), blank_to_none(draft.ssh_alias), blank_to_none(draft.identity_file), blank_to_none(draft.proxy_jump), tags, draft.sampling_interval_seconds.max(2), draft.history_retention_days.max(1), draft.remote_history_enabled, draft.auth_method, serde_json::to_string(&draft.ssh_hops).map_err(|e| e.to_string())?],
         ).map_err(|error| error.to_string())?;
         drop(connection);
 
@@ -1995,6 +2003,8 @@ impl Database {
         let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
         let imported_key = connection.query_row("SELECT identity_file FROM servers WHERE id=?1", [id], |row| row.get::<_, Option<String>>(0))
             .optional().map_err(|error| error.to_string())?.flatten();
+        let old_hops = connection.query_row("SELECT ssh_hops_json FROM servers WHERE id=?1", [id], |row| row.get::<_, String>(0))
+            .optional().map_err(|e| e.to_string())?.map(|s| serde_json::from_str::<Vec<SshHop>>(&s)).transpose().map_err(|e| e.to_string())?.unwrap_or_default();
         let auth_method = connection
             .query_row("SELECT auth_method FROM servers WHERE id=?1", [id], |row| {
                 row.get::<_, String>(0)
@@ -2055,6 +2065,7 @@ impl Database {
                 .remove(id);
         }
         self.reclaim_imported_key(imported_key.as_deref())?;
+        self.reclaim_hops(&old_hops)?;
         Ok(())
     }
 
@@ -2119,6 +2130,8 @@ impl Database {
             .optional().map_err(|error| error.to_string())?
             .map(|json| serde_json::from_str::<Server>(&json).map(|server| server.identity_file))
             .transpose().map_err(|error| error.to_string())?.flatten();
+        let old_hops = connection.query_row("SELECT server_json FROM remote_cleanup_queue WHERE server_id=?1", [server_id], |row| row.get::<_, String>(0))
+            .optional().map_err(|e| e.to_string())?.map(|s| serde_json::from_str::<Server>(&s).map(|server| server.ssh_hops)).transpose().map_err(|e| e.to_string())?.unwrap_or_default();
         connection
             .execute(
                 "DELETE FROM remote_cleanup_queue WHERE server_id=?1",
@@ -2140,6 +2153,25 @@ impl Database {
             .map_err(|error| error.to_string())?
             .remove(server_id);
         self.reclaim_imported_key(imported_key.as_deref())?;
+        self.reclaim_hops(&old_hops)?;
+        Ok(())
+    }
+
+    fn reclaim_hops(&self, hops: &[SshHop]) -> Result<(), String> {
+        for hop in hops {
+            self.reclaim_imported_key(hop.identity_file.as_deref())?;
+            let Some(id) = hop.credential_id.as_deref().filter(|id| id.strip_prefix("racktop-hop-").is_some_and(|s| Uuid::parse_str(s).is_ok())) else { continue };
+            let mut references: Vec<SshHop> = self.list_servers()?.into_iter().flat_map(|s| s.ssh_hops).collect();
+            let connection = self.connection.lock().map_err(|e| e.to_string())?;
+            let mut statement = connection.prepare("SELECT server_json FROM remote_cleanup_queue").map_err(|e| e.to_string())?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+            for row in rows {
+                references.extend(serde_json::from_str::<Server>(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?.ssh_hops);
+            }
+            if !references.iter().any(|hop| hop.credential_id.as_deref() == Some(id)) {
+                if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", id) { let _ = entry.delete_credential(); }
+            }
+        }
         Ok(())
     }
 
@@ -2167,11 +2199,17 @@ impl Database {
         for reference in references {
             if keeps_key(&reference.map_err(|e| e.to_string())?) { return Ok(()) }
         }
+        let mut statement = connection.prepare("SELECT ssh_hops_json FROM servers").map_err(|e| e.to_string())?;
+        let routes = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        for route in routes {
+            let hops: Vec<SshHop> = serde_json::from_str(&route.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            if hops.iter().any(|hop| hop.identity_file.as_deref().is_some_and(keeps_key)) { return Ok(()); }
+        }
         let mut statement = connection.prepare("SELECT server_json FROM remote_cleanup_queue").map_err(|e| e.to_string())?;
         let references = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
         for reference in references {
             let server: Server = serde_json::from_str(&reference.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-            if server.identity_file.as_deref().is_some_and(keeps_key) { return Ok(()) }
+            if server.identity_file.as_deref().is_some_and(keeps_key) || server.ssh_hops.iter().any(|hop| hop.identity_file.as_deref().is_some_and(keeps_key)) { return Ok(()) }
         }
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -3990,7 +4028,7 @@ mod tests {
             username: "test".into(),
             ssh_alias: None,
             identity_file: None,
-            proxy_jump: None,
+            proxy_jump: None, ssh_hops: Vec::new(),
             tags: vec!["lab".into()],
             sampling_interval_seconds: 2,
             history_retention_days: retention_days,

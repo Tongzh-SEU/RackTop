@@ -14,6 +14,11 @@ interface ConfigTransferMenuProps {
 
 type Dialog = 'export' | 'import' | null
 
+function blockedReason(draft: ServerDraft): string | undefined {
+  return !draft.sshHops?.length && draft.proxyJump?.trim() && draft.proxyJump.trim().toLowerCase() !== 'none'
+    ? '跳板机需在目标电脑重新配置' : undefined
+}
+
 export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTransferMenuProps) {
   const anchorRef = useRef<HTMLDivElement>(null)
   const dialogRef = useRef<HTMLElement>(null)
@@ -41,9 +46,10 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
     () => duplicateImportIndexes(preview?.servers.map(({ draft }) => draft) ?? plainDrafts ?? [], servers),
     [preview, plainDrafts, servers],
   )
-  const reviewServers = preview?.servers ?? plainDrafts?.map((draft) => ({ draft, includesPrivateKey: false }))
-  const availableCount = (reviewServers?.length ?? 0) - duplicates.size
-  const selectedCount = [...selected].filter((index) => !duplicates.has(index)).length
+  const reviewServers = preview?.servers.map((item) => ({ ...item, blockedReason: item.blockedReason || blockedReason(item.draft) })) ?? plainDrafts?.map((draft) => ({ draft, includesPrivateKey: false, blockedReason: blockedReason(draft) }))
+  const unavailable = new Set(reviewServers?.flatMap((item, index) => duplicates.has(index) || item.blockedReason ? [index] : []) ?? [])
+  const availableCount = (reviewServers?.length ?? 0) - unavailable.size
+  const selectedCount = [...selected].filter((index) => !unavailable.has(index)).length
 
   useEffect(() => {
     if (!menuOpen) return
@@ -176,9 +182,10 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
         if (contents.trimStart().startsWith('{')) throw new Error('加密配置包请使用“导入配置”')
         // A selected file is not necessarily this device's ~/.ssh/config.
         const drafts = (await api.parseSshConfig(contents)).map((draft) => ({ ...draft, sshAlias: undefined, identityFile: undefined, authMethod: 'sshAgent' as const }))
-        if (drafts.length === 0) throw new Error('没有找到可导入的 Host；通配符 Host 会被忽略')
+        if (drafts.length === 0) throw new Error('没有找到可导入的具体 Host')
         setPlainDrafts(drafts)
         const foundDuplicates = duplicateImportIndexes(drafts, servers)
+        drafts.forEach((draft, index) => { if (blockedReason(draft)) foundDuplicates.add(index) })
         setSelected(new Set(drafts.map((_, index) => index).filter((index) => !foundDuplicates.has(index))))
       } else {
         setPackageContents(contents)
@@ -197,6 +204,7 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
     try {
       const result = await api.prepareServerConfigImport(packageContents, importPassword)
       const foundDuplicates = duplicateImportIndexes(result.servers.map(({ draft }) => draft), servers)
+      result.servers.forEach((item, index) => { if (item.blockedReason || blockedReason(item.draft)) foundDuplicates.add(index) })
       setPreview(result)
       setImportPassword('')
       setPackageContents('')
@@ -210,7 +218,7 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
 
   async function confirmImport() {
     if (!preview && !plainDrafts) return
-    const selectedIndexes = [...selected].filter((index) => !duplicates.has(index))
+    const selectedIndexes = [...selected].filter((index) => !unavailable.has(index))
     setBusy(true)
     setError(null)
     try {
@@ -296,13 +304,13 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
             </form>}
             {reviewServers && <>
               <div className="transfer-review-summary"><CheckCircle2 size={18} /><p>{reviewServers.length} 台服务器{preview ? ` · ${preview.privateKeyCount} 把私钥` : ''}{duplicates.size > 0 ? ` · ${duplicates.size} 台已存在，已跳过` : ''}</p></div>
-              <div className="transfer-import-servers">{reviewServers.map(({ draft, includesPrivateKey }, index) => {
+              <div className="transfer-import-servers">{reviewServers.map(({ draft, includesPrivateKey, blockedReason: reason }, index) => {
                 const duplicate = duplicates.has(index)
-                return <label className={duplicate ? 'is-duplicate' : ''} key={`${draft.host}:${draft.port}:${draft.username}:${index}`}>
-                  <input data-transfer-focus={!duplicate || undefined} type="checkbox" checked={selected.has(index) && !duplicate} disabled={duplicate || busy} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next })} />
-                  <span><strong>{draft.sshAlias || draft.name || draft.host}</strong><small>{draft.username}@{draft.host}:{draft.port}{draft.proxyJump ? ` · via ${draft.proxyJump}` : ''}</small></span>
+                return <label className={duplicate || reason ? 'is-duplicate' : ''} key={`${draft.host}:${draft.port}:${draft.username}:${index}`}>
+                  <input data-transfer-focus={!duplicate && !reason || undefined} type="checkbox" checked={selected.has(index) && !unavailable.has(index)} disabled={unavailable.has(index) || busy} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next })} />
+                  <span><strong>{draft.sshAlias || draft.name || draft.host}</strong><small>{draft.username}@{draft.host}:{draft.port}{draft.proxyJump ? ` · via ${draft.proxyJump}` : ''}</small>{reason && <small>{reason}</small>}</span>
                   {includesPrivateKey && <KeyRound size={15} aria-label="包含私钥" />}
-                  <em>{duplicate ? '已存在' : '新增'}</em>
+                  <em>{reason ? '需配置' : duplicate ? '已存在' : '新增'}</em>
                 </label>
               })}</div>
             </>}

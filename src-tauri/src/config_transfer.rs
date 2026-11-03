@@ -51,8 +51,13 @@ struct PackagePayload {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+struct HopSecret { private_key: Option<String>, password: Option<String> }
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PackageServer {
+    #[serde(default)]
+    hop_secrets: Vec<HopSecret>,
     draft: ServerDraft,
     private_key: Option<String>,
 }
@@ -62,6 +67,7 @@ struct PackageServer {
 pub struct TransferServerPreview {
     pub draft: ServerDraft,
     pub includes_private_key: bool,
+    pub blocked_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -131,8 +137,8 @@ impl ConfigTransferState {
         if package.len() > MAX_PACKAGE_BYTES {
             return Err("配置包超过 32 MB，无法导入".into());
         }
-        let payload = decrypt_package(package, passphrase)?;
-        for item in &payload.servers { crate::ssh_config::validate_transfer_draft(&item.draft)?; }
+        let mut payload = decrypt_package(package, passphrase)?;
+        resolve_package_routes(&mut payload);
         validate_payload(&payload)?;
         let import_id = Uuid::new_v4().to_string();
         let servers = payload
@@ -143,10 +149,12 @@ impl ConfigTransferState {
                 draft.id = None;
                 draft.identity_file = None;
                 draft.password = None;
+                for hop in &mut draft.ssh_hops { hop.identity_file = None; hop.credential_id = None; }
                 draft.save_password = false;
                 TransferServerPreview {
                     draft,
                     includes_private_key: item.private_key.is_some(),
+                    blocked_reason: crate::ssh_config::validate_transfer_draft(&item.draft).err(),
                 }
             })
             .collect::<Vec<_>>();
@@ -202,6 +210,7 @@ impl ConfigTransferState {
             item.payload.clone()
         };
 
+        validate_payload(&payload)?;
         if selected_indexes.is_empty() {
             return Err("至少选择一台服务器".into());
         }
@@ -239,11 +248,32 @@ impl ConfigTransferState {
             draft.identity_file = None;
             draft.save_password = draft.auth_method == "password" && draft.password.is_some();
 
+            let mut route_keys = Vec::new();
+            let mut route_credentials = Vec::new();
+            let route_result = (|| -> Result<(), String> {
+                for (hop, secret) in draft.ssh_hops.iter_mut().zip(&item.hop_secrets) {
+                    hop.identity_file = None; hop.credential_id = None;
+                    if let Some(encoded) = &secret.private_key {
+                        let key = write_private_key(app_data_dir, &STANDARD.decode(encoded).map_err(|e| e.to_string())?)?;
+                        hop.identity_file = Some(key.to_string_lossy().into_owned()); route_keys.push(key);
+                    }
+                    if let Some(password) = &secret.password {
+                        let id = format!("racktop-hop-{}", Uuid::new_v4());
+                        let entry = keyring::Entry::new("com.racktop.desktop", &id).map_err(|e| e.to_string())?;
+                        entry.set_password(password).map_err(|e| format!("无法保存跳板机密码：{e}"))?;
+                        hop.credential_id = Some(id.clone()); route_credentials.push(id);
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = route_result { discard_hop_files(&route_keys, &route_credentials); return Err(error); }
+            // Resolved routes are self-contained; never invoke the source alias.
+            if !draft.ssh_hops.is_empty() { draft.proxy_jump = crate::ssh_routes::concrete_chain(&draft.ssh_hops); }
             let key_path = if let Some(encoded_key) = &item.private_key {
                 let key_bytes = STANDARD
                     .decode(encoded_key)
                     .map_err(|_| "配置包中的私钥数据无效".to_string())?;
-                Some(write_private_key(app_data_dir, &key_bytes)?)
+                Some(match write_private_key(app_data_dir, &key_bytes) { Ok(path) => path, Err(error) => { discard_hop_files(&route_keys, &route_credentials); return Err(error); } })
             } else {
                 None
             };
@@ -258,6 +288,11 @@ impl ConfigTransferState {
                     if database.list_servers().is_ok_and(|servers| !servers.iter().any(|server| server.identity_file.as_deref() == path.to_str())) {
                         let _ = fs::remove_file(path);
                     }
+                }
+                // The DB compensation owns route-key cleanup if a row was inserted.
+                // Only discard staged files once absence of surviving references is known.
+                if database.list_servers().is_ok_and(|servers| !servers.iter().any(|s| s.ssh_hops.iter().any(|h| h.identity_file.as_deref().is_some_and(|p| route_keys.iter().any(|k| k.to_str() == Some(p))) || h.credential_id.as_ref().is_some_and(|id| route_credentials.contains(id))))) {
+                    discard_hop_files(&route_keys, &route_credentials);
                 }
                 return Err(format!("导入服务器失败：{error}；此前已导入 {imported_count} 台"));
             }
@@ -295,7 +330,7 @@ pub fn export(database: &Database, passphrase: &str, kind: &str) -> Result<Expor
     let ssh_config = None;
     let mut private_key_count = 0;
     let mut package_servers = Vec::with_capacity(servers.len());
-    for server in servers {
+    for server in &servers {
         let mut private_key = None;
         if matches!(server.auth_method.as_str(), "privateKey" | "sshConfig") {
             if let Some(identity_file) = server.identity_file.as_deref().filter(|value| !value.trim().is_empty()) {
@@ -328,22 +363,34 @@ pub fn export(database: &Database, passphrase: &str, kind: &str) -> Result<Expor
         } else {
             None
         };
-        package_servers.push(PackageServer {
+        let mut hop_secrets = Vec::new();
+        for hop in &server.ssh_hops {
+            let private_key = if matches!(hop.auth_method.as_str(), "privateKey" | "sshConfig") {
+                hop.identity_file.as_deref().map(|p| read_transfer_key(p)).transpose()?
+            } else { None };
+            let password = if hop.auth_method == "password" {
+                let id = hop.credential_id.as_deref().ok_or("跳板机缺少密码凭据")?;
+                Some(keyring::Entry::new("com.racktop.desktop", id).map_err(|e| e.to_string())?.get_password().map_err(|e| e.to_string())?)
+            } else { None };
+            if private_key.is_some() { private_key_count += 1; }
+            hop_secrets.push(HopSecret { private_key, password });
+        }
+        package_servers.push(PackageServer { hop_secrets,
             draft: ServerDraft {
                 id: None,
-                name: server.name,
-                location: server.location,
-                host: server.host,
+                name: server.name.clone(),
+                location: server.location.clone(),
+                host: server.host.clone(),
                 port: server.port,
-                username: server.username,
-                ssh_alias: server.ssh_alias,
+                username: server.username.clone(),
+                ssh_alias: server.ssh_alias.clone(),
                 identity_file: None,
-                proxy_jump: server.proxy_jump,
-                tags: server.tags,
+                proxy_jump: server.proxy_jump.clone(), ssh_hops: server.ssh_hops.clone(),
+                tags: server.tags.clone(),
                 sampling_interval_seconds: server.sampling_interval_seconds,
                 history_retention_days: server.history_retention_days,
                 remote_history_enabled: server.remote_history_enabled,
-                auth_method: server.auth_method,
+                auth_method: server.auth_method.clone(),
                 password,
                 save_password: false,
             },
@@ -351,14 +398,9 @@ pub fn export(database: &Database, passphrase: &str, kind: &str) -> Result<Expor
         });
     }
 
-    let package = encrypt_payload(
-        &PackagePayload {
-            kind: kind.into(),
-            ssh_config,
-            servers: package_servers,
-        },
-        passphrase,
-    )?;
+    let mut payload = PackagePayload { kind: kind.into(), ssh_config, servers: package_servers };
+    resolve_package_routes(&mut payload);
+    let package = encrypt_payload(&payload, passphrase)?;
     Ok(ExportedPackage {
         package,
         server_count,
@@ -467,6 +509,42 @@ fn decrypt_package(package: &str, passphrase: &str) -> Result<PackagePayload, St
     Ok(payload)
 }
 
+fn read_transfer_key(path: &str) -> Result<String, String> {
+    let path = expand_identity_path(path);
+    let metadata = fs::metadata(&path).map_err(|e| e.to_string())?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_KEY_BYTES as u64 { return Err("跳板机私钥无效或超过 1 MB".into()); }
+    Ok(STANDARD.encode(fs::read(path).map_err(|e| e.to_string())?))
+}
+
+fn discard_hop_files(keys: &[PathBuf], credentials: &[String]) {
+    for key in keys { let _ = fs::remove_file(key); }
+    for id in credentials { if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", id) { let _ = entry.delete_credential(); } }
+}
+
+fn resolve_package_routes(payload: &mut PackagePayload) {
+    let source = payload.servers.clone();
+    let drafts: Vec<_> = source.iter().enumerate().map(|(index, item)| { let mut draft = item.draft.clone(); draft.id = Some(index.to_string()); draft }).collect();
+    for item in &mut payload.servers {
+        if !item.draft.ssh_hops.is_empty() { continue; }
+        let Ok(mut hops) = crate::ssh_routes::resolve(&item.draft, &drafts) else { continue };
+        let mut secrets = Vec::new();
+        for hop in &mut hops {
+            let secret = hop.credential_id.as_deref().and_then(|i| i.parse::<usize>().ok()).map(|index| {
+                let dependency = &source[index];
+                HopSecret { private_key: dependency.private_key.clone(), password: dependency.draft.password.clone() }
+            });
+            let Some(secret) = secret else { continue };
+            secrets.push(secret);
+            hop.identity_file = None; hop.credential_id = None;
+        }
+        // Existing resolved chains nested under raw aliases require their own
+        // credential payloads; fail closed rather than lose those credentials.
+        if secrets.len() != hops.len() { continue; }
+        item.draft.ssh_hops = hops;
+        item.hop_secrets = secrets;
+    }
+}
+
 fn validate_payload(payload: &PackagePayload) -> Result<(), String> {
     if !matches!(payload.kind.as_str(), "racktop" | "ssh")
         || (payload.kind == "ssh" && payload.ssh_config.as_deref().is_none_or(str::is_empty))
@@ -478,6 +556,16 @@ fn validate_payload(payload: &PackagePayload) -> Result<(), String> {
     }
     for item in &payload.servers {
         let draft = &item.draft;
+        crate::ssh_routes::validate(&draft.ssh_hops)?;
+        if item.hop_secrets.len() != draft.ssh_hops.len() { return Err("跳板机凭据数量与连接链不匹配".into()); }
+        for (hop, secret) in draft.ssh_hops.iter().zip(&item.hop_secrets) {
+            if hop.auth_method == "password" && secret.password.as_deref().is_none_or(str::is_empty) { return Err("跳板机缺少密码".into()); }
+            if hop.auth_method == "privateKey" && secret.private_key.is_none() { return Err("跳板机缺少私钥".into()); }
+            if let Some(key) = &secret.private_key {
+                let bytes = STANDARD.decode(key).map_err(|_| "跳板机私钥数据无效")?;
+                if bytes.is_empty() || bytes.len() > MAX_KEY_BYTES { return Err("跳板机私钥无效或过大".into()); }
+            }
+        }
         if draft.name.trim().chars().count() > 24 {
             return Err("配置包中的服务器名称不能超过 24 个字符".into());
         }
@@ -604,17 +692,102 @@ mod tests {
     const PASSPHRASE: &str = "correct horse battery staple";
 
     #[test]
+    fn encrypted_multihop_round_trip_is_self_contained_and_reclaims_route_keys() {
+        let source_dir = tempdir().unwrap(); let target_dir = tempdir().unwrap();
+        let source = Database::open(&source_dir.path().join("source.sqlite")).unwrap();
+        let target_path = target_dir.path().join("target.sqlite");
+        let target = Database::open(&target_path).unwrap();
+        let outer_key = source_dir.path().join("outer.key"); fs::write(&outer_key, TEST_KEY).unwrap();
+        let mut outer = draft(Some(outer_key.to_string_lossy().into_owned()));
+        outer.name = "outer".into(); outer.ssh_alias = Some("outer-alias".into()); outer.host = "192.0.2.1".into(); outer.username = "outer-user".into(); outer.port = 2201;
+        source.save_server(outer).unwrap();
+        let mut inner = draft(None); inner.auth_method = "sshAgent".into(); inner.name = "inner".into(); inner.ssh_alias = Some("inner-alias".into()); inner.host = "192.0.2.2".into(); inner.port = 2202; inner.proxy_jump = Some("outer-alias".into());
+        source.save_server(inner).unwrap();
+        let mut destination = draft(None); destination.auth_method = "sshAgent".into(); destination.name = "destination".into(); destination.proxy_jump = Some("inner-alias".into());
+        source.save_server(destination).unwrap();
+        let exported = export(&source, PASSPHRASE, "racktop").unwrap();
+        let state = ConfigTransferState::default(); let preview = state.prepare_import(&exported.package, PASSPHRASE).unwrap();
+        let index = preview.servers.iter().position(|s| s.draft.name == "destination").unwrap();
+        assert!(preview.servers[index].blocked_reason.is_none());
+        assert_eq!(preview.servers[index].draft.ssh_hops.len(), 2);
+        assert!(preview.servers[index].draft.ssh_hops[0].identity_file.is_none());
+        state.commit_import(&preview.import_id, &[index], &target, target_dir.path()).unwrap();
+        let server = target.list_servers().unwrap().pop().unwrap();
+        assert_eq!(server.ssh_hops[0].username, "outer-user"); assert_eq!(server.ssh_hops[0].port, 2201);
+        assert_eq!(server.ssh_hops[1].port, 2202);
+        assert!(server.ssh_alias.is_none());
+        let key = PathBuf::from(server.ssh_hops[0].identity_file.as_deref().unwrap());
+        assert_eq!(fs::read(&key).unwrap(), TEST_KEY);
+        let (command, _) = crate::collector::configured_ssh_command(&server, None).unwrap();
+        let args: Vec<_> = command.as_std().get_args().map(|s| s.to_string_lossy().into_owned()).collect();
+        assert!(args.iter().any(|a| a.contains("--racktop-proxy")));
+        assert!(!args.iter().any(|a| a == "-J"));
+        // Exporting again must include the independent hop key, even though
+        // neither hop was selected as a separate server record.
+        let again = export(&target, PASSPHRASE, "racktop").unwrap();
+        let decoded = decrypt_package(&again.package, PASSPHRASE).unwrap();
+        assert!(decoded.servers[0].hop_secrets[0].private_key.is_some());
+        let reopened = Database::open(&target_path).unwrap();
+        assert_eq!(reopened.get_server(&server.id).unwrap().ssh_hops.len(), 2);
+        target.enqueue_remote_cleanup(&server, 100, "offline", None).unwrap();
+        target.delete_server_record(&server.id, false).unwrap(); assert!(key.exists());
+        target.finish_remote_cleanup(&server.id, false).unwrap(); assert!(!key.exists());
+        assert!(outer_key.exists());
+    }
+
+    #[test]
+    fn encrypted_password_hop_secret_is_carried_but_never_exposed_in_preview() {
+        let mut jump = draft(None); jump.name = "jump".into(); jump.host = "192.0.2.1".into(); jump.auth_method = "password".into(); jump.password = Some("hop-test-secret".into()); jump.ssh_alias = Some("jump".into());
+        let mut destination = draft(None); destination.auth_method = "sshAgent".into(); destination.proxy_jump = Some("jump".into());
+        let payload = PackagePayload { kind: "racktop".into(), ssh_config: None, servers: vec![
+            PackageServer { draft: jump, private_key: None, hop_secrets: Vec::new() },
+            PackageServer { draft: destination, private_key: None, hop_secrets: Vec::new() },
+        ] };
+        let package = encrypt_payload(&payload, PASSPHRASE).unwrap(); let state = ConfigTransferState::default();
+        let preview = state.prepare_import(&package, PASSPHRASE).unwrap();
+        assert!(preview.servers[1].blocked_reason.is_none());
+        let pending = state.pending.lock().unwrap();
+        assert_eq!(pending[&preview.import_id].payload.servers[1].hop_secrets[0].password.as_deref(), Some("hop-test-secret"));
+        assert!(!serde_json::to_string(&preview).unwrap().contains("hop-test-secret"));
+    }
+
+    #[test]
+    fn mixed_package_previews_all_servers_and_imports_supported_selection_only() {
+        let directory = tempdir().unwrap();
+        let database = Database::open(&directory.path().join("target.sqlite")).unwrap();
+        let mut target = draft(None); target.host = "jump-target.example".into();
+        target.proxy_jump = Some("jump-review".into());
+        let package = encrypt_payload(&PackagePayload { kind: "racktop".into(), ssh_config: None, servers: vec![
+            PackageServer { hop_secrets: Vec::new(), draft: draft(None), private_key: Some(STANDARD.encode(TEST_KEY)) },
+            PackageServer { hop_secrets: Vec::new(), draft: target, private_key: Some(STANDARD.encode(TEST_KEY)) },
+        ] }, PASSPHRASE).unwrap();
+        let state = ConfigTransferState::default();
+        let preview = state.prepare_import(&package, PASSPHRASE).unwrap();
+        assert_eq!(preview.servers.len(), 2);
+        assert!(preview.servers[0].blocked_reason.is_none());
+        assert!(preview.servers[1].blocked_reason.is_some());
+        assert!(state.commit_import(&preview.import_id, &[0, 1], &database, directory.path()).is_err());
+        assert!(database.list_servers().unwrap().is_empty());
+        assert!(!directory.path().join("ssh-keys").exists());
+        let result = state.commit_import(&preview.import_id, &[0], &database, directory.path()).unwrap();
+        assert_eq!(result.imported_count, 1);
+        assert_eq!(database.list_servers().unwrap().len(), 1);
+        assert_eq!(fs::read_dir(directory.path().join("ssh-keys")).unwrap().count(), 1);
+    }
+
+    #[test]
     fn encrypted_jump_dependencies_fail_before_writing_records_or_keys() {
         let directory = tempdir().unwrap();
         let database = Database::open(&directory.path().join("target.sqlite")).unwrap();
         let mut target = draft(None);
         target.proxy_jump = Some("jump-review".into());
         let payload = PackagePayload { kind: "racktop".into(), ssh_config: None, servers: vec![
-            PackageServer { draft: target, private_key: Some(STANDARD.encode(TEST_KEY)) },
+            PackageServer { hop_secrets: Vec::new(), draft: target, private_key: Some(STANDARD.encode(TEST_KEY)) },
         ] };
         let package = encrypt_payload(&payload, PASSPHRASE).unwrap();
         let state = ConfigTransferState::default();
-        assert!(state.prepare_import(&package, PASSPHRASE).err().unwrap().contains("ProxyJump"));
+        let preview = state.prepare_import(&package, PASSPHRASE).unwrap();
+        assert!(preview.servers[0].blocked_reason.as_deref().unwrap().contains("ProxyJump"));
         state.pending.lock().unwrap().insert("legacy-preview".into(), PendingImport { payload, created_at: Instant::now() });
         assert!(state.commit_import("legacy-preview", &[0], &database, directory.path()).err().unwrap().contains("ProxyJump"));
         assert!(database.list_servers().unwrap().is_empty());
@@ -633,8 +806,8 @@ mod tests {
         let mut second = draft(None); second.host = "fail.example".into();
         state.pending.lock().unwrap().insert("test".into(), PendingImport {
             payload: PackagePayload { kind: "racktop".into(), ssh_config: None, servers: vec![
-                PackageServer { draft: first, private_key: Some(STANDARD.encode(TEST_KEY)) },
-                PackageServer { draft: second, private_key: Some(STANDARD.encode(TEST_KEY)) },
+                PackageServer { hop_secrets: Vec::new(), draft: first, private_key: Some(STANDARD.encode(TEST_KEY)) },
+                PackageServer { hop_secrets: Vec::new(), draft: second, private_key: Some(STANDARD.encode(TEST_KEY)) },
             ] }, created_at: Instant::now(),
         });
         assert!(state.commit_import("test", &[0, 1], &database, directory.path()).is_err());
@@ -782,7 +955,7 @@ mod tests {
             username: "tester".into(),
             ssh_alias: Some("transfer-test".into()),
             identity_file,
-            proxy_jump: None,
+            proxy_jump: None, ssh_hops: Vec::new(),
             tags: vec!["test".into()],
             sampling_interval_seconds: 3,
             history_retention_days: 21,

@@ -142,7 +142,9 @@ fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<Com
         command.arg("-i");
         command.arg(expand_identity_path(identity));
     }
-    if let Some(proxy) = server.proxy_jump.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(option) = crate::ssh_routes::proxy_option(&server.ssh_hops, &server.host)? {
+        command.args(["-o", &option]);
+    } else if let Some(proxy) = server.proxy_jump.as_deref().filter(|value| !value.is_empty()) {
         command.args(["-J", proxy]);
     }
     if let Some(alias) = server.ssh_alias.as_deref().filter(|value| !value.is_empty()) {

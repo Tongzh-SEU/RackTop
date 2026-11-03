@@ -9,6 +9,7 @@ mod process_lifetime;
 mod project_sync;
 mod remote_history;
 mod ssh_config;
+pub mod ssh_routes;
 mod ssh_keys;
 pub mod storage;
 pub mod disk_scan;
@@ -189,7 +190,7 @@ mod interaction_log_tests {
             username: "test".into(),
             ssh_alias: None,
             identity_file: None,
-            proxy_jump: None,
+            proxy_jump: None, ssh_hops: Vec::new(),
             tags: vec![],
             sampling_interval_seconds: 2,
             history_retention_days: 90,
@@ -491,6 +492,7 @@ async fn verify_ssh_setup(draft: ServerDraft) -> Result<(), String> {
         ssh_alias: None,
         identity_file: Some("~/.ssh/racktop_ed25519".into()),
         proxy_jump: draft.proxy_jump,
+        ssh_hops: draft.ssh_hops,
         tags: Vec::new(),
         sampling_interval_seconds: 2,
         history_retention_days: 90,

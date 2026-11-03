@@ -39,6 +39,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
     sshAlias: initial?.sshAlias ?? '',
     identityFile: initial?.identityFile ?? '',
     proxyJump: initial?.proxyJump ?? '',
+    sshHops: initial?.sshHops ?? [],
     tags: initial?.tags ?? [],
     samplingIntervalSeconds: 2,
     historyRetentionDays: 90,
@@ -61,7 +62,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
 
   useEffect(() => () => { setupVerificationAttempt.current += 1 }, [])
 
-  const set = <K extends keyof ServerDraft>(key: K, value: ServerDraft[K]) => setDraft((current) => ({ ...current, [key]: value }))
+  const set = <K extends keyof ServerDraft>(key: K, value: ServerDraft[K]) => setDraft((current) => ({ ...current, [key]: value, ...(key === 'proxyJump' ? { sshHops: [] } : {}) }))
   const commitTagText = () => {
     const tags = parseServerTags(tagText)
     if (tags.length > 0) setDraft((current) => ({ ...current, tags: [...current.tags, ...tags] }))

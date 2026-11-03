@@ -40,7 +40,7 @@ pub fn parse(content: &str) -> Vec<ServerDraft> {
             port: values.get("port").and_then(|p| p.parse().ok()).unwrap_or(22),
             username: values.get("user").cloned().unwrap_or_else(default_username),
             ssh_alias: Some(alias), identity_file: values.get("identityfile").cloned(),
-            proxy_jump: values.get("proxyjump").filter(|p| !p.eq_ignore_ascii_case("none")).cloned(),
+            proxy_jump: values.get("proxyjump").filter(|p| !p.eq_ignore_ascii_case("none")).cloned(), ssh_hops: Vec::new(),
             tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90,
             remote_history_enabled: false, auth_method: "sshConfig".into(), password: None, save_password: false }
     }).collect()
@@ -62,7 +62,8 @@ fn host_matches(pattern: &str, host: &str) -> bool {
 }
 
 pub fn validate_transfer_draft(draft: &ServerDraft) -> Result<(), String> {
-    if draft.proxy_jump.as_deref().is_some_and(|p| !p.trim().is_empty() && !p.eq_ignore_ascii_case("none")) {
+    crate::ssh_routes::validate(&draft.ssh_hops)?;
+    if draft.ssh_hops.is_empty() && draft.proxy_jump.as_deref().is_some_and(|p| !p.trim().is_empty() && !p.eq_ignore_ascii_case("none")) {
         return Err(format!("{} 使用 ProxyJump：跳板机连接及认证配置无法完整迁移，请在目标电脑重新配置后手动添加", draft.name));
     }
     Ok(())
@@ -85,8 +86,16 @@ pub fn parse_transfer(content: &str) -> Result<Vec<ServerDraft>, String> {
             return Err("SSH Config 暂不支持迁移变量，请改为具体连接参数".into());
         }
     }
-    let drafts = parse(content);
-    for draft in &drafts { validate_transfer_draft(draft)?; }
+    let mut drafts = parse(content);
+    let source = drafts.clone();
+    for draft in &mut drafts {
+        if let Ok(mut hops) = crate::ssh_routes::resolve(draft, &source) {
+            // Plaintext SSH Config carries no key material; use target Agent.
+            for hop in &mut hops { hop.auth_method = "sshAgent".into(); hop.identity_file = None; hop.credential_id = None; }
+            if !hops.is_empty() { draft.proxy_jump = crate::ssh_routes::concrete_chain(&hops); }
+            draft.ssh_hops = hops;
+        }
+    }
     Ok(drafts)
 }
 
@@ -140,10 +149,31 @@ mod tests {
         assert_eq!(values[0].username, "remote-review");
         assert_eq!(values[0].port, 2222);
         assert_eq!(values[0].proxy_jump.as_deref(), Some("jump-review"));
-        assert!(parse_transfer(config).unwrap_err().contains("ProxyJump"));
+        let preview = parse_transfer(config).unwrap();
+        assert!(validate_transfer_draft(&preview[0]).unwrap_err().contains("ProxyJump"));
         for directive in ["Include other", "Match all", "ProxyCommand ssh jump", "HostName %h.example", "Port invalid"] {
             assert!(parse_transfer(&format!("Host gpu\n {directive}\n")).is_err(), "{directive}");
         }
+    }
+
+    #[test]
+    fn mixed_ssh_config_preserves_direct_hosts_in_preview() {
+        let drafts = parse_transfer("Host direct\n HostName 192.0.2.10\nHost via-jump\n HostName 192.0.2.11\n ProxyJump jump-review\nHost *\n User reviewer\n Port 2222\n").unwrap();
+        assert_eq!(drafts.len(), 2);
+        assert!(validate_transfer_draft(&drafts[0]).is_ok());
+        assert!(validate_transfer_draft(&drafts[1]).is_err());
+        assert_eq!(drafts[0].username, "reviewer");
+        assert_eq!(drafts[0].port, 2222);
+    }
+
+    #[test]
+    fn plaintext_config_resolves_multihop_routes_without_copying_source_keys() {
+        let drafts = parse_transfer("Host outer\n HostName 192.0.2.1\n User alice\n Port 2201\n IdentityFile /source/secret\nHost inner\n HostName 192.0.2.2\n User bob\n Port 2202\n ProxyJump outer\nHost target\n HostName 192.0.2.3\n User carol\n ProxyJump inner\n").unwrap();
+        assert_eq!(drafts[2].ssh_hops.len(), 2);
+        assert_eq!(drafts[2].ssh_hops[0].host, "192.0.2.1");
+        assert_eq!(drafts[2].ssh_hops[1].port, 2202);
+        assert!(drafts[2].ssh_hops.iter().all(|h| h.auth_method == "sshAgent" && h.identity_file.is_none() && h.credential_id.is_none()));
+        assert!(validate_transfer_draft(&drafts[2]).is_ok());
     }
 
     #[cfg(unix)]

@@ -49,6 +49,59 @@ afterEach(() => {
 })
 
 describe('configuration quick menu', () => {
+  it.each(['ssh', 'racktop'])('allows a resolved jump route in %s imports', async (kind) => {
+    const routed: ServerDraft = { name: 'Routed', host: 'target.example', port: 22, username: 'tester', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'sshAgent', proxyJump: 'jump@jump.example:2222', sshHops: [{ host: 'jump.example', port: 2222, username: 'jump', authMethod: 'sshAgent' }] }
+    vi.mocked(api.parseSshConfig).mockResolvedValue([routed])
+    vi.mocked(api.prepareServerConfigImport).mockResolvedValue({ importId: 'routed', privateKeyCount: 0, servers: [{ draft: routed, includesPrivateKey: false }] })
+    vi.mocked(api.commitServerConfigImport).mockResolvedValue({ importedCount: 1, privateKeysInstalled: 0 })
+    vi.mocked(api.saveServer).mockResolvedValue(server)
+    mount(); click('导入 / 导出配置'); click(kind === 'ssh' ? '导入 SSH Config' : '导入配置')
+    await dropFile('fixture', 'config')
+    if (kind === 'racktop') { fill(document.querySelector<HTMLInputElement>('input[type="password"]')!, 'migration-password'); await act(async () => button('验证配置包').click()) }
+    const choice = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    expect(choice.checked).toBe(true); expect(choice.disabled).toBe(false)
+    await act(async () => button('导入 1 台').click())
+    if (kind === 'racktop') expect(api.commitServerConfigImport).toHaveBeenCalledWith('routed', [0])
+    else expect(api.saveServer).toHaveBeenCalledWith(expect.objectContaining({ sshHops: routed.sshHops }))
+  })
+
+  it.each(['ssh', 'racktop'])('imports the direct host from a mixed %s file while disabling jump dependencies', async (kind) => {
+    const direct: ServerDraft = { name: 'Direct', host: 'direct.example', port: 22, username: 'tester', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'sshAgent' }
+    const jump = { ...direct, name: 'Via jump', host: 'jump-target.example', proxyJump: 'source-jump' }
+    vi.mocked(api.parseSshConfig).mockResolvedValue([direct, jump])
+    vi.mocked(api.prepareServerConfigImport).mockResolvedValue({ importId: 'mixed', privateKeyCount: 0, servers: [
+      { draft: direct, includesPrivateKey: false },
+      { draft: jump, includesPrivateKey: false, blockedReason: '跳板机需在目标电脑重新配置' },
+    ] })
+    vi.mocked(api.commitServerConfigImport).mockResolvedValue({ importedCount: 1, privateKeysInstalled: 0 })
+    vi.mocked(api.saveServer).mockResolvedValue(server)
+    mount()
+    click('导入 / 导出配置')
+    click(kind === 'ssh' ? '导入 SSH Config' : '导入配置')
+    await dropFile('fixture', 'config')
+    if (kind === 'racktop') {
+      fill(document.querySelector<HTMLInputElement>('input[type="password"]')!, 'migration-password')
+      await act(async () => button('验证配置包').click())
+    }
+    const choices = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+    expect(choices).toHaveLength(2)
+    expect(choices[0].checked).toBe(true)
+    expect(choices[0].disabled).toBe(false)
+    expect(choices[1].checked).toBe(false)
+    expect(choices[1].disabled).toBe(true)
+    expect(document.body.textContent).toContain('跳板机需在目标电脑重新配置')
+    expect(document.body.textContent).toContain('已选 1 / 1 台')
+    act(() => choices[1].click())
+    expect(choices[1].checked).toBe(false)
+    await act(async () => button('导入 1 台').click())
+    if (kind === 'racktop') expect(api.commitServerConfigImport).toHaveBeenCalledWith('mixed', [0])
+    else {
+      expect(api.saveServer).toHaveBeenCalledTimes(1)
+      expect(api.saveServer).toHaveBeenCalledWith(expect.objectContaining({ host: direct.host }))
+    }
+    expect(onImported).toHaveBeenCalledWith(1)
+  })
+
   it.each(['ssh', 'racktop'])('refreshes partial %s imports and retries only the remaining selection', async (kind) => {
     const first: ServerDraft = { name: 'First', host: 'first.example', port: 22, username: 'tester', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'sshAgent' }
     const second = { ...first, host: 'second.example' }
