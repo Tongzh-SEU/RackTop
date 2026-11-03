@@ -175,7 +175,7 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
       if (importKind === 'ssh') {
         if (contents.trimStart().startsWith('{')) throw new Error('加密配置包请使用“导入配置”')
         // A selected file is not necessarily this device's ~/.ssh/config.
-        const drafts = (await api.parseSshConfig(contents)).map((draft) => ({ ...draft, sshAlias: undefined }))
+        const drafts = (await api.parseSshConfig(contents)).map((draft) => ({ ...draft, sshAlias: undefined, identityFile: undefined, authMethod: 'sshAgent' as const }))
         if (drafts.length === 0) throw new Error('没有找到可导入的 Host；通配符 Host 会被忽略')
         setPlainDrafts(drafts)
         const foundDuplicates = duplicateImportIndexes(drafts, servers)

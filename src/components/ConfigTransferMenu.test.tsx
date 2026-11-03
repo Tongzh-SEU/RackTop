@@ -127,15 +127,15 @@ describe('configuration quick menu', () => {
     expect(api.prepareServerConfigImport).not.toHaveBeenCalled()
   })
 
-  it('imports a selected SSH config using its concrete connection instead of relying on a source-only alias', async () => {
-    vi.mocked(api.parseSshConfig).mockResolvedValueOnce([{ name: 'source-alias', host: '127.0.0.3', port: 9, username: 'fixture', authMethod: 'sshConfig', sshAlias: 'source-alias', identityFile: '/fixture/key', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, savePassword: false }])
+  it.each(['/Users/source/.ssh/private_key', '~/.ssh/id_ed25519', 'C:/Users/source/.ssh/id_ed25519'])('imports SSH config without the source alias or key path %s', async (identityFile) => {
+    vi.mocked(api.parseSshConfig).mockResolvedValueOnce([{ name: 'source-alias', host: '127.0.0.3', port: 9, username: 'fixture', authMethod: 'sshConfig', sshAlias: 'source-alias', identityFile, tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, savePassword: false }])
     mount()
     click('导入 / 导出配置')
     click('导入 SSH Config')
     await dropFile('Host source-alias\n HostName 127.0.0.3', 'config')
     expect(document.querySelector('input[type="password"]')).toBeNull()
     await act(async () => button('导入 1 台').click())
-    expect(api.saveServer).toHaveBeenCalledWith(expect.objectContaining({ host: '127.0.0.3', sshAlias: undefined, identityFile: '/fixture/key' }))
+    expect(api.saveServer).toHaveBeenCalledWith(expect.objectContaining({ host: '127.0.0.3', sshAlias: undefined, identityFile: undefined, authMethod: 'sshAgent' }))
     expect(onImported).toHaveBeenCalledWith(1)
     expect(api.prepareServerConfigImport).not.toHaveBeenCalled()
   })
