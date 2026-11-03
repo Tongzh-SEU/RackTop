@@ -1861,7 +1861,14 @@ impl Database {
     }
 
     pub fn save_server(&self, mut draft: ServerDraft) -> Result<Server, String> {
-        if draft.id.is_some() { return self.save_server_inner(draft); }
+        if let Some(id) = draft.id.as_deref() {
+            let old_key = self.connection.lock().map_err(|e| e.to_string())?
+                .query_row("SELECT identity_file FROM servers WHERE id=?1", [id], |row| row.get::<_, Option<String>>(0))
+                .optional().map_err(|e| e.to_string())?.flatten();
+            let saved = self.save_server_inner(draft)?;
+            self.reclaim_imported_key(old_key.as_deref())?;
+            return Ok(saved);
+        }
         if draft.auth_method == "password" && draft.password.as_deref().is_none_or(|p| p.trim().is_empty()) {
             return Err("使用密码认证时必须输入 SSH 密码".into());
         }
@@ -2138,8 +2145,10 @@ impl Database {
 
     fn reclaim_imported_key(&self, candidate: Option<&str>) -> Result<(), String> {
         let Some(candidate) = candidate else { return Ok(()) };
-        let path = Path::new(candidate);
+        let expanded = crate::ssh_keys::expand_identity_path(candidate);
+        let Ok(path) = expanded.canonicalize() else { return Ok(()) };
         let directory = self.path.parent().unwrap_or(Path::new(".")).join("ssh-keys");
+        let Ok(directory) = directory.canonicalize() else { return Ok(()) };
         // Only UUID copies created inside this application's private key store.
         if path.parent() != Some(directory.as_path())
             || path.extension().and_then(|s| s.to_str()) != Some("key")
@@ -2147,18 +2156,24 @@ impl Database {
             return Ok(());
         }
         let connection = self.connection.lock().map_err(|e| e.to_string())?;
+        // A missing/inaccessible/unexpanded reference is not proof that this
+        // file is unused. Keep it until every reference can be resolved.
+        let keeps_key = |reference: &str| {
+            crate::ssh_keys::expand_identity_path(reference).canonicalize()
+                .map(|reference| reference == path).unwrap_or(true)
+        };
         let mut statement = connection.prepare("SELECT identity_file FROM servers WHERE identity_file IS NOT NULL").map_err(|e| e.to_string())?;
         let references = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
         for reference in references {
-            if reference.map_err(|e| e.to_string())? == candidate { return Ok(()) }
+            if keeps_key(&reference.map_err(|e| e.to_string())?) { return Ok(()) }
         }
         let mut statement = connection.prepare("SELECT server_json FROM remote_cleanup_queue").map_err(|e| e.to_string())?;
         let references = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
         for reference in references {
             let server: Server = serde_json::from_str(&reference.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-            if server.identity_file.as_deref() == Some(candidate) { return Ok(()) }
+            if server.identity_file.as_deref().is_some_and(keeps_key) { return Ok(()) }
         }
-        match std::fs::remove_file(path) {
+        match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!("无法回收导入的私钥：{e}")),

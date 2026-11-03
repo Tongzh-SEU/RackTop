@@ -650,6 +650,108 @@ mod tests {
         assert!(original.exists());
     }
 
+    #[test]
+    fn equivalent_key_paths_protect_server_and_cleanup_references() {
+        for queued in [false, true] {
+            let directory = tempdir().unwrap();
+            let database = Database::open(&directory.path().join("target.sqlite")).unwrap();
+            let key = write_private_key(directory.path(), TEST_KEY).unwrap();
+            let alias = key.parent().unwrap().join(".").join(key.file_name().unwrap());
+            let first = database.save_server(draft(Some(key.to_string_lossy().into_owned()))).unwrap();
+            let mut other = draft(Some(alias.to_string_lossy().into_owned()));
+            other.host = "other.example".into();
+            let second = database.save_server(other).unwrap();
+            if queued {
+                database.enqueue_remote_cleanup(&second, 100, "offline", None).unwrap();
+                database.delete_server_record(&second.id, false).unwrap();
+            }
+            database.delete_server(&first.id).unwrap();
+            assert!(key.exists());
+            if queued { database.finish_remote_cleanup(&second.id, false).unwrap(); }
+            else { database.delete_server(&second.id).unwrap(); }
+            assert!(!key.exists());
+        }
+    }
+
+    #[test]
+    fn editing_authentication_reclaims_only_unreferenced_imported_keys() {
+        for method in ["sshAgent", "password", "privateKey"] {
+            let directory = tempdir().unwrap();
+            let database = Database::open(&directory.path().join("target.sqlite")).unwrap();
+            let key = write_private_key(directory.path(), TEST_KEY).unwrap();
+            let replacement = write_private_key(directory.path(), TEST_KEY).unwrap();
+            let server = database.save_server(draft(Some(key.to_string_lossy().into_owned()))).unwrap();
+            let mut edit = draft(None);
+            edit.id = Some(server.id);
+            edit.auth_method = method.into();
+            if method == "password" { edit.password = Some("test-only".into()); }
+            if method == "privateKey" { edit.identity_file = Some(replacement.to_string_lossy().into_owned()); }
+            database.save_server(edit).unwrap();
+            assert!(!key.exists(), "{method}");
+            assert!(replacement.exists());
+        }
+    }
+
+    #[test]
+    fn editing_retains_keys_used_by_other_servers_or_cleanup_tasks() {
+        for queued in [false, true] {
+            let directory = tempdir().unwrap();
+            let database = Database::open(&directory.path().join("target.sqlite")).unwrap();
+            let key = write_private_key(directory.path(), TEST_KEY).unwrap();
+            let first = database.save_server(draft(Some(key.to_string_lossy().into_owned()))).unwrap();
+            let alias = key.parent().unwrap().join(".").join(key.file_name().unwrap());
+            let mut other = draft(Some(alias.to_string_lossy().into_owned()));
+            other.host = "other.example".into();
+            let second = database.save_server(other).unwrap();
+            if queued {
+                database.enqueue_remote_cleanup(&second, 100, "offline", None).unwrap();
+                database.delete_server_record(&second.id, false).unwrap();
+            }
+            let mut edit = draft(None); edit.id = Some(first.id); edit.auth_method = "sshAgent".into();
+            database.save_server(edit).unwrap();
+            assert!(key.exists());
+            if queued { database.finish_remote_cleanup(&second.id, false).unwrap(); }
+            else { database.delete_server(&second.id).unwrap(); }
+            assert!(!key.exists());
+        }
+    }
+
+    #[test]
+    fn failed_edit_and_user_owned_keys_are_never_reclaimed() {
+        let directory = tempdir().unwrap();
+        let db_path = directory.path().join("target.sqlite");
+        let database = Database::open(&db_path).unwrap();
+        let key = write_private_key(directory.path(), TEST_KEY).unwrap();
+        let server = database.save_server(draft(Some(key.to_string_lossy().into_owned()))).unwrap();
+        let fault = rusqlite::Connection::open(&db_path).unwrap();
+        fault.execute_batch("CREATE TRIGGER fail_edit BEFORE UPDATE ON servers BEGIN SELECT RAISE(FAIL, 'injected'); END;").unwrap();
+        let mut edit = draft(None); edit.id = Some(server.id.clone()); edit.auth_method = "sshAgent".into();
+        assert!(database.save_server(edit).is_err());
+        assert!(key.exists());
+        assert_eq!(database.get_server(&server.id).unwrap().identity_file, server.identity_file);
+        fault.execute_batch("DROP TRIGGER fail_edit;").unwrap();
+        database.delete_server(&server.id).unwrap();
+        let original = directory.path().join("user-owned.key");
+        fs::write(&original, TEST_KEY).unwrap();
+        let server = database.save_server(draft(Some(original.to_string_lossy().into_owned()))).unwrap();
+        let mut edit = draft(None); edit.id = Some(server.id); edit.auth_method = "sshAgent".into();
+        database.save_server(edit).unwrap();
+        assert!(original.exists());
+    }
+
+    #[test]
+    fn unresolved_key_reference_conservatively_prevents_reclamation() {
+        let directory = tempdir().unwrap();
+        let database = Database::open(&directory.path().join("target.sqlite")).unwrap();
+        let key = write_private_key(directory.path(), TEST_KEY).unwrap();
+        let first = database.save_server(draft(Some(key.to_string_lossy().into_owned()))).unwrap();
+        let mut other = draft(Some(directory.path().join("unavailable.key").to_string_lossy().into_owned()));
+        other.host = "other.example".into();
+        database.save_server(other).unwrap();
+        database.delete_server(&first.id).unwrap();
+        assert!(key.exists());
+    }
+
     fn draft(identity_file: Option<String>) -> ServerDraft {
         ServerDraft {
             id: None,
