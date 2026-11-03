@@ -132,6 +132,7 @@ impl ConfigTransferState {
             return Err("配置包超过 32 MB，无法导入".into());
         }
         let payload = decrypt_package(package, passphrase)?;
+        for item in &payload.servers { crate::ssh_config::validate_transfer_draft(&item.draft)?; }
         validate_payload(&payload)?;
         let import_id = Uuid::new_v4().to_string();
         let servers = payload
@@ -214,6 +215,7 @@ impl ConfigTransferState {
         let current_servers = database.list_servers()?;
         for index in &indexes {
             let candidate = &payload.servers[*index].draft;
+            crate::ssh_config::validate_transfer_draft(candidate)?;
             if let Some(existing) = current_servers.iter().find(|server| same_connection(server, candidate)) {
                 return Err(format!(
                     "目标应用已存在 {}（{}@{}:{}），请取消选择后重试",
@@ -602,6 +604,24 @@ mod tests {
     const PASSPHRASE: &str = "correct horse battery staple";
 
     #[test]
+    fn encrypted_jump_dependencies_fail_before_writing_records_or_keys() {
+        let directory = tempdir().unwrap();
+        let database = Database::open(&directory.path().join("target.sqlite")).unwrap();
+        let mut target = draft(None);
+        target.proxy_jump = Some("jump-review".into());
+        let payload = PackagePayload { kind: "racktop".into(), ssh_config: None, servers: vec![
+            PackageServer { draft: target, private_key: Some(STANDARD.encode(TEST_KEY)) },
+        ] };
+        let package = encrypt_payload(&payload, PASSPHRASE).unwrap();
+        let state = ConfigTransferState::default();
+        assert!(state.prepare_import(&package, PASSPHRASE).err().unwrap().contains("ProxyJump"));
+        state.pending.lock().unwrap().insert("legacy-preview".into(), PendingImport { payload, created_at: Instant::now() });
+        assert!(state.commit_import("legacy-preview", &[0], &database, directory.path()).err().unwrap().contains("ProxyJump"));
+        assert!(database.list_servers().unwrap().is_empty());
+        assert!(!directory.path().join("ssh-keys").exists());
+    }
+
+    #[test]
     fn failed_save_rolls_back_row_and_key_and_remaining_batch_can_retry() {
         let directory = tempdir().unwrap();
         let db_path = directory.path().join("target.sqlite");
@@ -762,7 +782,7 @@ mod tests {
             username: "tester".into(),
             ssh_alias: Some("transfer-test".into()),
             identity_file,
-            proxy_jump: Some("gateway".into()),
+            proxy_jump: None,
             tags: vec!["test".into()],
             sampling_interval_seconds: 3,
             history_retention_days: 21,
@@ -851,7 +871,9 @@ mod tests {
         let key_path = source_dir.path().join("source-key");
         fs::write(&key_path, TEST_KEY).unwrap();
         let source = Database::open(&source_dir.path().join("source.sqlite")).unwrap();
-        source.save_server(draft(Some(key_path.to_string_lossy().into_owned()))).unwrap();
+        let mut server = draft(Some(key_path.to_string_lossy().into_owned()));
+        server.proxy_jump = Some("gateway".into());
+        source.save_server(server).unwrap();
 
         let exported = export(&source, "", "ssh").unwrap();
         assert_eq!(exported.private_key_count, 0);

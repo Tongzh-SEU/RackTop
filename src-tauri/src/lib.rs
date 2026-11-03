@@ -1018,7 +1018,7 @@ async fn prepare_server_config_import(
 #[tauri::command]
 fn parse_ssh_config(content: String) -> Result<Vec<ServerDraft>, String> {
     if content.len() > 32 * 1024 * 1024 { return Err("SSH Config 超过 32 MB".into()); }
-    Ok(ssh_config::parse(&content))
+    ssh_config::parse_transfer(&content)
 }
 
 #[tauri::command]

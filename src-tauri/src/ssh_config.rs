@@ -10,38 +10,84 @@ pub fn import(path: &Path) -> Result<Vec<ServerDraft>, String> {
     Ok(parse(&content))
 }
 
+// First value wins, in file order, across all matching Host blocks.
+// Wildcard blocks contribute defaults but do not create server entries.
 pub fn parse(content: &str) -> Vec<ServerDraft> {
-    #[derive(Default)]
-    struct HostBlock { aliases: Vec<String>, hostname: Option<String>, user: Option<String>, port: Option<u16>, identity_file: Option<String>, proxy_jump: Option<String> }
-    fn finish(block: HostBlock, output: &mut Vec<ServerDraft>) {
-        for alias in block.aliases.into_iter().filter(|value| !value.contains('*') && !value.contains('?') && !value.starts_with('!')) {
-            let hostname = block.hostname.clone().unwrap_or_else(|| alias.clone());
-            output.push(ServerDraft { id: None, name: alias.clone(), location: None, host: hostname, port: block.port.unwrap_or(22), username: block.user.clone().unwrap_or_else(default_username), ssh_alias: Some(alias), identity_file: block.identity_file.clone(), proxy_jump: block.proxy_jump.clone(), tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false, auth_method: "sshConfig".into(), password: None, save_password: false });
-        }
-    }
-    let mut output = Vec::new();
-    let mut current: Option<HostBlock> = None;
-    for raw_line in content.lines() {
-        let tokens = config_tokens(raw_line);
-        let Some(keyword) = tokens.first() else { continue; };
+    let mut blocks: Vec<(Vec<String>, Vec<(String, String)>)> = vec![(vec!["*".into()], Vec::new())];
+    let mut aliases = Vec::new();
+    for line in content.lines() {
+        let tokens = config_tokens(line);
+        let Some(keyword) = tokens.first() else { continue };
         let key = keyword.to_ascii_lowercase();
-        let value = tokens[1..].join(" ");
         if key == "host" {
-            if let Some(block) = current.take() { finish(block, &mut output); }
-            current = Some(HostBlock { aliases: tokens[1..].to_vec(), ..Default::default() });
-        } else if let Some(block) = current.as_mut() {
-            match key.as_str() {
-                "hostname" => block.hostname = Some(value),
-                "user" => block.user = Some(value),
-                "port" => block.port = value.parse().ok(),
-                "identityfile" => block.identity_file = Some(value),
-                "proxyjump" => block.proxy_jump = Some(value),
-                _ => {}
+            for alias in &tokens[1..] {
+                if !alias.contains(['*', '?']) && !alias.starts_with('!') && !aliases.contains(alias) { aliases.push(alias.clone()); }
             }
+            blocks.push((tokens[1..].to_vec(), Vec::new()));
+        } else {
+            blocks.last_mut().unwrap().1.push((key, tokens[1..].join(" ")));
         }
     }
-    if let Some(block) = current { finish(block, &mut output); }
-    output
+    aliases.into_iter().map(|alias| {
+        let mut values = std::collections::HashMap::new();
+        for (patterns, options) in &blocks {
+            let matches = patterns.iter().any(|p| !p.starts_with('!') && host_matches(p, &alias))
+                && !patterns.iter().any(|p| p.strip_prefix('!').is_some_and(|p| host_matches(p, &alias)));
+            if matches { for (key, value) in options { values.entry(key.as_str()).or_insert(value.clone()); } }
+        }
+        ServerDraft { id: None, name: alias.clone(), location: None,
+            host: values.get("hostname").cloned().unwrap_or_else(|| alias.clone()),
+            port: values.get("port").and_then(|p| p.parse().ok()).unwrap_or(22),
+            username: values.get("user").cloned().unwrap_or_else(default_username),
+            ssh_alias: Some(alias), identity_file: values.get("identityfile").cloned(),
+            proxy_jump: values.get("proxyjump").filter(|p| !p.eq_ignore_ascii_case("none")).cloned(),
+            tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90,
+            remote_history_enabled: false, auth_method: "sshConfig".into(), password: None, save_password: false }
+    }).collect()
+}
+
+fn host_matches(pattern: &str, host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let mut previous = vec![false; host.len() + 1]; previous[0] = true;
+    for p in pattern.to_ascii_lowercase().bytes() {
+        let mut next = vec![false; host.len() + 1];
+        if p == b'*' { next[0] = previous[0]; }
+        for (i, h) in host.bytes().enumerate() {
+            next[i + 1] = if p == b'*' { previous[i + 1] || next[i] }
+                else { previous[i] && (p == b'?' || p == h) };
+        }
+        previous = next;
+    }
+    previous[host.len()]
+}
+
+pub fn validate_transfer_draft(draft: &ServerDraft) -> Result<(), String> {
+    if draft.proxy_jump.as_deref().is_some_and(|p| !p.trim().is_empty() && !p.eq_ignore_ascii_case("none")) {
+        return Err(format!("{} 使用 ProxyJump：跳板机连接及认证配置无法完整迁移，请在目标电脑重新配置后手动添加", draft.name));
+    }
+    Ok(())
+}
+
+pub fn parse_transfer(content: &str) -> Result<Vec<ServerDraft>, String> {
+    for line in content.lines() {
+        let tokens = config_tokens(line);
+        let Some(key) = tokens.first() else { continue };
+        match key.to_ascii_lowercase().as_str() {
+            "host" | "hostname" | "user" | "port" | "identityfile" | "proxyjump"
+            | "serveraliveinterval" | "serveralivecountmax" | "tcpkeepalive" => {},
+            _ => return Err(format!("SSH Config 暂不支持迁移指令 {key}，请展开为 Host、HostName、User、Port 等具体配置后重试")),
+        }
+        if tokens.len() < 2 { return Err(format!("SSH Config 指令 {key} 缺少参数")); }
+        if key.eq_ignore_ascii_case("port") && tokens[1].parse::<u16>().ok().is_none_or(|p| p == 0) {
+            return Err("SSH Config 端口无效".into());
+        }
+        if tokens[1..].iter().any(|v| v.contains('%') || v.contains("${")) {
+            return Err("SSH Config 暂不支持迁移变量，请改为具体连接参数".into());
+        }
+    }
+    let drafts = parse(content);
+    for draft in &drafts { validate_transfer_draft(draft)?; }
+    Ok(drafts)
 }
 
 fn config_tokens(line: &str) -> Vec<String> {
@@ -73,6 +119,48 @@ fn default_username() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn common_options_follow_openssh_first_value_and_pattern_rules() {
+        let values = parse_transfer("User global\nHost gpu-a gpu-b\n HostName 192.0.2.10\n Port 2222\n Port 3333\nHost gpu-? !gpu-b\n Port 4444\nHost *\n User ignored\n Port 5555\n").unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].username, "global");
+        assert_eq!(values[0].port, 2222);
+        assert_eq!(values[1].port, 2222);
+        let values = parse_transfer("Host gpu-a\n HostName 192.0.2.10\nHost gpu-b\n HostName 192.0.2.11\nHost gpu-? !gpu-b\n User alice\nHost *\n User bob\n Port 2222\n").unwrap();
+        assert_eq!(values[0].username, "alice");
+        assert_eq!(values[1].username, "bob");
+        assert_eq!(values[1].port, 2222);
+    }
+
+    #[test]
+    fn transfer_rejects_unportable_dependencies_and_unsupported_syntax() {
+        let config = "Host gpu-review\n HostName 192.0.2.10\nHost *\n User remote-review\n Port 2222\n ProxyJump jump-review\n";
+        let values = parse(config);
+        assert_eq!(values[0].username, "remote-review");
+        assert_eq!(values[0].port, 2222);
+        assert_eq!(values[0].proxy_jump.as_deref(), Some("jump-review"));
+        assert!(parse_transfer(config).unwrap_err().contains("ProxyJump"));
+        for directive in ["Include other", "Match all", "ProxyCommand ssh jump", "HostName %h.example", "Port invalid"] {
+            assert!(parse_transfer(&format!("Host gpu\n {directive}\n")).is_err(), "{directive}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn common_parameters_match_system_ssh_without_network_access() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config");
+        let config = "Host gpu-review\n HostName 192.0.2.10\nHost *\n User remote-review\n Port 2222\n";
+        std::fs::write(&path, config).unwrap();
+        let output = std::process::Command::new("ssh").args(["-G", "-F"]).arg(&path).arg("gpu-review").output().unwrap();
+        assert!(output.status.success());
+        let output = String::from_utf8(output.stdout).unwrap();
+        let values = parse_transfer(config).unwrap();
+        assert!(output.lines().any(|l| l == format!("hostname {}", values[0].host)));
+        assert!(output.lines().any(|l| l == format!("user {}", values[0].username)));
+        assert!(output.lines().any(|l| l == format!("port {}", values[0].port)));
+    }
 
     #[test]
     fn parses_hosts_and_skips_wildcards() {
