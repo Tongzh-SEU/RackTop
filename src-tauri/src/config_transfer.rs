@@ -251,7 +251,11 @@ impl ConfigTransferState {
 
             if let Err(error) = database.save_server(draft) {
                 if let Some(path) = key_path {
-                    let _ = fs::remove_file(path);
+                    // If compensating cleanup itself failed, do not break the
+                    // surviving row by removing its credential file.
+                    if database.list_servers().is_ok_and(|servers| !servers.iter().any(|server| server.identity_file.as_deref() == path.to_str())) {
+                        let _ = fs::remove_file(path);
+                    }
                 }
                 return Err(format!("导入服务器失败：{error}；此前已导入 {imported_count} 台"));
             }
@@ -596,6 +600,55 @@ mod tests {
 
     const TEST_KEY: &[u8] = b"-----BEGIN OPENSSH PRIVATE KEY-----\ntest fixture\n-----END OPENSSH PRIVATE KEY-----\n";
     const PASSPHRASE: &str = "correct horse battery staple";
+
+    #[test]
+    fn failed_save_rolls_back_row_and_key_and_remaining_batch_can_retry() {
+        let directory = tempdir().unwrap();
+        let db_path = directory.path().join("target.sqlite");
+        let database = Database::open(&db_path).unwrap();
+        let fault = rusqlite::Connection::open(&db_path).unwrap();
+        fault.execute_batch("CREATE TRIGGER fail_credentials BEFORE UPDATE OF credential_storage_state ON servers WHEN NEW.host='fail.example' BEGIN SELECT RAISE(FAIL, 'injected'); END;").unwrap();
+        let state = ConfigTransferState::default();
+        let mut first = draft(None); first.host = "ok.example".into();
+        let mut second = draft(None); second.host = "fail.example".into();
+        state.pending.lock().unwrap().insert("test".into(), PendingImport {
+            payload: PackagePayload { kind: "racktop".into(), ssh_config: None, servers: vec![
+                PackageServer { draft: first, private_key: Some(STANDARD.encode(TEST_KEY)) },
+                PackageServer { draft: second, private_key: Some(STANDARD.encode(TEST_KEY)) },
+            ] }, created_at: Instant::now(),
+        });
+        assert!(state.commit_import("test", &[0, 1], &database, directory.path()).is_err());
+        let saved = database.list_servers().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].host, "ok.example");
+        assert!(Path::new(saved[0].identity_file.as_deref().unwrap()).exists());
+        assert_eq!(fs::read_dir(directory.path().join("ssh-keys")).unwrap().count(), 1);
+        fault.execute_batch("DROP TRIGGER fail_credentials;").unwrap();
+        assert_eq!(state.commit_import("test", &[1], &database, directory.path()).unwrap().imported_count, 1);
+        assert_eq!(database.list_servers().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn imported_key_is_retained_for_other_records_and_cleanup_then_reclaimed() {
+        let directory = tempdir().unwrap();
+        let database = Database::open(&directory.path().join("target.sqlite")).unwrap();
+        let key = write_private_key(directory.path(), TEST_KEY).unwrap();
+        let first = database.save_server(draft(Some(key.to_string_lossy().into_owned()))).unwrap();
+        let mut other = draft(Some(key.to_string_lossy().into_owned())); other.host = "other.example".into();
+        let second = database.save_server(other).unwrap();
+        database.delete_server(&first.id).unwrap();
+        assert!(key.exists());
+        database.enqueue_remote_cleanup(&second, 100, "offline", None).unwrap();
+        database.delete_server_record(&second.id, false).unwrap();
+        assert!(key.exists());
+        database.finish_remote_cleanup(&second.id, false).unwrap();
+        assert!(!key.exists());
+        let original = directory.path().join("user-owned.key");
+        fs::write(&original, TEST_KEY).unwrap();
+        let user_server = database.save_server(draft(Some(original.to_string_lossy().into_owned()))).unwrap();
+        database.delete_server(&user_server.id).unwrap();
+        assert!(original.exists());
+    }
 
     fn draft(identity_file: Option<String>) -> ServerDraft {
         ServerDraft {

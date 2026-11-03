@@ -225,6 +225,17 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
       await onImported(result.importedCount)
     } catch (reason) {
       setError(String(reason))
+      // A batch can have committed earlier rows before a later save fails.
+      // Reconcile against persisted state before allowing the next attempt.
+      try {
+        const current = await api.listServers()
+        const imported = duplicateImportIndexes(reviewServers?.map(({ draft }) => draft) ?? [], current)
+        setSelected(new Set(selectedIndexes.filter((index) => !imported.has(index))))
+        await onImported(selectedIndexes.filter((index) => imported.has(index)).length)
+      } catch (refreshError) {
+        setSelected(new Set())
+        setError(String(reason) + '；无法刷新已导入记录，请重新打开导入：' + String(refreshError))
+      }
     } finally {
       setBusy(false)
     }

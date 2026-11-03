@@ -6,7 +6,7 @@ import { ConfigTransferMenu } from './ConfigTransferMenu'
 import { api } from '../services/api'
 import type { Server, ServerDraft } from '../types/models'
 
-vi.mock('../services/api', () => ({ api: { exportServerConfig: vi.fn(), prepareServerConfigImport: vi.fn(), commitServerConfigImport: vi.fn(), discardServerConfigImport: vi.fn().mockResolvedValue(undefined), saveServer: vi.fn(), parseSshConfig: vi.fn() } }))
+vi.mock('../services/api', () => ({ api: { listServers: vi.fn(), exportServerConfig: vi.fn(), prepareServerConfigImport: vi.fn(), commitServerConfigImport: vi.fn(), discardServerConfigImport: vi.fn().mockResolvedValue(undefined), saveServer: vi.fn(), parseSshConfig: vi.fn() } }))
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 let root: ReturnType<typeof createRoot>
 let container: HTMLDivElement
@@ -15,6 +15,7 @@ const onNotice = vi.fn()
 const onImported = vi.fn().mockResolvedValue(undefined)
 
 function mount() {
+  vi.mocked(api.discardServerConfigImport).mockResolvedValue(undefined)
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -44,10 +45,37 @@ async function dropFile(contents: string, name: string) {
 afterEach(() => {
   if (root) act(() => root.unmount())
   container?.remove()
-  vi.clearAllMocks()
+  vi.resetAllMocks()
 })
 
 describe('configuration quick menu', () => {
+  it.each(['ssh', 'racktop'])('refreshes partial %s imports and retries only the remaining selection', async (kind) => {
+    const first: ServerDraft = { name: 'First', host: 'first.example', port: 22, username: 'tester', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'sshAgent' }
+    const second = { ...first, host: 'second.example' }
+    vi.mocked(api.listServers).mockResolvedValue([{ ...server, host: first.host }])
+    vi.mocked(api.saveServer).mockResolvedValueOnce(server).mockRejectedValueOnce('injected').mockResolvedValueOnce(server)
+    vi.mocked(api.parseSshConfig).mockResolvedValue([first, second])
+    vi.mocked(api.prepareServerConfigImport).mockResolvedValue({ importId: 'partial', privateKeyCount: 0, servers: [first, second].map(draft => ({ draft, includesPrivateKey: false })) })
+    vi.mocked(api.commitServerConfigImport).mockRejectedValueOnce('injected; first saved').mockResolvedValueOnce({ importedCount: 1, privateKeysInstalled: 0 })
+    mount()
+    click('导入 / 导出配置')
+    click(kind === 'ssh' ? '导入 SSH Config' : '导入配置')
+    await dropFile('fixture', 'config')
+    if (kind === 'racktop') {
+      fill(document.querySelector<HTMLInputElement>('input[type="password"]')!, 'migration-password')
+      await act(async () => button('验证配置包').click())
+    }
+    await act(async () => button('导入 2 台').click())
+    expect(onImported).toHaveBeenCalledWith(1)
+    const choices = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+    expect(choices[0].checked).toBe(false)
+    expect(choices[1].checked).toBe(true)
+    await act(async () => button('导入 1 台').click())
+    if (kind === 'racktop') expect(api.commitServerConfigImport).toHaveBeenLastCalledWith('partial', [1])
+    else expect(api.saveServer).toHaveBeenLastCalledWith(expect.objectContaining({ host: second.host }))
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
+
   it('shows the four prototype actions and does not report a cancelled save as exported', async () => {
     vi.mocked(api.exportServerConfig).mockResolvedValue(null)
     mount()

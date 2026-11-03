@@ -1860,7 +1860,25 @@ impl Database {
         Ok(settings)
     }
 
-    pub fn save_server(&self, draft: ServerDraft) -> Result<Server, String> {
+    pub fn save_server(&self, mut draft: ServerDraft) -> Result<Server, String> {
+        if draft.id.is_some() { return self.save_server_inner(draft); }
+        if draft.auth_method == "password" && draft.password.as_deref().is_none_or(|p| p.trim().is_empty()) {
+            return Err("使用密码认证时必须输入 SSH 密码".into());
+        }
+        let id = Uuid::new_v4().to_string();
+        draft.id = Some(id.clone());
+        match self.save_server_inner(draft) {
+            Ok(server) => Ok(server),
+            Err(error) => {
+                // Credential persistence may fail after the new row was inserted.
+                self.delete_server_record(&id, true)
+                    .map_err(|cleanup| format!("{error}；撤销新记录失败：{cleanup}"))?;
+                Err(error)
+            }
+        }
+    }
+
+    fn save_server_inner(&self, draft: ServerDraft) -> Result<Server, String> {
         if draft.host.trim().is_empty() || draft.username.trim().is_empty() {
             return Err("主机地址和用户名不能为空".into());
         }
@@ -1968,6 +1986,8 @@ impl Database {
 
     pub fn delete_server_record(&self, id: &str, delete_credential: bool) -> Result<(), String> {
         let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let imported_key = connection.query_row("SELECT identity_file FROM servers WHERE id=?1", [id], |row| row.get::<_, Option<String>>(0))
+            .optional().map_err(|error| error.to_string())?.flatten();
         let auth_method = connection
             .query_row("SELECT auth_method FROM servers WHERE id=?1", [id], |row| {
                 row.get::<_, String>(0)
@@ -2027,6 +2047,7 @@ impl Database {
                 .map_err(|error| error.to_string())?
                 .remove(id);
         }
+        self.reclaim_imported_key(imported_key.as_deref())?;
         Ok(())
     }
 
@@ -2087,6 +2108,10 @@ impl Database {
         delete_credential: bool,
     ) -> Result<(), String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let imported_key = connection.query_row("SELECT server_json FROM remote_cleanup_queue WHERE server_id=?1", [server_id], |row| row.get::<_, String>(0))
+            .optional().map_err(|error| error.to_string())?
+            .map(|json| serde_json::from_str::<Server>(&json).map(|server| server.identity_file))
+            .transpose().map_err(|error| error.to_string())?.flatten();
         connection
             .execute(
                 "DELETE FROM remote_cleanup_queue WHERE server_id=?1",
@@ -2107,7 +2132,37 @@ impl Database {
             .lock()
             .map_err(|error| error.to_string())?
             .remove(server_id);
+        self.reclaim_imported_key(imported_key.as_deref())?;
         Ok(())
+    }
+
+    fn reclaim_imported_key(&self, candidate: Option<&str>) -> Result<(), String> {
+        let Some(candidate) = candidate else { return Ok(()) };
+        let path = Path::new(candidate);
+        let directory = self.path.parent().unwrap_or(Path::new(".")).join("ssh-keys");
+        // Only UUID copies created inside this application's private key store.
+        if path.parent() != Some(directory.as_path())
+            || path.extension().and_then(|s| s.to_str()) != Some("key")
+            || path.file_stem().and_then(|s| s.to_str()).and_then(|s| Uuid::parse_str(s).ok()).is_none() {
+            return Ok(());
+        }
+        let connection = self.connection.lock().map_err(|e| e.to_string())?;
+        let mut statement = connection.prepare("SELECT identity_file FROM servers WHERE identity_file IS NOT NULL").map_err(|e| e.to_string())?;
+        let references = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        for reference in references {
+            if reference.map_err(|e| e.to_string())? == candidate { return Ok(()) }
+        }
+        let mut statement = connection.prepare("SELECT server_json FROM remote_cleanup_queue").map_err(|e| e.to_string())?;
+        let references = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        for reference in references {
+            let server: Server = serde_json::from_str(&reference.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            if server.identity_file.as_deref() == Some(candidate) { return Ok(()) }
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("无法回收导入的私钥：{e}")),
+        }
     }
 
     pub fn get_password(&self, id: &str, allow_prompt: bool) -> Result<Option<String>, String> {
