@@ -301,6 +301,23 @@ export interface ServerDraft {
   savePassword?: boolean
 }
 
+export interface ServerConfigExport {
+  path: string
+  serverCount: number
+  privateKeyCount: number
+}
+
+export interface ServerConfigImportPreview {
+  importId: string
+  servers: Array<{ draft: ServerDraft; includesPrivateKey: boolean }>
+  privateKeyCount: number
+}
+
+export interface ServerConfigImportResult {
+  importedCount: number
+  privateKeysInstalled: number
+}
+
 export interface RemoteCleanupResult {
   remoteCleaned: boolean
   cleanupPending: boolean

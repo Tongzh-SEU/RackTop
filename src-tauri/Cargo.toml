@@ -40,10 +40,12 @@ dirs = "6"
 thiserror = "2"
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 base64 = "0.22"
+ring = "0.17"
 sha2 = "0.10"
 portable-pty = "0.9.0"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-single-instance = "2"

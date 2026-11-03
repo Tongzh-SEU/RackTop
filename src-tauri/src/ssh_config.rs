@@ -22,14 +22,13 @@ pub fn parse(content: &str) -> Vec<ServerDraft> {
     let mut output = Vec::new();
     let mut current: Option<HostBlock> = None;
     for raw_line in content.lines() {
-        let line = raw_line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() { continue; }
-        let mut parts = line.split_whitespace();
-        let key = parts.next().unwrap_or("").to_ascii_lowercase();
-        let value = parts.collect::<Vec<_>>().join(" ");
+        let tokens = config_tokens(raw_line);
+        let Some(keyword) = tokens.first() else { continue; };
+        let key = keyword.to_ascii_lowercase();
+        let value = tokens[1..].join(" ");
         if key == "host" {
             if let Some(block) = current.take() { finish(block, &mut output); }
-            current = Some(HostBlock { aliases: value.split_whitespace().map(str::to_string).collect(), ..Default::default() });
+            current = Some(HostBlock { aliases: tokens[1..].to_vec(), ..Default::default() });
         } else if let Some(block) = current.as_mut() {
             match key.as_str() {
                 "hostname" => block.hostname = Some(value),
@@ -43,6 +42,28 @@ pub fn parse(content: &str) -> Vec<ServerDraft> {
     }
     if let Some(block) = current { finish(block, &mut output); }
     output
+}
+
+fn config_tokens(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => quoted = !quoted,
+            '#' if !quoted => break,
+            '\\' if quoted && matches!(chars.peek(), Some('"' | '\\')) => {
+                token.push(chars.next().unwrap());
+            }
+            ch if ch.is_whitespace() && !quoted => {
+                if !token.is_empty() { tokens.push(std::mem::take(&mut token)); }
+            }
+            _ => token.push(ch),
+        }
+    }
+    if !token.is_empty() { tokens.push(token); }
+    tokens
 }
 
 fn default_username() -> String {
@@ -61,5 +82,13 @@ mod tests {
         assert_eq!(values[0].port, 2222);
         assert_eq!(values[0].proxy_jump.as_deref(), Some("bastion"));
         assert_eq!(values[0].history_retention_days, 90);
+    }
+
+    #[test]
+    fn quoted_identity_paths_keep_spaces_and_hashes_without_quote_characters() {
+        let values = parse("Host quoted-key\n HostName 127.0.0.2\n User fixture\n IdentityFile \"/tmp/RackTop Keys/test#1.key\" # local key\n");
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].identity_file.as_deref(), Some("/tmp/RackTop Keys/test#1.key"));
+        assert_eq!(values[0].host, "127.0.0.2");
     }
 }

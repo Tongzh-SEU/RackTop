@@ -1,4 +1,5 @@
 mod app_update;
+mod config_transfer;
 #[cfg(target_os = "linux")]
 mod linux_app_update;
 pub mod collector;
@@ -46,6 +47,7 @@ use tauri::{
     WindowEvent,
 };
 use terminal::TerminalManager;
+use tauri_plugin_dialog::DialogExt;
 
 #[derive(Default)]
 struct InteractionLogStore {
@@ -277,6 +279,7 @@ fn save_server_notification_settings(
 #[tauri::command]
 async fn delete_server(
     database: State<'_, Database>,
+    client_identity: State<'_, remote_history::ClientIdentity>,
     server_id: String,
     revoke_ssh_access: bool,
 ) -> Result<RemoteCleanupResult, String> {
@@ -294,7 +297,13 @@ async fn delete_server(
     } else {
         None
     };
-    match remote_history::remove(&server, password.as_deref(), managed_public_key.as_deref()).await
+    match remote_history::remove(
+        &server,
+        password.as_deref(),
+        managed_public_key.as_deref(),
+        client_identity.as_str(),
+    )
+    .await
     {
         Ok(()) => {
             database.delete_server(&server_id)?;
@@ -307,7 +316,7 @@ async fn delete_server(
                 remote_cleaned: true,
                 cleanup_pending: false,
                 message: format!(
-                    "已删除“{}”及其本地与远端 RackTop 数据{}",
+                    "已删除“{}”的本机记录和远端关联{}",
                     server.name, suffix
                 ),
             })
@@ -522,6 +531,7 @@ async fn verify_ssh_setup(draft: ServerDraft) -> Result<(), String> {
 async fn collect_server(
     database: State<'_, Database>,
     logs: State<'_, InteractionLogStore>,
+    client_identity: State<'_, remote_history::ClientIdentity>,
     server_id: String,
     include_processes: bool,
     include_disks: bool,
@@ -531,7 +541,12 @@ async fn collect_server(
     let server = database.get_server(&server_id)?;
     let log_id = logs.begin(
         &server,
-        collector::collection_display_command(&server, include_processes, include_disks),
+        collector::collection_display_command(
+            &server,
+            include_processes,
+            include_disks,
+            client_identity.as_str(),
+        ),
     );
     let password = match if server.auth_method == "password" {
         database.get_password(&server_id, allow_credential_prompt)
@@ -549,6 +564,7 @@ async fn collect_server(
         password.as_deref(),
         include_processes,
         include_disks,
+        client_identity.as_str(),
     )
     .await
     {
@@ -717,6 +733,7 @@ async fn get_usage_distribution(
 #[tauri::command]
 async fn configure_remote_history(
     database: State<'_, Database>,
+    client_identity: State<'_, remote_history::ClientIdentity>,
     server_id: String,
 ) -> Result<(), String> {
     let server = database.get_server(&server_id)?;
@@ -725,7 +742,7 @@ async fn configure_remote_history(
     } else {
         None
     };
-    remote_history::configure(&server, password.as_deref()).await
+    remote_history::configure(&server, password.as_deref(), client_identity.as_str()).await
 }
 
 #[tauri::command]
@@ -772,8 +789,18 @@ async fn sync_remote_history(
     } else {
         None
     };
-    let fetched_points = remote_history::fetch(&server, password.as_deref(), since).await?;
-    let usage_points = remote_history::fetch_usage(&server, password.as_deref(), since).await?;
+    let fetched_points = remote_history::fetch(
+        &server,
+        password.as_deref(),
+        since,
+    )
+    .await?;
+    let usage_points = remote_history::fetch_usage(
+        &server,
+        password.as_deref(),
+        since,
+    )
+    .await?;
     let points: Vec<_> = fetched_points
         .iter()
         .filter(|point| point.timestamp >= now - 31 * 86_400 && point.timestamp <= now + 300)
@@ -797,6 +824,7 @@ async fn sync_remote_history(
 #[tauri::command]
 async fn retry_remote_cleanups(
     database: State<'_, Database>,
+    client_identity: State<'_, remote_history::ClientIdentity>,
 ) -> Result<RemoteCleanupSweepResult, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -823,6 +851,7 @@ async fn retry_remote_cleanups(
             &task.server,
             password.as_deref(),
             task.managed_public_key.as_deref(),
+            client_identity.as_str(),
         )
         .await
         {
@@ -951,6 +980,65 @@ fn import_ssh_config(path: Option<String>) -> Result<Vec<ServerDraft>, String> {
         .map(Ok)
         .unwrap_or_else(ssh_config::default_config_path)?;
     ssh_config::import(&path)
+}
+
+#[tauri::command]
+async fn export_server_config(
+    app: AppHandle,
+    passphrase: String,
+    kind: String,
+) -> Result<Option<config_transfer::SavedExport>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let exported = config_transfer::export(&app.state::<Database>(), &passphrase, &kind)?;
+        let mut dialog = if kind == "ssh" {
+            app.dialog().file().set_file_name("ssh_config")
+        } else {
+            app.dialog().file().add_filter("RackTop 配置包", &["json"]).set_file_name("racktop-config.json")
+        };
+        if let Some(window) = app.get_webview_window("main") {
+            dialog = dialog.set_parent(&window);
+        }
+        let Some(path) = dialog.blocking_save_file() else { return Ok(None) };
+        let path = path.into_path().map_err(|error| error.to_string())?;
+        config_transfer::save_export(&path, exported).map(Some)
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn prepare_server_config_import(
+    app: AppHandle,
+    package: String,
+    passphrase: String,
+) -> Result<config_transfer::TransferPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<config_transfer::ConfigTransferState>().prepare_import(&package, &passphrase)
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn parse_ssh_config(content: String) -> Result<Vec<ServerDraft>, String> {
+    if content.len() > 32 * 1024 * 1024 { return Err("SSH Config 超过 32 MB".into()); }
+    Ok(ssh_config::parse(&content))
+}
+
+#[tauri::command]
+fn commit_server_config_import(
+    app: AppHandle,
+    database: State<'_, Database>,
+    transfer: State<'_, config_transfer::ConfigTransferState>,
+    import_id: String,
+    selected_indexes: Vec<usize>,
+) -> Result<config_transfer::TransferResult, String> {
+    let app_data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    transfer.commit_import(&import_id, &selected_indexes, &database, &app_data_dir)
+}
+
+#[tauri::command]
+fn discard_server_config_import(
+    transfer: State<'_, config_transfer::ConfigTransferState>,
+    import_id: String,
+) -> Result<(), String> {
+    transfer.discard_import(&import_id)
 }
 
 #[tauri::command]
@@ -1461,6 +1549,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             if let Err(error) = process_lifetime::install() {
@@ -1473,7 +1562,11 @@ pub fn run() {
             let database = Database::open(&app_data.join("racktop.sqlite")).map_err(|error| {
                 Box::<dyn std::error::Error>::from(std::io::Error::other(error))
             })?;
+            let client_identity = remote_history::ClientIdentity::load_or_create(&app_data)
+                .map_err(|error| Box::<dyn std::error::Error>::from(std::io::Error::other(error)))?;
             app.manage(database);
+            app.manage(client_identity);
+            app.manage(config_transfer::ConfigTransferState::default());
             app.manage(TerminalManager::default());
             app.manage(disk_scan::DiskScanManager::default());
             app.manage(InteractionLogStore::default());
@@ -1629,6 +1722,11 @@ pub fn run() {
             list_project_sync_progress,
             cancel_project_sync,
             import_ssh_config,
+            parse_ssh_config,
+            export_server_config,
+            prepare_server_config_import,
+            commit_server_config_import,
+            discard_server_config_import,
             get_settings,
             save_settings,
             scan_host_key,
