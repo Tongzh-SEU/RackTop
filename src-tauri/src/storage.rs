@@ -166,13 +166,22 @@ fn prepare_usage_reconciliation(connection: &Connection) -> Result<(), String> {
            server_id TEXT NOT NULL,timestamp INTEGER NOT NULL,PRIMARY KEY(server_id,timestamp),
            FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
          );
+         CREATE TABLE IF NOT EXISTS usage_legacy_minute_sources (
+           server_id TEXT NOT NULL,timestamp INTEGER NOT NULL,gpu_uuid TEXT NOT NULL,username TEXT NOT NULL,
+           PRIMARY KEY(server_id,timestamp,gpu_uuid,username),
+           FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+         );
          CREATE TABLE IF NOT EXISTS usage_reconciled (
            server_id TEXT NOT NULL,timestamp INTEGER NOT NULL,gpu_uuid TEXT NOT NULL,username TEXT NOT NULL,
            active_seconds INTEGER NOT NULL,memory_mb_seconds REAL NOT NULL,coverage_seconds INTEGER NOT NULL,
            PRIMARY KEY(server_id,timestamp,gpu_uuid,username),
            FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
          );"
-    ).map_err(|error| error.to_string())
+    ).map_err(|error| error.to_string())?;
+    // Previous builds wrote server-wide markers that cannot safely identify
+    // which GPU/user source was already included in a legacy aggregate.
+    connection.execute("DELETE FROM usage_legacy_minutes", []).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 // Preserve existing aggregates, including writes made by a downgraded binary.
@@ -206,6 +215,12 @@ fn capture_existing_usage(connection: &Connection, server_id: &str, hour: i64) -
     for (gpu,user,active,memory,coverage,had_sources,had_hourly_source,has_legacy_hour_claim) in changed {
         let kind = if had_hourly_source || (!had_sources && has_legacy_hour_claim) { 3 } else { 4 };
         connection.execute(
+            "INSERT OR IGNORE INTO usage_legacy_minute_sources(server_id,timestamp,gpu_uuid,username)
+             SELECT server_id,timestamp,gpu_uuid,username FROM usage_sources
+             WHERE server_id=?1 AND hour=?2 AND gpu_uuid=?3 AND username=?4 AND kind=0",
+            params![server_id,hour,gpu,user],
+        ).map_err(|error| error.to_string())?;
+        connection.execute(
             "DELETE FROM usage_sources WHERE server_id=?1 AND hour=?2 AND gpu_uuid=?3 AND username=?4",
             params![server_id,hour,gpu,user],
         ).map_err(|error| error.to_string())?;
@@ -215,7 +230,6 @@ fn capture_existing_usage(connection: &Connection, server_id: &str, hour: i64) -
             params![server_id,hour,gpu,user,kind,active,memory,coverage],
         ).map_err(|error| error.to_string())?;
     }
-    connection.execute("INSERT OR IGNORE INTO usage_legacy_minutes SELECT server_id,timestamp FROM remote_usage_minutes WHERE server_id=?1 AND timestamp>=?2 AND timestamp<?2+3600", params![server_id,hour]).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -264,8 +278,7 @@ fn reconcile_usage_hour(connection: &Connection, server_id: &str, hour: i64) -> 
 }
 
 fn prune_usage_sources(connection: &Connection, server_id: &str, cutoff: i64) -> Result<(), String> {
-    for table in ["usage_sources","usage_reconciled","usage_legacy_minutes"] {
-        let time_column = if table == "usage_sources" { "hour" } else { "timestamp" };
+    for (table,time_column) in [("usage_sources","hour"),("usage_reconciled","timestamp"),("usage_legacy_minutes","timestamp"),("usage_legacy_minute_sources","timestamp")] {
         connection.execute(&format!("DELETE FROM {table} WHERE server_id=?1 AND {time_column}<?2"), params![server_id,cutoff]).map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -2866,6 +2879,10 @@ impl Database {
                 "DELETE FROM usage_reconciled WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid=?3 AND username=?4",
                 params![server_id,timestamp,gpu_uuid,username],
             ).map_err(|error| error.to_string())?;
+            transaction.execute(
+                "DELETE FROM usage_legacy_minute_sources WHERE server_id=?1 AND timestamp>=?2 AND timestamp<?2+3600 AND gpu_uuid=?3 AND username=?4",
+                params![server_id,timestamp,gpu_uuid,username],
+            ).map_err(|error| error.to_string())?;
             quarantined += 1;
         }
         if removed_snapshots {
@@ -3013,8 +3030,8 @@ impl Database {
             if point.bucket_seconds == 60 {
                 let already_local_or_legacy: bool = transaction.query_row(
                     "SELECT EXISTS(SELECT 1 FROM local_usage_minutes WHERE server_id=?1 AND timestamp=?2)
-                       OR EXISTS(SELECT 1 FROM usage_legacy_minutes WHERE server_id=?1 AND timestamp=?2)",
-                    params![server_id,point.timestamp], |row| row.get(0),
+                       OR EXISTS(SELECT 1 FROM usage_legacy_minute_sources WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid=?3 AND username=?4)",
+                    params![server_id,point.timestamp,point.gpu_uuid,point.username], |row| row.get(0),
                 ).map_err(|error| error.to_string())?;
                 if already_local_or_legacy { continue; }
                 transaction.execute("INSERT OR IGNORE INTO remote_usage_minutes VALUES(?1,?2)", params![server_id,point.timestamp]).map_err(|error| error.to_string())?;
@@ -4435,6 +4452,125 @@ mod tests {
         assert_eq!(foreign_sources, 0);
         assert_eq!(own_total, 60);
         assert_eq!(integrity, "ok");
+    }
+
+    #[test]
+    fn same_remote_minute_can_gain_additional_gpu_and_user_series_on_later_sync() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("late-series.sqlite")).unwrap();
+        let server = database.save_server(draft("Late minute series", 90)).unwrap();
+        let minute = 3_660;
+        let point = |gpu: &str, user: &str| UsagePoint {
+            timestamp: minute, bucket_seconds: 60, gpu_uuid: gpu.into(), username: user.into(),
+            active_seconds: 60, memory_mb_seconds: 6_000.0, coverage_seconds: 60,
+        };
+        assert_eq!(database.import_remote_usage(&server.id, &[point("GPU-a", "alice")], 10_800).unwrap(), 1);
+        // Simulate the server-wide false marker left by the previous PR build.
+        database.connection.lock().unwrap().execute(
+            "INSERT INTO usage_legacy_minutes(server_id,timestamp) VALUES(?1,?2)",
+            params![server.id,minute],
+        ).unwrap();
+        assert_eq!(database.import_remote_usage(&server.id, &[
+            point("GPU-a", "alice"),
+            point("GPU-a", "bob"),
+            point("GPU-b", "carol"),
+        ], 10_800).unwrap(), 2);
+
+        let connection = database.connection.lock().unwrap();
+        let total: i64 = connection.query_row(
+            "SELECT SUM(active_seconds) FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND username<>'__racktop_coverage__'",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        let series_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_sources WHERE server_id=?1 AND hour=3600 AND kind=0",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        let false_markers: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_legacy_minute_sources WHERE server_id=?1",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(total, 180);
+        assert_eq!(series_count, 3);
+        assert_eq!(false_markers, 0);
+    }
+
+    #[test]
+    fn stale_server_wide_marker_is_not_assigned_to_unrelated_legacy_series() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("stale-marker.sqlite")).unwrap();
+        let server = database.save_server(draft("Stale marker", 90)).unwrap();
+        let minute = 3_660;
+        let point = |gpu: &str, user: &str| UsagePoint {
+            timestamp: minute, bucket_seconds: 60, gpu_uuid: gpu.into(), username: user.into(),
+            active_seconds: 60, memory_mb_seconds: 6_000.0, coverage_seconds: 60,
+        };
+        database.import_remote_usage(&server.id, &[point("GPU-a", "alice")], 10_800).unwrap();
+        {
+            let connection = database.connection.lock().unwrap();
+            connection.execute(
+                "INSERT INTO usage_legacy_minutes(server_id,timestamp) VALUES(?1,?2)",
+                params![server.id,minute],
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO usage_sources(server_id,timestamp,hour,gpu_uuid,username,kind,active_seconds,memory_mb_seconds,coverage_seconds) VALUES(?1,3600,3600,'GPU-b','bob',4,30,3000,60)",
+                [&server.id],
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds) VALUES(?1,3600,'GPU-b','bob',30,3000,60)",
+                [&server.id],
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO usage_reconciled(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds) VALUES(?1,3600,'GPU-b','bob',30,3000,60)",
+                [&server.id],
+            ).unwrap();
+        }
+        database.import_remote_usage(&server.id, &[point("GPU-c", "carol")], 10_800).unwrap();
+        let connection = database.connection.lock().unwrap();
+        let carol: i64 = connection.query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid='GPU-c' AND username='carol'",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        let false_marker_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_legacy_minute_sources WHERE server_id=?1 AND gpu_uuid<>'GPU-a'",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(carol, 60);
+        assert_eq!(false_marker_count, 0);
+    }
+
+    #[test]
+    fn later_complete_minute_series_replace_partial_hour_candidate() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("late-hour-completion.sqlite")).unwrap();
+        let server = database.save_server(draft("Late hour completion", 90)).unwrap();
+        let point = |timestamp, bucket_seconds, gpu: &str, user: &str, coverage, active| UsagePoint {
+            timestamp, bucket_seconds, gpu_uuid: gpu.into(), username: user.into(),
+            active_seconds: active, memory_mb_seconds: (active * 100) as f64,
+            coverage_seconds: coverage,
+        };
+        let first = [
+            point(3_600, 3_600, "GPU-a", "alice", 120, 120),
+            point(3_660, 60, "GPU-b", "bob", 60, 60),
+        ];
+        assert_eq!(database.import_remote_usage(&server.id, &first, 10_800).unwrap(), 2);
+        let completion = [
+            point(3_660, 60, "GPU-a", "alice", 60, 60),
+            point(3_720, 60, "GPU-a", "alice", 60, 60),
+            point(3_780, 60, "GPU-a", "alice", 60, 60),
+        ];
+        assert_eq!(database.import_remote_usage(&server.id, &completion, 10_800).unwrap(), 1);
+
+        let connection = database.connection.lock().unwrap();
+        let alice: i64 = connection.query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid='GPU-a' AND username='alice'",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        let bob: i64 = connection.query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid='GPU-b' AND username='bob'",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(alice, 180);
+        assert_eq!(bob, 60, "the existing other-series minute must be preserved");
     }
 
     #[test]
