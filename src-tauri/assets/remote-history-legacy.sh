@@ -1,6 +1,7 @@
 #!/bin/sh
 # Caller holds the managed endpoint lock. Snapshot old writers under the same
-# usage lock they use, without stopping clients or replacing their live files.
+# usage lock they use, plus the directory lock used by v1.25.6. Never remove a
+# lock owned by another collector, even if it looks stale.
 snapshot_legacy_history() {
   source_dir="$1"
   archive_dir="$2"
@@ -8,6 +9,18 @@ snapshot_legacy_history() {
   mkdir -p "$archive_dir"
   touch "$data_state/.legacy-reference"
   (
+    collect_lock="$source_dir/.collect.lock"
+    attempts=0
+    while ! mkdir "$collect_lock" 2>/dev/null; do
+      attempts=$((attempts + 1))
+      if [ "$attempts" -ge 10 ]; then
+        printf '旧版远端采集正在写入或锁尚未释放，请稍后重试\n' >&2
+        exit 41
+      fi
+      sleep 1
+    done
+    trap 'rmdir "$collect_lock" 2>/dev/null || true' EXIT
+    trap 'exit 41' HUP INT TERM
     exec 9>"$source_dir/.usage.lock"
     flock -w 10 9 || exit 41
     if [ -f "$source_dir/.usage-v1.tsv" ]; then
@@ -31,8 +44,8 @@ snapshot_legacy_history() {
             ;;
           .usage-v1.tsv)
             # Preserve old-only buckets after an old app recreates/truncates a
-            # file. Keep both representations for recovery; the reader chooses
-            # minutes over an overlapping hourly rollup to avoid double counts.
+            # file. Keep both representations for recovery; the reader uses a
+            # rollup over overlapping minutes of that same GPU/user/hour.
             awk -F '|' '!seen[$1 FS $2 FS $3 FS $4]++' "$@" > "$archive_dir/$name.$$"
             ;;
           *) awk '!seen[$0]++' "$@" > "$archive_dir/$name.$$" ;;

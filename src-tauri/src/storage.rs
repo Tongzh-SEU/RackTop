@@ -1942,13 +1942,17 @@ impl Database {
     }
 
     fn enqueue_credential_reclaim(&self, identity_files: Vec<String>, hops: Vec<SshHop>) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|e| e.to_string())?;
+        Self::queue_credential_reclaim(&connection, identity_files, hops)
+    }
+
+    fn queue_credential_reclaim(connection: &Connection, identity_files: Vec<String>, hops: Vec<SshHop>) -> Result<(), String> {
         let mut identity_files = identity_files;
         identity_files.extend(hops.iter().filter_map(|hop| hop.identity_file.clone()));
         identity_files.sort();
         identity_files.dedup();
         if identity_files.is_empty() && hops.iter().all(|hop| hop.credential_id.is_none()) { return Ok(()); }
         let payload = serde_json::to_string(&CredentialReclaimTask { identity_files, hops }).map_err(|e| e.to_string())?;
-        let connection = self.connection.lock().map_err(|e| e.to_string())?;
         connection.execute("INSERT INTO credential_reclaim_queue(id,payload_json) VALUES(?1,?2)", params![Uuid::new_v4().to_string(), payload]).map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -1975,7 +1979,7 @@ impl Database {
                     let _ = connection.execute("DELETE FROM credential_reclaim_queue WHERE id=?1", [id]);
                 }
             } else {
-                eprintln!("旧私钥或跳板凭证暂未回收；配置已保存，将在下次保存或启动时重试。");
+                eprintln!("旧私钥或跳板凭证暂未回收；数据库操作已完成，将在下次操作或启动时重试。");
             }
         }
     }
@@ -2132,6 +2136,7 @@ impl Database {
                 ).map_err(|error| error.to_string())?;
             }
         }
+        Self::queue_credential_reclaim(&transaction, imported_key.into_iter().collect(), old_hops)?;
         transaction
             .execute("DELETE FROM servers WHERE id=?1", [id])
             .map_err(|error| error.to_string())?;
@@ -2143,17 +2148,10 @@ impl Database {
             }
         }
         if delete_credential {
-            self.session_passwords
-                .lock()
-                .map_err(|error| error.to_string())?
-                .remove(id);
-            self.credential_errors
-                .lock()
-                .map_err(|error| error.to_string())?
-                .remove(id);
+            if let Ok(mut passwords) = self.session_passwords.lock() { passwords.remove(id); }
+            if let Ok(mut errors) = self.credential_errors.lock() { errors.remove(id); }
         }
-        self.reclaim_imported_key(imported_key.as_deref())?;
-        self.reclaim_hops(&old_hops)?;
+        self.retry_credential_reclaims();
         Ok(())
     }
 
@@ -2213,35 +2211,30 @@ impl Database {
         server_id: &str,
         delete_credential: bool,
     ) -> Result<(), String> {
-        let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let imported_key = connection.query_row("SELECT server_json FROM remote_cleanup_queue WHERE server_id=?1", [server_id], |row| row.get::<_, String>(0))
+        let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let old_server = transaction.query_row("SELECT server_json FROM remote_cleanup_queue WHERE server_id=?1", [server_id], |row| row.get::<_, String>(0))
             .optional().map_err(|error| error.to_string())?
-            .map(|json| serde_json::from_str::<Server>(&json).map(|server| server.identity_file))
-            .transpose().map_err(|error| error.to_string())?.flatten();
-        let old_hops = connection.query_row("SELECT server_json FROM remote_cleanup_queue WHERE server_id=?1", [server_id], |row| row.get::<_, String>(0))
-            .optional().map_err(|e| e.to_string())?.map(|s| serde_json::from_str::<Server>(&s).map(|server| server.ssh_hops)).transpose().map_err(|e| e.to_string())?.unwrap_or_default();
-        connection
+            .map(|json| serde_json::from_str::<Server>(&json)).transpose().map_err(|error| error.to_string())?;
+        if let Some(server) = old_server {
+            Self::queue_credential_reclaim(&transaction, server.identity_file.into_iter().collect(), server.ssh_hops)?;
+        }
+        transaction
             .execute(
                 "DELETE FROM remote_cleanup_queue WHERE server_id=?1",
                 [server_id],
             )
             .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
         drop(connection);
         if delete_credential {
             if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", server_id) {
                 let _ = entry.delete_credential();
             }
         }
-        self.session_passwords
-            .lock()
-            .map_err(|error| error.to_string())?
-            .remove(server_id);
-        self.credential_errors
-            .lock()
-            .map_err(|error| error.to_string())?
-            .remove(server_id);
-        self.reclaim_imported_key(imported_key.as_deref())?;
-        self.reclaim_hops(&old_hops)?;
+        if let Ok(mut passwords) = self.session_passwords.lock() { passwords.remove(server_id); }
+        if let Ok(mut errors) = self.credential_errors.lock() { errors.remove(server_id); }
+        self.retry_credential_reclaims();
         Ok(())
     }
 
@@ -4109,6 +4102,99 @@ fn is_attributable_gpu_process(username: &str, command: &str) -> bool {
 mod tests {
     use super::*;
     use crate::models::{AppSettings, GpuMetric, ProcessMetric, SystemMetric};
+
+    #[test]
+    fn deleting_records_and_finishing_remote_cleanup_queue_failed_key_reclaims_atomically() {
+        for finish_remote in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let db_path = directory.path().join("reclaim.sqlite");
+            let database = Database::open(&db_path).unwrap();
+            let keys = directory.path().join("ssh-keys");
+            std::fs::create_dir(&keys).unwrap();
+            let key = keys.join(format!("{}.key", Uuid::new_v4()));
+            let hop_key = keys.join(format!("{}.key", Uuid::new_v4()));
+            std::fs::write(&key, b"server fixture").unwrap();
+            std::fs::write(&hop_key, b"hop fixture").unwrap();
+            let mut initial = draft("Delete recovery", 90);
+            initial.auth_method = "privateKey".into();
+            initial.identity_file = Some(key.to_string_lossy().into_owned());
+            initial.ssh_hops = vec![SshHop {
+                host: "jump.example".into(), port: 22, username: "test".into(),
+                auth_method: "privateKey".into(), identity_file: Some(hop_key.to_string_lossy().into_owned()), credential_id: None,
+            }];
+            let server = database.save_server(initial).unwrap();
+            if finish_remote {
+                database.enqueue_remote_cleanup(&server, 0, "fixture", None).unwrap();
+                database.delete_server_record(&server.id, false).unwrap();
+                assert!(key.exists());
+                assert!(hop_key.exists());
+            }
+            // Deterministic remove_file fault on all platforms, without relying
+            // on the test runner's UID or modifying real user key permissions.
+            std::fs::remove_file(&key).unwrap();
+            std::fs::create_dir(&key).unwrap();
+            if finish_remote { database.finish_remote_cleanup(&server.id, true).unwrap(); }
+            else { database.delete_server(&server.id).unwrap(); }
+            assert!(database.list_servers().unwrap().is_empty());
+            assert!(database.list_remote_cleanup_tasks().unwrap().is_empty());
+            let pending: i64 = database.connection.lock().unwrap().query_row(
+                "SELECT COUNT(*) FROM credential_reclaim_queue", [], |row| row.get(0)).unwrap();
+            assert_eq!(pending, 1);
+            drop(database);
+            std::fs::remove_dir(&key).unwrap();
+            std::fs::write(&key, b"server fixture").unwrap();
+            let reopened = Database::open(&db_path).unwrap();
+            assert!(!key.exists());
+            assert!(!hop_key.exists());
+            let pending: i64 = reopened.connection.lock().unwrap().query_row(
+                "SELECT COUNT(*) FROM credential_reclaim_queue", [], |row| row.get(0)).unwrap();
+            assert_eq!(pending, 0);
+        }
+    }
+
+    #[test]
+    fn reclaim_queue_failure_rolls_back_server_and_remote_task_deletion() {
+        for finish_remote in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let database = Database::open(&directory.path().join("rollback.sqlite")).unwrap();
+            let mut initial = draft("Deletion rollback", 90);
+            initial.identity_file = Some("/unmodified/user-owned-key".into());
+            let server = database.save_server(initial).unwrap();
+            if finish_remote {
+                database.enqueue_remote_cleanup(&server, 0, "fixture", None).unwrap();
+                database.delete_server_record(&server.id, false).unwrap();
+            }
+            database.connection.lock().unwrap().execute_batch(
+                "CREATE TRIGGER fail_reclaim BEFORE INSERT ON credential_reclaim_queue BEGIN SELECT RAISE(ABORT,'fixture'); END;"
+            ).unwrap();
+            if finish_remote {
+                assert!(database.finish_remote_cleanup(&server.id, true).is_err());
+                assert_eq!(database.list_remote_cleanup_tasks().unwrap().len(), 1);
+            } else {
+                assert!(database.delete_server(&server.id).is_err());
+                assert!(database.get_server(&server.id).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_usage_merge_and_database_import_keep_other_series_and_full_hours_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("mixed-usage.sqlite")).unwrap();
+        let server = database.save_server(draft("Mixed usage", 90)).unwrap();
+        let usage = crate::remote_history::merge_compatibility_usage(
+            "v1|3600|GPU-a|alice|60|100|60\nv2|3600|GPU-b|bob|3600|900|3600\nv2|3600|GPU-a|alice|3600|700|3600\nv1|3660|GPU-a|carol|60|200|60\n"
+        );
+        assert_eq!(database.import_remote_usage(&server.id, &usage, 10800).unwrap(), 3);
+        assert_eq!(database.import_remote_usage(&server.id, &usage, 10800).unwrap(), 0);
+        let connection = database.connection.lock().unwrap();
+        for (gpu, user, active) in [("GPU-b", "bob", 3600), ("GPU-a", "alice", 3600), ("GPU-a", "carol", 60)] {
+            let total: i64 = connection.query_row(
+                "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid=?2 AND username=?3",
+                params![server.id, gpu, user], |row| row.get(0)).unwrap();
+            assert_eq!(total, active);
+        }
+    }
 
     #[test]
     fn first_upgrade_detects_a_legacy_route_edit_from_before_guard_installation() {

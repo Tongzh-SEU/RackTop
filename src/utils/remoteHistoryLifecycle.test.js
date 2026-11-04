@@ -117,3 +117,44 @@ test.skipIf(process.platform === 'win32')('coexisting previous stores are archiv
   expect(f.run('remove').status).toBe(0)
   expect(existsSync(join(f.data, 'instances/bb'))).toBe(true)
 })
+
+test.skipIf(process.platform === 'win32')('snapshots wait for the v1.25.6 directory lock before reading an appended row', async () => {
+  const f = fixture()
+  const writer = spawn('sh', ['-c', `
+    mkdir -p "$HOME/.racktop/.collect.lock"
+    trap 'rmdir "$HOME/.racktop/.collect.lock"' EXIT
+    printf 'v1|3600|10|' > "$HOME/.racktop/.history-v1.tsv"
+    echo ready
+    sleep 0.5
+    printf '20|0|GPU-a,25,40\\n' >> "$HOME/.racktop/.history-v1.tsv"
+    printf 'v1|3600|GPU-a|alice|60|100|60\\n' > "$HOME/.racktop/.usage-v1.tsv"
+  `], { env: f.env })
+  const done = once(writer, 'close')
+  await once(writer.stdout, 'data')
+  const result = f.run('register')
+  expect(result.status, result.stderr).toBe(0)
+  await done
+  expect(readFileSync(join(f.data, 'legacy-root/.history-v1.tsv'), 'utf8')).toBe('v1|3600|10|20|0|GPU-a,25,40\n')
+  expect(readFileSync(join(f.data, 'legacy-root/.usage-v1.tsv'), 'utf8')).toBe('v1|3600|GPU-a|alice|60|100|60\n')
+  expect(existsSync(join(f.root, '.racktop/.collect.lock'))).toBe(false)
+})
+
+test.skipIf(process.platform === 'win32')('snapshots also wait for later releases usage file lock and release their own directory lock', async () => {
+  const f = fixture()
+  const writer = spawn('sh', ['-c', `
+    mkdir -p "$HOME/.racktop"
+    exec 9>"$HOME/.racktop/.usage.lock"
+    flock -w 10 9
+    printf 'v1|3600|10|' > "$HOME/.racktop/.history-v1.tsv"
+    echo ready
+    sleep 0.5
+    printf '20|0|GPU-a,25,40\\n' >> "$HOME/.racktop/.history-v1.tsv"
+  `], { env: f.env })
+  const done = once(writer, 'close')
+  await once(writer.stdout, 'data')
+  const result = f.run('register')
+  expect(result.status, result.stderr).toBe(0)
+  await done
+  expect(readFileSync(join(f.data, 'legacy-root/.history-v1.tsv'), 'utf8')).toBe('v1|3600|10|20|0|GPU-a,25,40\n')
+  expect(existsSync(join(f.root, '.racktop/.collect.lock'))).toBe(false)
+})

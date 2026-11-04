@@ -299,24 +299,37 @@ done
 "#, snapshot = REMOTE_LEGACY_SCRIPT.replace("\r\n", "\n"))
 }
 
-fn merge_compatibility_usage(output: &str) -> Vec<UsagePoint> {
-    // Merge disjoint minutes from all stores, preferring the current store on
-    // duplicate keys. Never add an hourly rollup over minute samples. Preserve
-    // both raw representations in the archive rather than guessing a split.
-    let mut seen = std::collections::HashSet::new();
-    let mut minute_hours = std::collections::HashSet::new();
-    let mut points = Vec::new();
+pub(crate) fn merge_compatibility_usage(output: &str) -> Vec<UsagePoint> {
+    // Compare measured coverage within each GPU/user/hour, not the bucket's
+    // label: a v2 rollup may itself contain only a few minutes. Choose one
+    // representation, retaining both raw sources rather than inventing a split
+    // of an hourly aggregate. Current-store values win equal-coverage ties.
+    let mut positions = std::collections::HashMap::<_, usize>::new();
+    let mut points: Vec<UsagePoint> = Vec::new();
     for line in output.lines() {
         if let Ok(point) = parse_usage_line(line) {
-            let hour = point.timestamp - point.timestamp.rem_euclid(3600);
-            if point.bucket_seconds == 60 { minute_hours.insert(hour); }
-            if seen.insert((point.timestamp, point.bucket_seconds, point.gpu_uuid.clone(), point.username.clone())) {
+            let key = (point.timestamp, point.bucket_seconds, point.gpu_uuid.clone(), point.username.clone());
+            if let Some(&index) = positions.get(&key) {
+                if point.coverage_seconds > points[index].coverage_seconds { points[index] = point; }
+            } else {
+                positions.insert(key, points.len());
                 points.push(point);
             }
         }
     }
-    points.into_iter().filter(|point| point.bucket_seconds == 60
-        || !minute_hours.contains(&(point.timestamp - point.timestamp.rem_euclid(3600)))).collect()
+    let mut coverage = std::collections::HashMap::<_, (i64, i64)>::new();
+    for point in &points {
+        let key = (point.timestamp - point.timestamp.rem_euclid(3600), point.gpu_uuid.clone(), point.username.clone());
+        let (minutes, hourly) = coverage.entry(key).or_default();
+        if point.bucket_seconds == 60 { *minutes = minutes.saturating_add(point.coverage_seconds); }
+        else { *hourly = point.coverage_seconds; }
+    }
+    points.into_iter().filter(|point| {
+        let key = (point.timestamp - point.timestamp.rem_euclid(3600), point.gpu_uuid.clone(), point.username.clone());
+        let (minutes, hourly) = coverage[&key];
+        if point.bucket_seconds == 3600 { hourly >= minutes }
+        else { hourly < minutes }
+    }).collect()
 }
 
 async fn install(server: &Server, password: Option<&str>, client_id: &str) -> Result<(), String> {
@@ -1171,10 +1184,36 @@ mod tests {
         let output = "__RACKTOP_SOURCE__\nv1|3600|GPU-a|alice|60|100|60\n__RACKTOP_SOURCE__\nv2|3600|GPU-a|alice|3600|900|3600\nv2|0|GPU-a|alice|3600|900|3600\n";
         let points = merge_compatibility_usage(output);
         assert_eq!(points.len(), 2);
-        assert_eq!(points[0].bucket_seconds, 60);
+        assert_eq!(points[0].bucket_seconds, 3600);
         assert_eq!(points[1].timestamp, 0);
-        assert_eq!(points.iter().map(|point| point.active_seconds).sum::<i64>(), 3660);
+        assert_eq!(points.iter().map(|point| point.active_seconds).sum::<i64>(), 7200);
         let disjoint = "v1|3600|GPU-a|alice|60|100|60\n__RACKTOP_SOURCE__\nv1|3600|GPU-a|alice|60|100|60\nv1|3660|GPU-a|alice|60|100|60\n";
         assert_eq!(merge_compatibility_usage(disjoint).len(), 2);
+    }
+
+    #[test]
+    fn minute_rows_do_not_hide_other_gpus_users_or_complete_hour_rollups() {
+        let output = "v1|3600|GPU-a|alice|60|100|60\nv2|3600|GPU-b|bob|3600|900|3600\nv2|3600|GPU-a|bob|3600|800|3600\nv1|3660|GPU-a|carol|60|200|60\nv2|3600|GPU-a|alice|3600|700|3600\n";
+        let points = merge_compatibility_usage(output);
+        assert_eq!(points.len(), 4);
+        assert!(points.iter().any(|point| point.gpu_uuid == "GPU-b" && point.username == "bob"));
+        assert!(points.iter().any(|point| point.gpu_uuid == "GPU-a" && point.username == "bob"));
+        assert!(points.iter().any(|point| point.username == "carol" && point.bucket_seconds == 60));
+        assert!(points.iter().any(|point| point.username == "alice" && point.active_seconds == 3600));
+        let reversed = output.lines().rev().collect::<Vec<_>>().join("\n");
+        assert_eq!(merge_compatibility_usage(&reversed).iter().map(|point| point.active_seconds).sum::<i64>(), 10860);
+    }
+
+    #[test]
+    fn usage_merge_chooses_measured_coverage_and_does_not_count_duplicates() {
+        let output = "v2|3600|GPU-a|alice|60|100|60\nv1|3600|GPU-a|alice|60|100|60\nv1|3660|GPU-a|alice|60|200|60\nv1|3660|GPU-a|alice|60|200|60\n";
+        let points = merge_compatibility_usage(output);
+        assert_eq!(points.len(), 2);
+        assert!(points.iter().all(|point| point.bucket_seconds == 60));
+        let complete = format!("{output}v2|3600|GPU-a|alice|3600|900|3600\n");
+        let points = merge_compatibility_usage(&complete);
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].active_seconds, 3600);
+        assert_eq!(points[0].coverage_seconds, 3600);
     }
 }
