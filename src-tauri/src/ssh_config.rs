@@ -130,6 +130,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn concrete_proxyjump_is_selectable_without_a_host_block() {
+        let drafts = parse_transfer("Host target\n HostName 192.0.2.10\n ProxyJump jump-user@192.0.2.1:2201\n").unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert!(validate_transfer_draft(&drafts[0]).is_ok());
+        assert_eq!(drafts[0].ssh_hops[0].host, "192.0.2.1");
+        assert_eq!(drafts[0].ssh_hops[0].username, "jump-user");
+        assert_eq!(drafts[0].ssh_hops[0].port, 2201);
+    }
+
+    #[test]
     fn common_options_follow_openssh_first_value_and_pattern_rules() {
         let values = parse_transfer("User global\nHost gpu-a gpu-b\n HostName 192.0.2.10\n Port 2222\n Port 3333\nHost gpu-? !gpu-b\n Port 4444\nHost *\n User ignored\n Port 5555\n").unwrap();
         assert_eq!(values.len(), 2);

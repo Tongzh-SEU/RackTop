@@ -6,8 +6,12 @@ const MAX_HOPS: usize = 16;
 pub fn resolve(draft: &ServerDraft, drafts: &[ServerDraft]) -> Result<Vec<SshHop>, String> {
     fn visit(draft: &ServerDraft, drafts: &[ServerDraft], seen: &mut Vec<String>, hops: &mut Vec<SshHop>) -> Result<(), String> {
         if !draft.ssh_hops.is_empty() { hops.extend(draft.ssh_hops.clone()); return Ok(()); }
-        for (index, spec) in draft.proxy_jump.as_deref().unwrap_or("").split(',').map(str::trim).filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none")).enumerate() {
-            if seen.len() >= MAX_HOPS || hops.len() >= MAX_HOPS { return Err("跳板机链超过 16 层".into()); }
+        let specs: Vec<_> = draft.proxy_jump.as_deref().unwrap_or("").split(',').map(str::trim).filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none")).collect();
+        // An explicit comma list is the complete route. Only a single alias
+        // inherits that alias's own ProxyJump chain.
+        let inherit_route = specs.len() == 1;
+        for spec in specs {
+            if seen.len() > MAX_HOPS || hops.len() >= MAX_HOPS { return Err("跳板机链超过 16 层".into()); }
             let (user, endpoint) = spec.rsplit_once('@').map(|(u,h)| (Some(u),h)).unwrap_or((None,spec));
             let (name, port) = if let Some(rest) = endpoint.strip_prefix('[') {
                 let (host, tail) = rest.split_once(']').ok_or("跳板机 IPv6 地址格式无效")?;
@@ -18,12 +22,18 @@ pub fn resolve(draft: &ServerDraft, drafts: &[ServerDraft]) -> Result<Vec<SshHop
             } else { (endpoint, None) };
             if name.is_empty() || port == Some(0) { return Err("跳板机地址或端口无效".into()); }
             let candidates: Vec<_> = drafts.iter().filter(|d| d.ssh_alias.as_deref() == Some(name) || d.name == name || (d.host == name && port.is_none_or(|p| d.port == p) && user.is_none_or(|u| d.username == u))).collect();
+            if candidates.is_empty() {
+                if let (Some(username), Some(port)) = (user, port) {
+                    hops.push(SshHop { host: name.into(), port, username: username.into(), auth_method: "sshAgent".into(), identity_file: None, credential_id: None });
+                    continue;
+                }
+            }
             if candidates.len() != 1 { return Err(format!("跳板机 {name} 的连接配置缺失或不唯一")); }
             let source = candidates[0];
             let id = format!("{}@{}:{}", source.username, source.host, source.port);
             if seen.contains(&id) { return Err("跳板机依赖存在循环".into()); }
             seen.push(id);
-            if index == 0 { visit(source, drafts, seen, hops)?; }
+            if inherit_route { visit(source, drafts, seen, hops)?; }
             seen.pop();
             hops.push(SshHop { host: source.host.clone(), port: port.unwrap_or(source.port), username: user.unwrap_or(&source.username).into(), auth_method: source.auth_method.clone(), identity_file: source.identity_file.clone(), credential_id: source.id.clone() });
         }
@@ -96,6 +106,41 @@ mod tests {
     use super::*;
     fn draft(name: &str, proxy: Option<&str>) -> ServerDraft {
         ServerDraft { id: Some(name.into()), name: name.into(), location: None, host: format!("{name}.example"), port: 2222, username: name.into(), ssh_alias: Some(name.into()), identity_file: Some(format!("/{name}.key")), proxy_jump: proxy.map(str::to_owned), ssh_hops: Vec::new(), tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false, auth_method: "privateKey".into(), password: None, save_password: false }
+    }
+    #[test]
+    fn concrete_endpoints_need_no_host_record() {
+        let target = draft("target", Some("jump-user@192.0.2.1:2201,other@[2001:db8::1]:2202"));
+        let hops = resolve(&target, &[]).unwrap();
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[0].host, "192.0.2.1");
+        assert_eq!(hops[0].username, "jump-user");
+        assert_eq!(hops[1].host, "2001:db8::1");
+        assert!(hops.iter().all(|h| h.auth_method == "sshAgent" && h.credential_id.is_none() && h.identity_file.is_none()));
+        assert!(resolve(&draft("target", Some("missing-alias")), &[]).is_err());
+    }
+    #[test]
+    fn explicit_list_overrides_nested_jump_routes() {
+        let inner = draft("inner", None);
+        let outer = draft("outer", Some("inner"));
+        let target = draft("target", Some("outer,inner"));
+        let hops = resolve(&target, &[inner, outer]).unwrap();
+        assert_eq!(hops.iter().map(|h| h.host.as_str()).collect::<Vec<_>>(), vec!["outer.example", "inner.example"]);
+    }
+    #[test]
+    fn permits_sixteen_hops_and_rejects_seventeen() {
+        for count in [16, 17] {
+            let sources: Vec<_> = (0..count).map(|i| {
+                let mut hop = draft(&format!("hop{i}"), None);
+                hop.proxy_jump = (i > 0).then(|| format!("hop{}", i - 1));
+                hop
+            }).collect();
+            let target = draft("target", Some(&format!("hop{}", count - 1)));
+            let result = resolve(&target, &sources);
+            if count == 16 { assert_eq!(result.unwrap().len(), 16); } else { assert!(result.is_err()); }
+            let list = (0..count).map(|i| format!("hop{i}")).collect::<Vec<_>>().join(",");
+            let result = resolve(&draft("target", Some(&list)), &sources);
+            if count == 16 { assert_eq!(result.unwrap().len(), 16); } else { assert!(result.is_err()); }
+        }
     }
     #[test]
     fn resolves_nested_and_explicit_chains_with_overrides() {

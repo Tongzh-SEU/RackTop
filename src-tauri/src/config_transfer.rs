@@ -533,6 +533,7 @@ fn resolve_package_routes(payload: &mut PackagePayload) {
                 let dependency = &source[index];
                 HopSecret { private_key: dependency.private_key.clone(), password: dependency.draft.password.clone() }
             });
+            let secret = secret.or_else(|| (hop.auth_method == "sshAgent" && hop.credential_id.is_none() && hop.identity_file.is_none()).then_some(HopSecret { private_key: None, password: None }));
             let Some(secret) = secret else { continue };
             secrets.push(secret);
             hop.identity_file = None; hop.credential_id = None;
@@ -690,6 +691,33 @@ mod tests {
 
     const TEST_KEY: &[u8] = b"-----BEGIN OPENSSH PRIVATE KEY-----\ntest fixture\n-----END OPENSSH PRIVATE KEY-----\n";
     const PASSPHRASE: &str = "correct horse battery staple";
+
+    #[test]
+    fn concrete_agent_jump_round_trips_through_encrypted_and_plain_exports() {
+        let directory = tempdir().unwrap();
+        let source = Database::open(&directory.path().join("source.sqlite")).unwrap();
+        let target = Database::open(&directory.path().join("target.sqlite")).unwrap();
+        let mut server = draft(None); server.auth_method = "sshAgent".into();
+        server.proxy_jump = Some("jump-user@192.0.2.1:2201".into());
+        source.save_server(server).unwrap();
+        let package = export(&source, PASSPHRASE, "racktop").unwrap();
+        let state = ConfigTransferState::default();
+        let preview = state.prepare_import(&package.package, PASSPHRASE).unwrap();
+        assert!(preview.servers[0].blocked_reason.is_none());
+        assert_eq!(preview.servers[0].draft.ssh_hops.len(), 1);
+        state.commit_import(&preview.import_id, &[0], &target, directory.path()).unwrap();
+        let imported = target.list_servers().unwrap().pop().unwrap();
+        assert_eq!(imported.ssh_hops[0].host, "192.0.2.1");
+        assert_eq!(imported.ssh_hops[0].port, 2201);
+        assert_eq!(imported.ssh_hops[0].auth_method, "sshAgent");
+        assert!(!directory.path().join("ssh-keys").exists());
+        let plain = export(&target, "", "ssh").unwrap();
+        let drafts = crate::ssh_config::parse_transfer(&plain.package).unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert!(crate::ssh_config::validate_transfer_draft(&drafts[0]).is_ok());
+        assert_eq!(drafts[0].ssh_hops[0].username, "jump-user");
+        assert_eq!(drafts[0].ssh_hops[0].port, 2201);
+    }
 
     #[test]
     fn encrypted_multihop_round_trip_is_self_contained_and_reclaims_route_keys() {
