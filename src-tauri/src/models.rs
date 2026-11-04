@@ -3,6 +3,17 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SshHop {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_method: String,
+    pub identity_file: Option<String>,
+    pub credential_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Server {
     pub id: String,
     pub name: String,
@@ -13,6 +24,8 @@ pub struct Server {
     pub ssh_alias: Option<String>,
     pub identity_file: Option<String>,
     pub proxy_jump: Option<String>,
+    #[serde(default)]
+    pub ssh_hops: Vec<SshHop>,
     pub tags: Vec<String>,
     pub sampling_interval_seconds: u64,
     pub history_retention_days: u32,
@@ -40,6 +53,8 @@ pub struct ServerDraft {
     pub ssh_alias: Option<String>,
     pub identity_file: Option<String>,
     pub proxy_jump: Option<String>,
+    #[serde(default)]
+    pub ssh_hops: Vec<SshHop>,
     #[serde(default)]
     pub tags: Vec<String>,
     pub sampling_interval_seconds: u64,

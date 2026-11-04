@@ -45,7 +45,7 @@ if [ ! -e "$cleanup_marker" ]; then
     command -v ionice >/dev/null 2>&1 && ionice -c 3 -p "$cleanup_pid" >/dev/null 2>&1 || true;
   fi;
 fi;
-if [ "${RACKTOP_REMOTE_HISTORY:-0}" = "1" ]; then history_state="${RACKTOP_STATE_DIR:?}"; mkdir -p "$history_state" && touch "$history_state/.client-heartbeat"; fi;
+if [ "${RACKTOP_REMOTE_HISTORY:-0}" = "1" ]; then history_state="${RACKTOP_STATE_DIR:?}"; client_state="${RACKTOP_CLIENT_STATE_DIR:-$history_state}"; [ ! -d "$client_state" ] || touch "$client_state/.client-heartbeat"; fi;
 printf '__RACKTOP_USER__\n'; id -un;
 uid_min="$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null)"; uid_min="${uid_min:-1000}";
 printf '__RACKTOP_UIDMIN__\n%s\n' "$uid_min";
@@ -174,7 +174,7 @@ pub async fn collect(server: &Server) -> Result<Snapshot, String> {
 }
 
 pub async fn collect_with_password(server: &Server, password: Option<&str>, include_processes: bool, include_disks: bool) -> Result<Snapshot, String> {
-    collect_with_password_detailed(server, password, include_processes, include_disks).await.map(|result| result.snapshot)
+    collect_with_password_detailed(server, password, include_processes, include_disks, "standalone").await.map(|result| result.snapshot)
 }
 
 pub struct CollectionResult {
@@ -182,14 +182,14 @@ pub struct CollectionResult {
     pub response_bytes: u64,
 }
 
-pub async fn collect_with_password_detailed(server: &Server, password: Option<&str>, include_processes: bool, include_disks: bool) -> Result<CollectionResult, String> {
+pub async fn collect_with_password_detailed(server: &Server, password: Option<&str>, include_processes: bool, include_disks: bool, client_id: &str) -> Result<CollectionResult, String> {
     let (mut command, target) = configured_ssh_command(server, password)?;
     command.arg(target).arg(format!(
         "{history_state}RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{remote_script}",
         if include_processes { 1 } else { 0 },
         if include_disks { 1 } else { 0 },
-        if server.remote_history_enabled { 1 } else { 0 },
-        history_state = remote_history_state_assignment(server),
+        if server.remote_history_enabled && !client_id.is_empty() { 1 } else { 0 },
+        history_state = remote_history_state_assignment(server, client_id),
         remote_script = REMOTE_SCRIPT.replace("\r\n", "\n"),
     )).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = timeout(Duration::from_secs(30), command.output()).await.map_err(|_| format!("连接 {} 超时（30 秒）", server.name))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
@@ -205,9 +205,13 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn remote_history_state_assignment(server: &Server) -> String {
-    if server.remote_history_enabled {
-        format!("RACKTOP_STATE_DIR=\"{}\" ", crate::remote_history::remote_state_directory(server))
+fn remote_history_state_assignment(server: &Server, client_id: &str) -> String {
+    if server.remote_history_enabled && !client_id.is_empty() {
+        format!(
+            "RACKTOP_STATE_DIR=\"{}\" RACKTOP_CLIENT_STATE_DIR=\"{}\" ",
+            crate::remote_history::remote_state_directory(server),
+            crate::remote_history::client_state_directory(server, client_id),
+        )
     } else {
         String::new()
     }
@@ -289,7 +293,7 @@ pub(crate) fn explicit_identity_file(server: &Server) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-pub fn collection_display_command(server: &Server, include_processes: bool, include_disks: bool) -> String {
+pub fn collection_display_command(server: &Server, include_processes: bool, include_disks: bool, client_id: &str) -> String {
     let mut arguments = vec![
         "-o ConnectTimeout=8".to_string(),
         "-o ServerAliveInterval=5".to_string(),
@@ -321,8 +325,8 @@ pub fn collection_display_command(server: &Server, include_processes: bool, incl
         "{history_state}RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{remote_script}",
         if include_processes { 1 } else { 0 },
         if include_disks { 1 } else { 0 },
-        if server.remote_history_enabled { 1 } else { 0 },
-        history_state = remote_history_state_assignment(server),
+        if server.remote_history_enabled && !client_id.is_empty() { 1 } else { 0 },
+        history_state = remote_history_state_assignment(server, client_id),
         remote_script = REMOTE_SCRIPT.replace("\r\n", "\n"),
     );
     format!("ssh {} {} {}", arguments.join(" "), shell_quote(&target), shell_quote(&remote_command))
@@ -365,7 +369,9 @@ fn configured_ssh_command_with_control(server: &Server, password: Option<&str>, 
         command.args(["-o", "IdentitiesOnly=yes"]);
         command.arg("-i").arg(expand_identity_path(identity));
     }
-    if let Some(proxy) = server.proxy_jump.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(option) = crate::ssh_routes::proxy_option(&server.ssh_hops, &server.host)? {
+        command.args(["-o", &option]);
+    } else if let Some(proxy) = server.proxy_jump.as_deref().filter(|value| !value.is_empty()) {
         command.args(["-J", proxy]);
     }
     let target = if let Some(alias) = server.ssh_alias.as_deref().filter(|value| !value.is_empty()) {
@@ -1134,26 +1140,26 @@ mod tests {
     fn ssh_agent_ignores_stale_identity_file() {
         let server = Server {
             id: "server-1".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22,
-            username: "user".into(), ssh_alias: None, identity_file: Some("~/.ssh/stale_key".into()), proxy_jump: None,
+            username: "user".into(), ssh_alias: None, identity_file: Some("~/.ssh/stale_key".into()), proxy_jump: None, ssh_hops: Vec::new(),
             tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
             remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(), status: "unknown".into(),
             last_error: None, last_seen_at: None,
         };
 
         assert_eq!(explicit_identity_file(&server), None);
-        assert!(!collection_display_command(&server, false, false).contains("stale_key"));
+        assert!(!collection_display_command(&server, false, false, "client-a").contains("stale_key"));
     }
 
     #[test]
     fn explicit_private_key_is_restricted_to_that_identity() {
         let server = Server {
             id: "server-1".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22,
-            username: "user".into(), ssh_alias: None, identity_file: Some("~/.ssh/id_ed25519".into()), proxy_jump: None,
+            username: "user".into(), ssh_alias: None, identity_file: Some("~/.ssh/id_ed25519".into()), proxy_jump: None, ssh_hops: Vec::new(),
             tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
             remote_history_last_sync_at: None, sort_order: 0, auth_method: "privateKey".into(), status: "unknown".into(),
             last_error: None, last_seen_at: None,
         };
-        let command = collection_display_command(&server, false, false);
+        let command = collection_display_command(&server, false, false, "client-a");
 
         assert_eq!(explicit_identity_file(&server), Some("~/.ssh/id_ed25519"));
         assert!(command.contains("-o IdentitiesOnly=yes"));
@@ -1164,13 +1170,13 @@ mod tests {
     fn remote_history_heartbeat_uses_the_endpoint_state_directory() {
         let server = Server {
             id: "server-1".into(), name: "GPU".into(), location: None, host: "coolas-12".into(), port: 22,
-            username: "user".into(), ssh_alias: None, identity_file: None, proxy_jump: None,
+            username: "user".into(), ssh_alias: None, identity_file: None, proxy_jump: None, ssh_hops: Vec::new(),
             tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: true,
             remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(), status: "unknown".into(),
             last_error: None, last_seen_at: None,
         };
         let state_dir = crate::remote_history::remote_state_directory(&server);
-        let command = collection_display_command(&server, false, false);
+        let command = collection_display_command(&server, false, false, "client-a");
 
         assert!(command.contains(&format!("RACKTOP_STATE_DIR=\"{state_dir}\"")));
         assert!(REMOTE_SCRIPT.contains("history_state=\"${RACKTOP_STATE_DIR:?}\""));

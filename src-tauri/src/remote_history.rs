@@ -6,12 +6,21 @@ use crate::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
-use std::process::Stdio;
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::Path,
+    process::Stdio,
+};
 use tokio::time::{Duration, timeout};
+use uuid::Uuid;
 
 const REMOTE_COLLECTOR_SCRIPT: &str = concat!(include_str!("../assets/ascend-collector.sh"), include_str!("../assets/remote-history-collector.sh"));
 const REMOTE_DAEMON_SCRIPT: &str = include_str!("../assets/remote-history-daemon.sh");
 const REMOTE_USAGE_SCRIPT: &str = include_str!("../assets/remote-history-usage.sh");
+const CLIENT_ID_FILENAME: &str = "remote-history-client-id";
+const REMOTE_LIFECYCLE_SCRIPT: &str = include_str!("../assets/remote-history-lifecycle.sh");
+const REMOTE_LEGACY_SCRIPT: &str = include_str!("../assets/remote-history-legacy.sh");
 const REMOTE_REMOVE_SCRIPT: &str = r#"set -eu
 state="${RACKTOP_STATE_DIR:?}"
 if [ -r "$state/.daemon.pid" ]; then
@@ -26,11 +35,108 @@ rm -rf -- "$state"
 printf '__RACKTOP_REMOTE_HISTORY_REMOVED__\n'
 "#;
 
-pub(crate) fn remote_state_directory(server: &Server) -> String {
-    remote_state_directory_for_endpoint(&server.host, server.port)
+#[derive(Clone, Debug)]
+pub struct ClientIdentity(Option<String>);
+
+impl ClientIdentity {
+    pub fn unavailable(error: &str) -> Self {
+        eprintln!("{error}；远端历史功能暂不可用，原客户端关联已保留。");
+        Self(None)
+    }
+
+    pub fn load_or_create(app_data_dir: &Path) -> Result<Self, String> {
+        fs::create_dir_all(app_data_dir).map_err(|error| format!("无法创建 RackTop 数据目录：{error}"))?;
+        let path = app_data_dir.join(CLIENT_ID_FILENAME);
+        match fs::read_to_string(&path) {
+            Ok(value) => return match Self::parse(&value) {
+                Ok(identity) => Ok(identity),
+                Err(_) => {
+                    Ok(Self::unavailable("本机远端历史标识损坏；请从备份恢复原标识文件"))
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Ok(Self::unavailable(&format!("无法读取本机远端历史标识：{error}")));
+            }
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let temporary = app_data_dir.join(format!(".{CLIENT_ID_FILENAME}.{}.tmp", Uuid::new_v4()));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&temporary) {
+            Ok(mut file) => {
+                let result = file.write_all(id.as_bytes()).and_then(|()| file.sync_all());
+                drop(file);
+                if let Err(error) = result {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(format!("无法保存本机远端历史标识：{error}"));
+                }
+                match fs::hard_link(&temporary, &path) {
+                    Ok(()) => {
+                        let _ = fs::remove_file(&temporary);
+                        #[cfg(unix)]
+                        fs::File::open(app_data_dir).and_then(|directory| directory.sync_all())
+                            .map_err(|error| format!("无法同步本机远端历史标识：{error}"))?;
+                        Ok(Self(Some(id)))
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let _ = fs::remove_file(&temporary);
+                        let value = fs::read_to_string(&path).map_err(|error| format!("无法读取本机远端历史标识：{error}"))?;
+                        Self::parse(&value)
+                    }
+                    Err(error) => {
+                        let _ = fs::remove_file(&temporary);
+                        Err(format!("无法保存本机远端历史标识：{error}"))
+                    }
+                }
+            }
+            Err(error) => Err(format!("无法创建本机远端历史标识：{error}")),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_deref().unwrap_or("")
+    }
+
+    pub fn require(&self) -> Result<&str, String> {
+        self.0.as_deref().ok_or_else(|| "本机远端历史标识损坏；已保留旧关联，远端历史操作暂不可用".into())
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        Uuid::parse_str(value.trim())
+            .map(|id| Self(Some(id.to_string())))
+            .map_err(|_| "本机远端历史标识格式无效".to_string())
+    }
 }
 
-fn remote_state_directory_for_endpoint(host: &str, port: u16) -> String {
+pub(crate) fn remote_state_directory(server: &Server) -> String {
+    format!(
+        "$HOME/.racktop-managed/remote-history-store/{}",
+        endpoint_state_component(&server.host, server.port)
+    )
+}
+
+pub(crate) fn client_state_directory(server: &Server, client_id: &str) -> String {
+    remote_state_directory_for_endpoint(&server.host, server.port, client_id)
+}
+
+fn remote_state_directory_for_endpoint(host: &str, port: u16, client_id: &str) -> String {
+    format!("$HOME/.racktop-managed/remote-history-store/{}/instances/{:x}", endpoint_state_component(host, port), Sha256::digest(client_id.as_bytes()))
+}
+
+fn lifecycle_script(state: &str, action: &str) -> String {
+    let (data, client) = state.rsplit_once("/instances/").expect("generated client path");
+    let endpoint = data.rsplit('/').next().expect("generated endpoint");
+    format!("RACKTOP_HISTORY_ENDPOINT=\"{endpoint}\"\nRACKTOP_HISTORY_CLIENT=\"{client}\"\nRACKTOP_HISTORY_ACTION=\"{action}\"\n{}", REMOTE_LIFECYCLE_SCRIPT.replace("\r\n", "\n").replace("# RACKTOP_LEGACY_SNAPSHOT", &REMOTE_LEGACY_SCRIPT.replace("\r\n", "\n")))
+}
+
+fn endpoint_state_component(host: &str, port: u16) -> String {
     let normalized_host = host
         .trim()
         .trim_start_matches('[')
@@ -49,9 +155,10 @@ fn remote_state_directory_for_endpoint(host: &str, port: u16) -> String {
         })
         .take(48)
         .collect();
-    format!("$HOME/.racktop/remote-history/{host_slug}-{port}-{digest:x}")
+    format!("{host_slug}-{port}-{digest:x}")
 }
 
+#[cfg(test)]
 fn stop_verified_daemon(state_dir: &str) -> String {
     format!(r#"state="{state_dir}"
 if [ -r "$state/.daemon.pid" ]; then
@@ -65,24 +172,14 @@ fi
 "#)
 }
 
-fn stop_legacy_shared_daemon() -> &'static str {
-    r#"legacy="$HOME/.racktop"
-if [ -r "$legacy/.daemon.pid" ]; then
-  legacy_pid="$(cat "$legacy/.daemon.pid" 2>/dev/null || true)"
-  if [ -n "$legacy_pid" ] && kill -0 "$legacy_pid" 2>/dev/null && ps -p "$legacy_pid" -o args= 2>/dev/null | grep -F "sh $legacy/.daemon.sh" >/dev/null 2>&1; then
-    kill "$legacy_pid" 2>/dev/null || true
-    sleep 1
-    if kill -0 "$legacy_pid" 2>/dev/null && ps -p "$legacy_pid" -o args= 2>/dev/null | grep -F "sh $legacy/.daemon.sh" >/dev/null 2>&1; then kill -KILL "$legacy_pid" 2>/dev/null || true; fi
-  fi
-fi
-"#
-}
-
-pub async fn configure(server: &Server, password: Option<&str>) -> Result<(), String> {
+pub async fn configure(server: &Server, password: Option<&str>, client_id: &str) -> Result<(), String> {
+    if client_id.is_empty() {
+        return Err("本机远端历史标识损坏；已保留旧关联，远端历史操作暂不可用".into());
+    }
     if server.remote_history_enabled {
-        install(server, password).await
+        install(server, password, client_id).await
     } else {
-        disable(server, password).await
+        disable(server, password, client_id).await
     }
 }
 
@@ -90,10 +187,15 @@ pub async fn remove(
     server: &Server,
     password: Option<&str>,
     managed_public_key: Option<&str>,
+    client_id: &str,
 ) -> Result<(), String> {
-    let script = build_remove_script(&remote_state_directory(server), managed_public_key)?;
+    if client_id.is_empty() {
+        return Err("本机远端历史标识损坏；已保留旧关联，远端清理暂不可用".into());
+    }
+    let state = client_state_directory(server, client_id);
+    let script = format!("{}\n{}", lifecycle_script(&state, "remove"), build_remove_script(&state, managed_public_key)?);
     let output =
-        run_remote_cleanup_command(server, password, &script, Duration::from_secs(8)).await?;
+        run_remote_cleanup_command(server, password, &script, Duration::from_secs(25)).await?;
     if !output
         .lines()
         .any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_REMOVED__")
@@ -152,12 +254,10 @@ pub async fn fetch(
         return Ok(Vec::new());
     }
     let since = since_timestamp.max(0);
-    let state_dir = remote_state_directory(server);
-    let script = format!(
-        "history=\"{state_dir}/.history-v1.tsv\"; if [ -r \"$history\" ]; then awk -F '|' -v since={since} '($1 == \"v1\" || $1 == \"v2\" || $1 == \"v3\") && $2 >= since' \"$history\"; fi"
-    );
+    let script = compatibility_read_script(server, since, false);
     let output = run_remote_command(server, password, &script, Duration::from_secs(20)).await?;
-    parse_history(&output)
+    let mut seen = std::collections::HashSet::new();
+    Ok(parse_history(&output)?.into_iter().filter(|point| seen.insert(point.timestamp)).collect())
 }
 
 pub async fn fetch_usage(
@@ -169,38 +269,100 @@ pub async fn fetch_usage(
         return Ok(Vec::new());
     }
     let since = since_timestamp.max(0);
-    let state_dir = remote_state_directory(server);
-    let script = format!("RACKTOP_STATE_DIR=\"{state_dir}\"; set -- {since}\n{}", REMOTE_USAGE_SCRIPT.replace("\r\n", "\n"));
+    let script = compatibility_read_script(server, since, true);
     let output = run_remote_command(server, password, &script, Duration::from_secs(20)).await?;
-    Ok(output
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| parse_usage_line(line).ok())
-        .collect())
+    Ok(merge_compatibility_usage(&output))
 }
 
-async fn install(server: &Server, password: Option<&str>) -> Result<(), String> {
+fn compatibility_read_script(server: &Server, since: i64, usage: bool) -> String {
+    let endpoint = endpoint_state_component(&server.host, server.port);
+    let data_state = remote_state_directory(server);
+    let reader = if usage {
+        format!("( unset RACKTOP_HISTORY_LOCK; RACKTOP_STATE_DIR=\"$read_state\"; set -- {since}\n{}\n)", REMOTE_USAGE_SCRIPT.replace("\r\n", "\n"))
+    } else {
+        format!("history=\"$read_state/.history-v1.tsv\"; if [ -r \"$history\" ]; then awk -F '|' -v since={since} '($1 == \"v1\" || $1 == \"v2\" || $1 == \"v3\") && $2 >= since' \"$history\"; fi")
+    };
+    format!(r#"set -eu
+umask 077
+endpoint="{endpoint}"
+base="$HOME/.racktop"
+legacy="$base/remote-history/{endpoint}"
+data_state="{data_state}"
+mkdir -p "$HOME/.racktop-managed/remote-history-locks"
+exec 6>"$HOME/.racktop-managed/remote-history-locks/{endpoint}.lock"
+flock -w 10 6 || exit 41
+{snapshot}
+for read_state in "$data_state" "$data_state/legacy-endpoint" "$data_state/legacy-store" "$data_state/legacy-root"; do
+  [ -d "$read_state" ] || continue
+  {reader}
+done
+"#, snapshot = REMOTE_LEGACY_SCRIPT.replace("\r\n", "\n"))
+}
+
+pub(crate) fn merge_compatibility_usage(output: &str) -> Vec<UsagePoint> {
+    // Compare measured coverage within each GPU/user/hour, not the bucket's
+    // label: a v2 rollup may itself contain only a few minutes. Choose one
+    // representation, retaining both raw sources rather than inventing a split
+    // of an hourly aggregate. Current-store values win equal-coverage ties.
+    let mut positions = std::collections::HashMap::<_, usize>::new();
+    let mut points: Vec<UsagePoint> = Vec::new();
+    for line in output.lines() {
+        if let Ok(point) = parse_usage_line(line) {
+            let key = (point.timestamp, point.bucket_seconds, point.gpu_uuid.clone(), point.username.clone());
+            if let Some(&index) = positions.get(&key) {
+                if point.coverage_seconds > points[index].coverage_seconds { points[index] = point; }
+            } else {
+                positions.insert(key, points.len());
+                points.push(point);
+            }
+        }
+    }
+    let mut coverage = std::collections::HashMap::<_, (i64, i64)>::new();
+    for point in &points {
+        let key = (point.timestamp - point.timestamp.rem_euclid(3600), point.gpu_uuid.clone(), point.username.clone());
+        let (minutes, hourly) = coverage.entry(key).or_default();
+        if point.bucket_seconds == 60 { *minutes = minutes.saturating_add(point.coverage_seconds); }
+        else { *hourly = point.coverage_seconds; }
+    }
+    points.into_iter().filter(|point| {
+        let key = (point.timestamp - point.timestamp.rem_euclid(3600), point.gpu_uuid.clone(), point.username.clone());
+        let (minutes, hourly) = coverage[&key];
+        if point.bucket_seconds == 3600 { hourly >= minutes }
+        else { hourly < minutes }
+    }).collect()
+}
+
+async fn install(server: &Server, password: Option<&str>, client_id: &str) -> Result<(), String> {
     // Windows checkouts may expose bundled shell assets as CRLF. Normalize before
     // sending them to Linux, where a trailing CR changes `set -e` into an invalid option.
     let collector_script = REMOTE_COLLECTOR_SCRIPT.replace("\r\n", "\n");
     let daemon_script = REMOTE_DAEMON_SCRIPT.replace("\r\n", "\n");
-    let state_dir = remote_state_directory(server);
+    let state_dir = client_state_directory(server, client_id);
+    let data_state_dir = remote_state_directory(server);
+    let lifecycle = lifecycle_script(&state_dir, "register");
     let encoded = STANDARD.encode(collector_script);
     let daemon_encoded = STANDARD.encode(daemon_script);
     let script = format!(
         r#"set -e
 set -u
 state="{state_dir}"
+data_state="{data_state_dir}"
 command -v flock >/dev/null 2>&1 || {{ printf '远端历史需要 util-linux 的 flock 命令' >&2; exit 1; }}
 command -v timeout >/dev/null 2>&1 || {{ printf '远端历史需要 timeout 命令' >&2; exit 1; }}
-{}
-mkdir -p "$state"
+{lifecycle}
 chmod 700 "$state"
-export RACKTOP_STATE_DIR="$state"
-printf '%s' '{encoded}' | base64 -d > "$state/.collector.sh"
-printf '%s' '{daemon_encoded}' | base64 -d > "$state/.daemon.sh"
+exec 7>"$state/.install.lock"
+flock -w 10 7 || exit 1
+export RACKTOP_STATE_DIR="$data_state"
+export RACKTOP_CLIENT_STATE_DIR="$state"
+export RACKTOP_HISTORY_LOCK="$HOME/.racktop-managed/remote-history-locks/$endpoint.lock"
+printf '%s' '{encoded}' | base64 -d > "$state/.collector.sh.$$"
+printf '%s' '{daemon_encoded}' | base64 -d > "$state/.daemon.sh.$$"
+mv "$state/.collector.sh.$$" "$state/.collector.sh"
+mv "$state/.daemon.sh.$$" "$state/.daemon.sh"
 chmod 700 "$state/.collector.sh" "$state/.daemon.sh"
 touch "$state/.client-heartbeat"
+touch "$data_state/.client-heartbeat"
 running=0
 if [ -r "$state/.daemon.pid" ]; then
   pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
@@ -210,10 +372,11 @@ if [ "$running" -ne 1 ]; then
   rm -f "$state/.daemon.pid"
   : > "$state/.daemon.log"
   if command -v setsid >/dev/null 2>&1; then
-    nohup setsid sh "$state/.daemon.sh" </dev/null >"$state/.daemon.log" 2>&1 &
+    nohup setsid sh "$state/.daemon.sh" 6>&- 7>&- </dev/null >"$state/.daemon.log" 2>&1 &
   else
-    nohup sh "$state/.daemon.sh" </dev/null >"$state/.daemon.log" 2>&1 &
+    nohup sh "$state/.daemon.sh" 6>&- 7>&- </dev/null >"$state/.daemon.log" 2>&1 &
   fi
+  flock -u 6
   ready=0
   for attempt in 1 2 3; do
     sleep 1
@@ -228,7 +391,6 @@ if [ "$running" -ne 1 ]; then
 fi
 printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
 "#,
-        stop_legacy_shared_daemon()
     );
     let output = run_remote_command(server, password, &script, Duration::from_secs(25)).await?;
     if output
@@ -241,12 +403,17 @@ printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
     }
 }
 
-async fn disable(server: &Server, password: Option<&str>) -> Result<(), String> {
-    let state_dir = remote_state_directory(server);
-    let script = format!(
+#[cfg(test)]
+fn build_disable_script(state_dir: &str) -> String {
+    format!(
         "{}rm -f \"$state/.daemon.pid\"\nprintf '__RACKTOP_REMOTE_HISTORY_DISABLED__\\n'\n",
-        stop_verified_daemon(&state_dir),
-    );
+        stop_verified_daemon(state_dir),
+    )
+}
+
+async fn disable(server: &Server, password: Option<&str>, client_id: &str) -> Result<(), String> {
+    let state_dir = client_state_directory(server, client_id);
+    let script = lifecycle_script(&state_dir, "disable");
     let output = run_remote_command(server, password, &script, Duration::from_secs(15)).await?;
     if output
         .lines()
@@ -446,6 +613,60 @@ fn parse_usage_line(line: &str) -> Result<UsagePoint, String> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn compatibility_reader_keeps_root_and_recreated_endpoint_history_after_old_delete() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        // Reader behavior only; lifecycle locking is exercised separately by
+        // remoteHistoryLifecycle.test.js with real kernel locks.
+        fs::write(bin.join("flock"), "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(bin.join("flock"), fs::Permissions::from_mode(0o700)).unwrap();
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "test", "name": "test", "host": "gpu.example", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 2,
+            "historyRetentionDays": 90, "authMethod": "sshAgent", "status": "offline"
+        })).unwrap();
+        let endpoint = endpoint_state_component(&server.host, server.port);
+        let legacy = root.join(format!(".racktop/remote-history/{endpoint}"));
+        let managed = root.join(remote_state_directory(&server).strip_prefix("$HOME/").unwrap());
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&managed).unwrap();
+        for (path, timestamp) in [(&managed, 7200), (&legacy, 3600), (&root.join(".racktop"), 0)] {
+            fs::write(path.join(".history-v1.tsv"), format!("v1|{timestamp}|10|20|0|GPU-a,25,40\n")).unwrap();
+            fs::write(path.join(".usage-v1.tsv"), format!("v1|{timestamp}|GPU-a|alice|60|100|60\n")).unwrap();
+        }
+        let read = |usage| {
+            let output = std::process::Command::new("sh").args(["-c", &compatibility_read_script(&server, 0, usage)])
+                .env("HOME", root).env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()))
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap()
+        };
+        assert_eq!(parse_history(&read(false)).unwrap().len(), 3);
+        assert_eq!(merge_compatibility_usage(&read(true)).len(), 3);
+        // A recreated legacy file may contain a shorter row for the same
+        // version/key. Snapshotting must retain the archived fuller coverage.
+        fs::write(root.join(".racktop/.usage-v1.tsv"), "v2|3600|GPU-a|alice|3600|6000|3600\n").unwrap();
+        assert_eq!(merge_compatibility_usage(&read(true)).iter().find(|point| point.bucket_seconds == 3600).unwrap().coverage_seconds, 3600);
+        fs::write(root.join(".racktop/.usage-v1.tsv"), "v2|3600|GPU-a|alice|60|100|60\n").unwrap();
+        assert_eq!(merge_compatibility_usage(&read(true)).iter().find(|point| point.bucket_seconds == 3600).unwrap().coverage_seconds, 3600);
+        let archive = root.join(remote_state_directory(&server).strip_prefix("$HOME/").unwrap()).join("legacy-root/.usage-v1.tsv");
+        assert!(fs::read_to_string(archive).unwrap().contains("v2|3600|GPU-a|alice|3600|6000|3600"));
+        // Old reinstallation can replace a file rather than append. Preserve
+        // already archived buckets as well as the newly created stream.
+        fs::write(root.join(".racktop/.history-v1.tsv"), "v1|10800|10|20|0|GPU-a,25,40\n").unwrap();
+        fs::write(root.join(".racktop/.usage-v1.tsv"), "v1|10800|GPU-a|alice|60|100|60\n").unwrap();
+        assert_eq!(parse_history(&read(false)).unwrap().len(), 4);
+        assert_eq!(merge_compatibility_usage(&read(true)).len(), 4);
+        fs::remove_dir_all(root.join(".racktop")).unwrap();
+        assert_eq!(parse_history(&read(false)).unwrap().len(), 4);
+        assert_eq!(merge_compatibility_usage(&read(true)).len(), 4);
+    }
+
     // Execute the shipped collector, including its history/usage pipeline, in an
     // isolated home with synthetic procfs and accelerator commands. No SSH/GPU.
     #[cfg(unix)]
@@ -585,16 +806,124 @@ mod tests {
     }
 
     #[test]
-    fn remote_state_directory_is_stable_and_unique_per_endpoint() {
-        let first = remote_state_directory_for_endpoint("GPU.EXAMPLE.", 22);
-        let normalized = remote_state_directory_for_endpoint("gpu.example", 22);
-        let different_port = remote_state_directory_for_endpoint("gpu.example", 2222);
-        let different_host = remote_state_directory_for_endpoint("gpu2.example", 22);
+    fn remote_state_directory_is_stable_per_client_and_unique_across_clients() {
+        let first = remote_state_directory_for_endpoint("GPU.EXAMPLE.", 22, "client-a");
+        let normalized = remote_state_directory_for_endpoint("gpu.example", 22, "client-a");
+        let different_port = remote_state_directory_for_endpoint("gpu.example", 2222, "client-a");
+        let different_host = remote_state_directory_for_endpoint("gpu2.example", 22, "client-a");
+        let different_client = remote_state_directory_for_endpoint("gpu.example", 22, "client-b");
 
         assert_eq!(first, normalized);
         assert_ne!(first, different_port);
         assert_ne!(first, different_host);
-        assert!(first.starts_with("$HOME/.racktop/remote-history/"));
+        assert_ne!(first, different_client);
+        assert!(first.starts_with("$HOME/.racktop-managed/remote-history-store/"));
+    }
+
+    #[test]
+    fn client_identity_is_persistent_and_isolated_by_app_data_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let first_app = directory.path().join("first");
+        let second_app = directory.path().join("second");
+        let first = ClientIdentity::load_or_create(&first_app).unwrap();
+        let reopened = ClientIdentity::load_or_create(&first_app).unwrap();
+        let second = ClientIdentity::load_or_create(&second_app).unwrap();
+
+        assert_eq!(first.as_str(), reopened.as_str());
+        assert_ne!(first.as_str(), second.as_str());
+        assert_eq!(fs::read_to_string(first_app.join(CLIENT_ID_FILENAME)).unwrap(), first.as_str());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(first_app.join(CLIENT_ID_FILENAME)).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn corrupted_client_identity_does_not_block_startup_or_replace_old_association() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(CLIENT_ID_FILENAME);
+        fs::write(&path, "partial-id").unwrap();
+        let first = ClientIdentity::load_or_create(directory.path()).unwrap();
+        let second = ClientIdentity::load_or_create(directory.path()).unwrap();
+        assert_eq!(first.as_str(), "");
+        assert!(first.require().is_err());
+        assert_eq!(second.as_str(), "");
+        assert_eq!(fs::read_to_string(path).unwrap(), "partial-id");
+
+        fs::write(directory.path().join(CLIENT_ID_FILENAME), [0xff, 0xfe]).unwrap();
+        assert!(ClientIdentity::load_or_create(directory.path()).unwrap().require().is_err());
+    }
+
+    #[test]
+    fn concurrent_client_identity_creation_publishes_one_complete_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let identities = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8).map(|_| scope.spawn(|| {
+                ClientIdentity::load_or_create(directory.path()).unwrap().as_str().to_owned()
+            })).collect();
+            handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+        });
+        assert!(Uuid::parse_str(&identities[0]).is_ok());
+        assert!(identities.iter().all(|id| id == &identities[0]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disabling_and_removing_one_client_preserves_the_other_clients_remote_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let state_a = remote_state_directory_for_endpoint("gpu.example", 22, "client-a");
+        let state_b = remote_state_directory_for_endpoint("gpu.example", 22, "client-b");
+        let path_a = root.join(state_a.strip_prefix("$HOME/").unwrap());
+        let path_b = root.join(state_b.strip_prefix("$HOME/").unwrap());
+        std::fs::create_dir_all(&path_a).unwrap();
+        std::fs::create_dir_all(&path_b).unwrap();
+        std::fs::write(path_a.join(".daemon.pid"), "99999999\n").unwrap();
+        std::fs::write(path_b.join(".daemon.pid"), "88888888\n").unwrap();
+        std::fs::write(path_a.join(".history-v1.tsv"), "client a history\n").unwrap();
+        std::fs::write(path_b.join(".history-v1.tsv"), "client b history\n").unwrap();
+        let shared = path_a.parent().unwrap().parent().unwrap();
+        let shared_history = "legacy history\nnew history\n";
+        std::fs::write(shared.join(".history-v1.tsv"), shared_history).unwrap();
+        std::fs::write(shared.join(".usage-v1.tsv"), "shared usage\n").unwrap();
+        // An offline installation remains associated even without a heartbeat.
+        assert!(!path_b.join(".client-heartbeat").exists());
+
+        let disabled = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(build_disable_script(&state_a))
+            .env("HOME", root)
+            .output()
+            .unwrap();
+        assert!(disabled.status.success());
+        assert!(!path_a.join(".daemon.pid").exists());
+        assert!(path_b.join(".daemon.pid").exists());
+
+        let remove = build_remove_script(&state_a, None).unwrap();
+        let removed = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(remove)
+            .env("HOME", root)
+            .output()
+            .unwrap();
+        assert!(removed.status.success(), "{}", String::from_utf8_lossy(&removed.stderr));
+        assert!(!path_a.exists());
+        assert_eq!(std::fs::read_to_string(path_b.join(".history-v1.tsv")).unwrap(), "client b history\n");
+        assert_eq!(std::fs::read_to_string(shared.join(".history-v1.tsv")).unwrap(), shared_history);
+
+        // Even the last known registration cannot prove that no legacy client
+        // uses this directory: older versions never registered themselves.
+        let removed_last = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(build_remove_script(&state_b, None).unwrap())
+            .env("HOME", root)
+            .output()
+            .unwrap();
+        assert!(removed_last.status.success());
+        assert!(!path_b.exists());
+        assert_eq!(std::fs::read_to_string(shared.join(".history-v1.tsv")).unwrap(), shared_history);
+        assert_eq!(std::fs::read_to_string(shared.join(".usage-v1.tsv")).unwrap(), "shared usage\n");
     }
 
     #[cfg(unix)]
@@ -857,5 +1186,42 @@ mod tests {
         let hourly = parse_usage_line("v2|1722700800|GPU-a|alice|1800|7372800.00|3600").unwrap();
         assert_eq!(hourly.bucket_seconds, 3_600);
         assert_eq!(hourly.active_seconds, 1_800);
+    }
+    #[test]
+    fn compatibility_usage_does_not_mix_overlapping_old_and_new_hours() {
+        let output = "__RACKTOP_SOURCE__\nv1|3600|GPU-a|alice|60|100|60\n__RACKTOP_SOURCE__\nv2|3600|GPU-a|alice|3600|900|3600\nv2|0|GPU-a|alice|3600|900|3600\n";
+        let points = merge_compatibility_usage(output);
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].bucket_seconds, 3600);
+        assert_eq!(points[1].timestamp, 0);
+        assert_eq!(points.iter().map(|point| point.active_seconds).sum::<i64>(), 7200);
+        let disjoint = "v1|3600|GPU-a|alice|60|100|60\n__RACKTOP_SOURCE__\nv1|3600|GPU-a|alice|60|100|60\nv1|3660|GPU-a|alice|60|100|60\n";
+        assert_eq!(merge_compatibility_usage(disjoint).len(), 2);
+    }
+
+    #[test]
+    fn minute_rows_do_not_hide_other_gpus_users_or_complete_hour_rollups() {
+        let output = "v1|3600|GPU-a|alice|60|100|60\nv2|3600|GPU-b|bob|3600|900|3600\nv2|3600|GPU-a|bob|3600|800|3600\nv1|3660|GPU-a|carol|60|200|60\nv2|3600|GPU-a|alice|3600|700|3600\n";
+        let points = merge_compatibility_usage(output);
+        assert_eq!(points.len(), 4);
+        assert!(points.iter().any(|point| point.gpu_uuid == "GPU-b" && point.username == "bob"));
+        assert!(points.iter().any(|point| point.gpu_uuid == "GPU-a" && point.username == "bob"));
+        assert!(points.iter().any(|point| point.username == "carol" && point.bucket_seconds == 60));
+        assert!(points.iter().any(|point| point.username == "alice" && point.active_seconds == 3600));
+        let reversed = output.lines().rev().collect::<Vec<_>>().join("\n");
+        assert_eq!(merge_compatibility_usage(&reversed).iter().map(|point| point.active_seconds).sum::<i64>(), 10860);
+    }
+
+    #[test]
+    fn usage_merge_chooses_measured_coverage_and_does_not_count_duplicates() {
+        let output = "v2|3600|GPU-a|alice|60|100|60\nv1|3600|GPU-a|alice|60|100|60\nv1|3660|GPU-a|alice|60|200|60\nv1|3660|GPU-a|alice|60|200|60\n";
+        let points = merge_compatibility_usage(output);
+        assert_eq!(points.len(), 2);
+        assert!(points.iter().all(|point| point.bucket_seconds == 60));
+        let complete = format!("{output}v2|3600|GPU-a|alice|3600|900|3600\n");
+        let points = merge_compatibility_usage(&complete);
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].active_seconds, 3600);
+        assert_eq!(points[0].coverage_seconds, 3600);
     }
 }

@@ -1,3 +1,12 @@
+export interface SshHop {
+  host: string
+  port: number
+  username: string
+  authMethod: AuthMethod
+  identityFile?: string | null
+  credentialId?: string | null
+}
+
 export type ServerStatus = 'online' | 'offline' | 'connecting' | 'warning' | 'unknown'
 export type AuthMethod = 'sshAgent' | 'privateKey' | 'password' | 'sshConfig'
 export type ServerNotificationMode = 'all' | 'off' | 'partial'
@@ -22,6 +31,7 @@ export interface Server {
   sshAlias?: string | null
   identityFile?: string | null
   proxyJump?: string | null
+  sshHops?: SshHop[]
   tags: string[]
   samplingIntervalSeconds: number
   historyRetentionDays: number
@@ -292,6 +302,7 @@ export interface ServerDraft {
   sshAlias?: string
   identityFile?: string
   proxyJump?: string
+  sshHops?: SshHop[]
   tags: string[]
   samplingIntervalSeconds: number
   historyRetentionDays: number
@@ -299,6 +310,23 @@ export interface ServerDraft {
   authMethod: AuthMethod
   password?: string
   savePassword?: boolean
+}
+
+export interface ServerConfigExport {
+  path: string
+  serverCount: number
+  privateKeyCount: number
+}
+
+export interface ServerConfigImportPreview {
+  importId: string
+  servers: Array<{ draft: ServerDraft; includesPrivateKey: boolean; blockedReason?: string | null }>
+  privateKeyCount: number
+}
+
+export interface ServerConfigImportResult {
+  importedCount: number
+  privateKeysInstalled: number
 }
 
 export interface RemoteCleanupResult {

@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { aggregateTelemetryPreview } from '../utils/telemetryPreview'
 import { isPermissionGranted, onAction, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution } from '../types/models'
+import type { AppSettings, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, InteractionLogSummary, InteractionServerSummary, ManagedRunLaunchResult, ManagedRunRemoteStatus, Project, ProjectDraft, ProjectPathCheck, ProjectSyncProgress, ProjectSyncResult, RemoteCleanupResult, RemoteCleanupSweepResult, RemoteHistorySyncResult, Server, ServerConfigExport, ServerConfigImportPreview, ServerConfigImportResult, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution } from '../types/models'
 import { clampPercent, gpuMemoryPercent, hasOtherUserGpuWorkload } from '../utils/gpu'
 import { normalizeIdleFilters } from '../utils/idleFilters'
 import { RACKTOP_MANAGED_IDENTITY_PATH } from '../utils/sshSetup'
@@ -587,6 +587,26 @@ export const api = {
   async importSshConfig(path?: string): Promise<ServerDraft[]> {
     if (isTauri) return invoke('import_ssh_config', { path: path || null })
     return []
+  },
+  async exportServerConfig(passphrase: string, kind: 'racktop' | 'ssh'): Promise<ServerConfigExport | null> {
+    if (!isTauri) throw new Error('请在 RackTop 桌面版中导出配置')
+    return invoke('export_server_config', { passphrase, kind })
+  },
+  async parseSshConfig(content: string): Promise<ServerDraft[]> {
+    if (!isTauri) throw new Error('请在 RackTop 桌面版中导入 SSH Config')
+    return invoke('parse_ssh_config', { content })
+  },
+  async prepareServerConfigImport(packageContents: string, passphrase: string): Promise<ServerConfigImportPreview> {
+    if (!isTauri) throw new Error('请在 RackTop 桌面版中导入配置')
+    return invoke('prepare_server_config_import', { package: packageContents, passphrase })
+  },
+  async commitServerConfigImport(importId: string, selectedIndexes: number[]): Promise<ServerConfigImportResult> {
+    if (!isTauri) throw new Error('请在 RackTop 桌面版中导入配置')
+    return invoke('commit_server_config_import', { importId, selectedIndexes })
+  },
+  async discardServerConfigImport(importId: string): Promise<void> {
+    if (!isTauri) return
+    await invoke('discard_server_config_import', { importId })
   },
   async getSettings(): Promise<AppSettings> {
     return isTauri ? invoke('get_settings') : browserSettings

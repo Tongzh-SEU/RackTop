@@ -2,7 +2,15 @@
 set -eu
 umask 077
 since="$1"
+# Always return the entire intersecting hour, including a rollup timestamped
+# at its beginning. A history cursor near the hour end must not hide it.
+since=$((since - since % 3600))
 state_dir="${RACKTOP_STATE_DIR:-$HOME/.racktop}"
+if [ -n "${RACKTOP_HISTORY_LOCK:-}" ]; then
+  exec 6>"$RACKTOP_HISTORY_LOCK"
+  flock -w 10 6 || exit 1
+  [ -d "$state_dir" ] || exit 0
+fi
 mkdir -p "$state_dir"
 exec 9>"$state_dir/.usage.lock"
 flock -w 10 9 || { printf '远端使用分布正忙，请稍后重试\n' >&2; exit 1; }

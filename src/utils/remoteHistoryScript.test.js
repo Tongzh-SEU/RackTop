@@ -77,3 +77,21 @@ test.skipIf(process.platform !== 'linux')('releases the actual collector lock af
   expect(f.run(f.script).status).toBe(0)
   expect(existsSync(join(f.state, '.history-v1.tsv'))).toBe(true)
 }, 15000)
+
+
+test.skipIf(process.platform === 'win32')('two clients share one minute without duplicating history and preserve old rows', () => {
+  const f = fixture()
+  const history = join(f.state, '.history-v1.tsv')
+  const oldBucket = Math.floor(Date.now() / 60000) * 60 - 600
+  const oldRow = `v3|${oldBucket}|10|20|0|GPU-old,30,40,0,50,100,20`
+  writeFileSync(history, oldRow + String.fromCharCode(10))
+  f.env.RACKTOP_CLIENT_STATE_DIR = join(f.state, 'instances/a')
+  expect(f.run(f.script).status).toBe(0)
+  const first = readFileSync(history, 'utf8')
+  f.env.RACKTOP_CLIENT_STATE_DIR = join(f.state, 'instances/b')
+  expect(f.run(f.script).status).toBe(0)
+  expect(readFileSync(history, 'utf8')).toBe(first)
+  expect(first).toContain(oldRow)
+  expect(first.trim().split(String.fromCharCode(10))).toHaveLength(2)
+  expect(readFileSync(join(f.state, '.usage-minute-hours'), 'utf8').trim()).not.toBe('')
+})
