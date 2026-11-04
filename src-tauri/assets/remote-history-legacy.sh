@@ -46,7 +46,18 @@ snapshot_legacy_history() {
             # Preserve old-only buckets after an old app recreates/truncates a
             # file. Keep both representations for recovery; the reader uses a
             # rollup over overlapping minutes of that same GPU/user/hour.
-            awk -F '|' '!seen[$1 FS $2 FS $3 FS $4]++' "$@" > "$archive_dir/$name.$$"
+            awk -F '|' '
+              NF == 7 && ($1 == "v1" || $1 == "v2") && $7+0 > 0 {
+                key=$1 FS $2 FS $3 FS $4
+                if (!(key in rows)) order[++n]=key
+                if (!(key in rows) || $7+0 > coverage[key]) { rows[key]=$0; coverage[key]=$7+0 }
+              }
+            !(NF == 7 && ($1 == "v1" || $1 == "v2") && $7+0 > 0) {
+              key="raw" FS $0
+              if (!(key in rows)) { order[++n]=key; rows[key]=$0 }
+            }
+              END { for (i=1; i<=n; i++) print rows[order[i]] }
+            ' "$@" > "$archive_dir/$name.$$"
             ;;
           *) awk '!seen[$0]++' "$@" > "$archive_dir/$name.$$" ;;
         esac

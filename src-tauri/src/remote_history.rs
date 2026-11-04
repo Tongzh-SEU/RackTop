@@ -648,6 +648,14 @@ mod tests {
         };
         assert_eq!(parse_history(&read(false)).unwrap().len(), 3);
         assert_eq!(merge_compatibility_usage(&read(true)).len(), 3);
+        // A recreated legacy file may contain a shorter row for the same
+        // version/key. Snapshotting must retain the archived fuller coverage.
+        fs::write(root.join(".racktop/.usage-v1.tsv"), "v2|3600|GPU-a|alice|3600|6000|3600\n").unwrap();
+        assert_eq!(merge_compatibility_usage(&read(true)).iter().find(|point| point.bucket_seconds == 3600).unwrap().coverage_seconds, 3600);
+        fs::write(root.join(".racktop/.usage-v1.tsv"), "v2|3600|GPU-a|alice|60|100|60\n").unwrap();
+        assert_eq!(merge_compatibility_usage(&read(true)).iter().find(|point| point.bucket_seconds == 3600).unwrap().coverage_seconds, 3600);
+        let archive = root.join(remote_state_directory(&server).strip_prefix("$HOME/").unwrap()).join("legacy-root/.usage-v1.tsv");
+        assert!(fs::read_to_string(archive).unwrap().contains("v2|3600|GPU-a|alice|3600|6000|3600"));
         // Old reinstallation can replace a file rather than append. Preserve
         // already archived buckets as well as the newly created stream.
         fs::write(root.join(".racktop/.history-v1.tsv"), "v1|10800|10|20|0|GPU-a,25,40\n").unwrap();

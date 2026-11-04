@@ -148,6 +148,114 @@ fn hour_start(timestamp: i64) -> i64 {
     timestamp - timestamp.rem_euclid(3_600)
 }
 
+// Sources remain separate from the public hourly table so a later, fuller
+// rollup can replace its previous contribution instead of being added to it.
+// Kinds: 0 remote minute, 1 remote hour, 2 local minute, 3 opaque legacy
+// aggregate, 4 legacy aggregate known to contain only local samples.
+fn prepare_usage_reconciliation(connection: &Connection) -> Result<(), String> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS usage_sources (
+           server_id TEXT NOT NULL,timestamp INTEGER NOT NULL,hour INTEGER NOT NULL,
+           gpu_uuid TEXT NOT NULL,username TEXT NOT NULL,kind INTEGER NOT NULL,
+           active_seconds INTEGER NOT NULL,memory_mb_seconds REAL NOT NULL,coverage_seconds INTEGER NOT NULL,
+           PRIMARY KEY(server_id,timestamp,gpu_uuid,username,kind),
+           FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_usage_sources_hour ON usage_sources(server_id,hour);
+         CREATE TABLE IF NOT EXISTS usage_legacy_minutes (
+           server_id TEXT NOT NULL,timestamp INTEGER NOT NULL,PRIMARY KEY(server_id,timestamp),
+           FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+         );
+         CREATE TABLE IF NOT EXISTS usage_reconciled (
+           server_id TEXT NOT NULL,timestamp INTEGER NOT NULL,gpu_uuid TEXT NOT NULL,username TEXT NOT NULL,
+           active_seconds INTEGER NOT NULL,memory_mb_seconds REAL NOT NULL,coverage_seconds INTEGER NOT NULL,
+           PRIMARY KEY(server_id,timestamp,gpu_uuid,username),
+           FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+         );"
+    ).map_err(|error| error.to_string())
+}
+
+// Preserve existing aggregates, including writes made by a downgraded binary.
+// Historical remote aggregates cannot be split back into individual minutes:
+// retain them as a coverage floor rather than guessing or adding them twice.
+fn capture_existing_usage(connection: &Connection, server_id: &str, hour: i64) -> Result<(), String> {
+    let changed: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM usage_buckets u LEFT JOIN usage_reconciled r
+         USING(server_id,timestamp,gpu_uuid,username)
+         WHERE u.server_id=?1 AND u.timestamp=?2 AND (r.server_id IS NULL
+           OR u.active_seconds<>r.active_seconds OR u.memory_mb_seconds<>r.memory_mb_seconds
+           OR u.coverage_seconds<>r.coverage_seconds))",
+        params![server_id,hour], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !changed { return Ok(()); }
+    // Rebase the whole hour together after an old binary writes it. Its public
+    // totals already include previous contributions; never add those again.
+    connection.execute("DELETE FROM usage_sources WHERE server_id=?1 AND hour=?2", params![server_id,hour]).map_err(|error| error.to_string())?;
+    connection.execute(
+        "INSERT INTO usage_sources(server_id,timestamp,hour,gpu_uuid,username,kind,active_seconds,memory_mb_seconds,coverage_seconds)
+         SELECT u.server_id,u.timestamp,u.timestamp,u.gpu_uuid,u.username,
+           CASE WHEN EXISTS(SELECT 1 FROM remote_usage_hours WHERE server_id=u.server_id AND timestamp=u.timestamp)
+             THEN 3 ELSE 4 END,
+           u.active_seconds,u.memory_mb_seconds,u.coverage_seconds
+         FROM usage_buckets u WHERE u.server_id=?1 AND u.timestamp=?2",
+        params![server_id,hour],
+    ).map_err(|error| error.to_string())?;
+    connection.execute("INSERT OR IGNORE INTO usage_legacy_minutes SELECT server_id,timestamp FROM remote_usage_minutes WHERE server_id=?1 AND timestamp>=?2 AND timestamp<?2+3600", params![server_id,hour]).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn record_usage_source(connection: &Connection, server_id: &str, point: &UsagePoint, kind: i64) -> Result<(), String> {
+    connection.execute(
+        "INSERT INTO usage_sources(server_id,timestamp,hour,gpu_uuid,username,kind,active_seconds,memory_mb_seconds,coverage_seconds)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+         ON CONFLICT(server_id,timestamp,gpu_uuid,username,kind) DO UPDATE SET
+           active_seconds=excluded.active_seconds,memory_mb_seconds=excluded.memory_mb_seconds,coverage_seconds=excluded.coverage_seconds
+         WHERE excluded.coverage_seconds>usage_sources.coverage_seconds",
+        params![server_id,point.timestamp,hour_start(point.timestamp),point.gpu_uuid,point.username,kind,point.active_seconds,point.memory_mb_seconds,point.coverage_seconds],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn reconcile_usage_hour(connection: &Connection, server_id: &str, hour: i64) -> Result<usize, String> {
+    // Minutes (including a pre-ledger minute-only baseline) form one candidate.
+    // Hourly and opaque legacy totals are competing candidates, never additive.
+    let mut statement = connection.prepare(
+        "WITH candidates AS (
+           SELECT gpu_uuid,username,SUM(active_seconds) active,SUM(memory_mb_seconds) memory,SUM(coverage_seconds) coverage,0 priority
+           FROM usage_sources WHERE server_id=?1 AND hour=?2 AND kind IN (0,2,4) GROUP BY gpu_uuid,username
+           UNION ALL
+           SELECT gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds,CASE kind WHEN 3 THEN 2 ELSE 1 END
+           FROM usage_sources WHERE server_id=?1 AND hour=?2 AND kind IN (1,3)
+         ), ranked AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY gpu_uuid,username ORDER BY coverage DESC,priority DESC) rank FROM candidates)
+         SELECT gpu_uuid,username,active,memory,coverage FROM ranked WHERE rank=1"
+    ).map_err(|error| error.to_string())?;
+    let rows = statement.query_map(params![server_id,hour], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,row.get::<_,f64>(3)?,row.get::<_,i64>(4)?)))
+        .map_err(|error| error.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|error| error.to_string())?;
+    let mut changed = 0;
+    for (gpu,user,active,memory,coverage) in rows {
+        changed += connection.execute(
+            "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds) VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(server_id,timestamp,gpu_uuid,username) DO UPDATE SET active_seconds=excluded.active_seconds,memory_mb_seconds=excluded.memory_mb_seconds,coverage_seconds=excluded.coverage_seconds
+             WHERE usage_buckets.active_seconds<>excluded.active_seconds OR usage_buckets.memory_mb_seconds<>excluded.memory_mb_seconds OR usage_buckets.coverage_seconds<>excluded.coverage_seconds",
+            params![server_id,hour,gpu,user,active,memory,coverage],
+        ).map_err(|error| error.to_string())?;
+        connection.execute(
+            "INSERT INTO usage_reconciled(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds) VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(server_id,timestamp,gpu_uuid,username) DO UPDATE SET active_seconds=excluded.active_seconds,memory_mb_seconds=excluded.memory_mb_seconds,coverage_seconds=excluded.coverage_seconds",
+            params![server_id,hour,gpu,user,active,memory,coverage],
+        ).map_err(|error| error.to_string())?;
+    }
+    Ok(changed)
+}
+
+fn prune_usage_sources(connection: &Connection, server_id: &str, cutoff: i64) -> Result<(), String> {
+    for table in ["usage_sources","usage_reconciled","usage_legacy_minutes"] {
+        let time_column = if table == "usage_sources" { "hour" } else { "timestamp" };
+        connection.execute(&format!("DELETE FROM {table} WHERE server_id=?1 AND {time_column}<?2"), params![server_id,cutoff]).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn bucket_start(timestamp: i64, bucket_seconds: i64) -> i64 {
     timestamp - timestamp.rem_euclid(bucket_seconds)
 }
@@ -1733,6 +1841,7 @@ impl Database {
             }
         }
         migrate_usage_to_hourly(&mut connection)?;
+        prepare_usage_reconciliation(&connection)?;
         if !applied && !database_integrity_ok(&connection) {
             return Err("小时用量迁移后的数据库完整性校验失败，迁移前备份已保留".into());
         }
@@ -2578,6 +2687,7 @@ impl Database {
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
+        prepare_usage_reconciliation(&transaction)?;
         transaction
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS remote_history_quarantine (
@@ -2733,6 +2843,14 @@ impl Database {
                     params![server_id, timestamp, gpu_uuid, username],
                 )
                 .map_err(|error| error.to_string())?;
+            transaction.execute(
+                "DELETE FROM usage_sources WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid=?3 AND username=?4",
+                params![server_id,timestamp,gpu_uuid,username],
+            ).map_err(|error| error.to_string())?;
+            transaction.execute(
+                "DELETE FROM usage_reconciled WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid=?3 AND username=?4",
+                params![server_id,timestamp,gpu_uuid,username],
+            ).map_err(|error| error.to_string())?;
             quarantined += 1;
         }
         if removed_snapshots {
@@ -2861,56 +2979,38 @@ impl Database {
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
-        let mut imported = 0usize;
-        let mut buckets: BTreeMap<(i64, i64), Vec<&UsagePoint>> = BTreeMap::new();
+        prepare_usage_reconciliation(&transaction)?;
+        let mut hours = HashSet::new();
         for point in points.iter().filter(|point| {
             point.timestamp >= cutoff
                 && point.timestamp <= now + 300
                 && matches!(point.bucket_seconds, 60 | 3_600)
                 && (point.bucket_seconds == 60 || point.timestamp < completed_hour_end)
         }) {
-            buckets.entry((point.timestamp, point.bucket_seconds)).or_default().push(point);
+            hours.insert(hour_start(point.timestamp));
         }
-        {
-            let mut claim_minute = transaction.prepare(
-                "INSERT OR IGNORE INTO remote_usage_minutes(server_id,timestamp)
-                 SELECT ?1,?2 WHERE NOT EXISTS (SELECT 1 FROM local_usage_minutes WHERE server_id=?1 AND timestamp=?2)"
-            ).map_err(|error| error.to_string())?;
-            let mut claim_hour = transaction.prepare(
-                "INSERT OR IGNORE INTO remote_usage_hours(server_id,timestamp) VALUES(?1,?2)"
-            ).map_err(|error| error.to_string())?;
-            let mut statement = transaction.prepare(
-                "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7)
-                 ON CONFLICT(server_id,timestamp,gpu_uuid,username) DO UPDATE SET
-                   active_seconds=usage_buckets.active_seconds+excluded.active_seconds,
-                   memory_mb_seconds=usage_buckets.memory_mb_seconds+excluded.memory_mb_seconds,
-                   coverage_seconds=usage_buckets.coverage_seconds+excluded.coverage_seconds"
-            ).map_err(|error| error.to_string())?;
-            for ((timestamp, bucket_seconds), bucket_points) in buckets {
-                let claimed = if bucket_seconds == 3_600 {
-                    claim_hour.execute(params![server_id, hour_start(timestamp)])
-                } else {
-                    claim_minute.execute(params![server_id, timestamp])
-                }.map_err(|error| error.to_string())?;
-                if claimed == 0 {
-                    continue;
-                }
-                for point in bucket_points {
-                    imported += statement
-                        .execute(params![
-                            server_id,
-                            hour_start(timestamp),
-                            point.gpu_uuid,
-                            point.username,
-                            point.active_seconds,
-                            point.memory_mb_seconds,
-                            point.coverage_seconds
-                        ])
-                        .map_err(|error| error.to_string())?;
-                }
+        for &hour in &hours { capture_existing_usage(&transaction, server_id, hour)?; }
+        for point in points.iter().filter(|point| {
+            point.timestamp >= cutoff && point.timestamp <= now + 300
+                && matches!(point.bucket_seconds, 60 | 3_600)
+                && (point.bucket_seconds == 60 || point.timestamp < completed_hour_end)
+        }) {
+            if point.bucket_seconds == 60 {
+                let already_local_or_legacy: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM local_usage_minutes WHERE server_id=?1 AND timestamp=?2)
+                       OR EXISTS(SELECT 1 FROM usage_legacy_minutes WHERE server_id=?1 AND timestamp=?2)",
+                    params![server_id,point.timestamp], |row| row.get(0),
+                ).map_err(|error| error.to_string())?;
+                if already_local_or_legacy { continue; }
+                transaction.execute("INSERT OR IGNORE INTO remote_usage_minutes VALUES(?1,?2)", params![server_id,point.timestamp]).map_err(|error| error.to_string())?;
+            } else {
+                transaction.execute("INSERT OR IGNORE INTO remote_usage_hours VALUES(?1,?2)", params![server_id,hour_start(point.timestamp)]).map_err(|error| error.to_string())?;
             }
+            record_usage_source(&transaction, server_id, point, if point.bucket_seconds == 60 { 0 } else { 1 })?;
         }
+        let mut imported = 0;
+        for hour in hours { imported += reconcile_usage_hour(&transaction, server_id, hour)?; }
+        prune_usage_sources(&transaction, server_id, cutoff)?;
         transaction
             .execute(
                 "DELETE FROM usage_buckets WHERE server_id=?1 AND timestamp < ?2",
@@ -2944,6 +3044,7 @@ impl Database {
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
+        prepare_usage_reconciliation(&transaction)?;
         let remote_claimed: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM remote_usage_minutes WHERE server_id=?1 AND timestamp=?2)",
             params![snapshot.server_id, timestamp], |row| row.get(0),
@@ -2962,6 +3063,7 @@ impl Database {
             transaction.commit().map_err(|error| error.to_string())?;
             return Ok(0);
         }
+        capture_existing_usage(&transaction, &snapshot.server_id, hour_start(timestamp))?;
 
         let gpu_uuids: HashSet<&str> = snapshot.gpus.iter().map(|gpu| gpu.uuid.as_str()).collect();
         let mut memory_by_user: HashMap<(&str, &str), f64> = HashMap::new();
@@ -2976,15 +3078,14 @@ impl Database {
         let mut inserted = 0usize;
         {
             let mut statement = transaction.prepare(
-                "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds)
-                 VALUES(?1,?2,?3,?4,?5,?6,60)
-                 ON CONFLICT(server_id,timestamp,gpu_uuid,username) DO UPDATE SET active_seconds=usage_buckets.active_seconds+excluded.active_seconds,memory_mb_seconds=usage_buckets.memory_mb_seconds+excluded.memory_mb_seconds,coverage_seconds=usage_buckets.coverage_seconds+excluded.coverage_seconds"
+                "INSERT INTO usage_sources(server_id,timestamp,hour,gpu_uuid,username,kind,active_seconds,memory_mb_seconds,coverage_seconds)
+                 VALUES(?1,?2,?2-?2%3600,?3,?4,2,?5,?6,60)"
             ).map_err(|error| error.to_string())?;
             for gpu in &snapshot.gpus {
                 inserted += statement
                     .execute(params![
                         snapshot.server_id,
-                        hour_start(timestamp),
+                        timestamp,
                         gpu.uuid,
                         USAGE_COVERAGE_USER,
                         0,
@@ -2996,7 +3097,7 @@ impl Database {
                 inserted += statement
                     .execute(params![
                         snapshot.server_id,
-                        hour_start(timestamp),
+                        timestamp,
                         gpu_uuid,
                         username,
                         60,
@@ -3005,6 +3106,8 @@ impl Database {
                     .map_err(|error| error.to_string())?;
             }
         }
+        reconcile_usage_hour(&transaction, &snapshot.server_id, hour_start(timestamp))?;
+        prune_usage_sources(&transaction, &snapshot.server_id, cutoff)?;
         transaction
             .execute(
                 "DELETE FROM usage_buckets WHERE server_id=?1 AND timestamp < ?2",
@@ -4194,6 +4297,50 @@ mod tests {
                 params![server.id, gpu, user], |row| row.get(0)).unwrap();
             assert_eq!(total, active);
         }
+    }
+
+    #[test]
+    fn remote_usage_reconciles_repeated_minutes_and_later_full_rollups_across_syncs() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("usage-reconcile.sqlite")).unwrap();
+        let server = database.save_server(draft("Usage reconciliation", 90)).unwrap();
+        let point = |coverage: i64, bucket_seconds: i64, active_seconds: i64| UsagePoint {
+            timestamp: 3_600,
+            bucket_seconds,
+            gpu_uuid: "GPU-a".into(),
+            username: "alice".into(),
+            active_seconds,
+            memory_mb_seconds: active_seconds as f64 * 100.0,
+            coverage_seconds: coverage,
+        };
+        let total = || {
+            database.connection.lock().unwrap().query_row(
+                "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid='GPU-a' AND username='alice'",
+                [&server.id], |row| row.get::<_, i64>(0),
+            ).unwrap()
+        };
+
+        let full_hour = point(3_600, 3_600, 3_600);
+        assert_eq!(database.import_remote_usage(&server.id, &[full_hour], 10_800).unwrap(), 1);
+        assert_eq!(database.import_remote_usage(&server.id, &[point(60, 60, 60)], 10_800).unwrap(), 0);
+        assert_eq!(total(), 3_600, "re-reading the final minute must not add it to the hour");
+        database.connection.lock().unwrap().execute(
+            "UPDATE usage_buckets SET active_seconds=active_seconds+60,memory_mb_seconds=memory_mb_seconds+6000,coverage_seconds=coverage_seconds+60 WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid='GPU-a' AND username='alice'",
+            [&server.id],
+        ).unwrap();
+        assert_eq!(database.import_remote_usage(&server.id, &[point(3_600, 3_600, 3_600)], 10_800).unwrap(), 0);
+        assert_eq!(total(), 3_660, "a downgraded writer's aggregate must remain as a baseline");
+
+        let mut other_draft = draft("Later rollup", 90);
+        other_draft.host = "10.0.0.2".into();
+        let other_server = database.save_server(other_draft).unwrap();
+        assert_eq!(database.import_remote_usage(&other_server.id, &[point(60, 3_600, 60)], 10_800).unwrap(), 1);
+        assert_eq!(database.import_remote_usage(&other_server.id, &[point(3_600, 3_600, 3_600)], 10_800).unwrap(), 1);
+        let upgraded_total: i64 = database.connection.lock().unwrap().query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid='GPU-a' AND username='alice'",
+            [&other_server.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(upgraded_total, 3_600, "a fuller rollup must replace a partial contribution");
     }
 
     #[test]

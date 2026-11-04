@@ -2,6 +2,9 @@
 set -eu
 umask 077
 since="$1"
+# Always return the entire intersecting hour, including a rollup timestamped
+# at its beginning. A history cursor near the hour end must not hide it.
+since=$((since - since % 3600))
 state_dir="${RACKTOP_STATE_DIR:-$HOME/.racktop}"
 if [ -n "${RACKTOP_HISTORY_LOCK:-}" ]; then
   exec 6>"$RACKTOP_HISTORY_LOCK"
