@@ -693,6 +693,27 @@ mod tests {
     const PASSPHRASE: &str = "correct horse battery staple";
 
     #[test]
+    fn username_free_concrete_hops_survive_encrypted_import() {
+        for (proxy, host, port) in [("[2001:db8::1]:2202", "2001:db8::1", 2202), ("jump.example", "jump.example", 22)] {
+            let directory = tempdir().unwrap();
+            let database = Database::open(&directory.path().join("target.sqlite")).unwrap();
+            let mut server = draft(None); server.auth_method = "sshAgent".into();
+            server.proxy_jump = Some(proxy.into());
+            let package = encrypt_payload(&PackagePayload { kind: "racktop".into(), ssh_config: None, servers: vec![
+                PackageServer { draft: server, private_key: None, hop_secrets: Vec::new() },
+            ] }, PASSPHRASE).unwrap();
+            let state = ConfigTransferState::default();
+            let preview = state.prepare_import(&package, PASSPHRASE).unwrap();
+            assert!(preview.servers[0].blocked_reason.is_none());
+            state.commit_import(&preview.import_id, &[0], &database, directory.path()).unwrap();
+            let saved = database.list_servers().unwrap().pop().unwrap();
+            let hop = &saved.ssh_hops[0];
+            assert_eq!((&*hop.host, &*hop.username, hop.port), (host, "tester", port));
+            assert_eq!(hop.auth_method, "sshAgent");
+        }
+    }
+
+    #[test]
     fn concrete_agent_jump_round_trips_through_encrypted_and_plain_exports() {
         let directory = tempdir().unwrap();
         let source = Database::open(&directory.path().join("source.sqlite")).unwrap();

@@ -130,6 +130,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn username_free_ipv6_and_hostname_jumps_are_importable() {
+        for (proxy, host, port) in [("[2001:db8::1]:2202", "2001:db8::1", 2202), ("jump.example", "jump.example", 22)] {
+            let drafts = parse_transfer(&format!("Host target\n HostName 192.0.2.10\n ProxyJump {proxy}\nHost *\n User reviewer\n Port 2222\n")).unwrap();
+            assert!(validate_transfer_draft(&drafts[0]).is_ok());
+            let hop = &drafts[0].ssh_hops[0];
+            assert_eq!((&*hop.host, &*hop.username, hop.port), (host, "reviewer", port));
+        }
+    }
+    #[test]
     fn concrete_proxyjump_is_selectable_without_a_host_block() {
         let drafts = parse_transfer("Host target\n HostName 192.0.2.10\n ProxyJump jump-user@192.0.2.1:2201\n").unwrap();
         assert_eq!(drafts.len(), 1);

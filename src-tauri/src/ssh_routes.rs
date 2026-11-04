@@ -22,11 +22,14 @@ pub fn resolve(draft: &ServerDraft, drafts: &[ServerDraft]) -> Result<Vec<SshHop
             } else { (endpoint, None) };
             if name.is_empty() || port == Some(0) { return Err("跳板机地址或端口无效".into()); }
             let candidates: Vec<_> = drafts.iter().filter(|d| d.ssh_alias.as_deref() == Some(name) || d.name == name || (d.host == name && port.is_none_or(|p| d.port == p) && user.is_none_or(|u| d.username == u))).collect();
-            if candidates.is_empty() {
-                if let (Some(username), Some(port)) = (user, port) {
-                    hops.push(SshHop { host: name.into(), port, username: username.into(), auth_method: "sshAgent".into(), identity_file: None, credential_id: None });
-                    continue;
-                }
+            // IP literals and qualified hostnames are concrete endpoints, even
+            // without a matching Host record. Bare unresolved aliases still
+            // require their configuration so credentials are not silently lost.
+            let concrete = name.parse::<std::net::IpAddr>().is_ok() || name.contains('.')
+                || (user.is_some() && port.is_some());
+            if candidates.is_empty() && concrete {
+                hops.push(SshHop { host: name.into(), port: port.unwrap_or(22), username: user.unwrap_or(&draft.username).into(), auth_method: "sshAgent".into(), identity_file: None, credential_id: None });
+                continue;
             }
             if candidates.len() != 1 { return Err(format!("跳板机 {name} 的连接配置缺失或不唯一")); }
             let source = candidates[0];
@@ -117,6 +120,22 @@ mod tests {
         assert_eq!(hops[1].host, "2001:db8::1");
         assert!(hops.iter().all(|h| h.auth_method == "sshAgent" && h.credential_id.is_none() && h.identity_file.is_none()));
         assert!(resolve(&draft("target", Some("missing-alias")), &[]).is_err());
+    }
+    #[test]
+    fn concrete_endpoints_default_to_target_user_and_standard_port() {
+        for (spec, host, username, port) in [
+            ("[2001:db8::1]:2202", "2001:db8::1", "target", 2202),
+            ("[2001:db8::1]", "2001:db8::1", "target", 22),
+            ("jump.example", "jump.example", "target", 22),
+            ("jump.example:2202", "jump.example", "target", 2202),
+            ("other@jump.example", "jump.example", "other", 22),
+            ("192.0.2.1", "192.0.2.1", "target", 22),
+        ] {
+            let hops = resolve(&draft("target", Some(spec)), &[]).unwrap();
+            assert_eq!(hops.len(), 1, "{spec}");
+            assert_eq!((&*hops[0].host, &*hops[0].username, hops[0].port), (host, username, port));
+            assert_eq!(hops[0].auth_method, "sshAgent");
+        }
     }
     #[test]
     fn explicit_list_overrides_nested_jump_routes() {
