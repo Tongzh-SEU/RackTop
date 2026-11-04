@@ -596,21 +596,23 @@ fn validate_payload(payload: &PackagePayload) -> Result<(), String> {
 }
 
 fn render_ssh_config(servers: &[Server]) -> String {
+    let valid_aliases = servers.iter().filter_map(|server| server.ssh_alias.as_deref())
+        .filter(|alias| valid_ssh_alias(alias))
+        .map(|alias| alias.to_ascii_lowercase())
+        .collect::<std::collections::HashSet<_>>();
+    let mut used = std::collections::HashSet::new();
     servers
         .iter()
         .enumerate()
         .map(|(index, server)| {
-            let alias = server
-                .ssh_alias
-                .as_deref()
-                .filter(|alias| {
-                    !alias.trim().is_empty()
-                        && alias.chars().all(|character| {
-                            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
-                        })
-                })
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("racktop-server-{}", index + 1));
+            let requested = server.ssh_alias.as_deref().filter(|alias| valid_ssh_alias(alias));
+            let base = requested.map(str::to_owned).unwrap_or_else(|| format!("racktop-server-{}", index + 1));
+            let key = base.to_ascii_lowercase();
+            let alias = if (requested.is_some() || !valid_aliases.contains(&key)) && used.insert(key) {
+                base
+            } else {
+                unique_ssh_alias(&base, &valid_aliases, &mut used)
+            };
             let mut block = format!(
                 "Host {alias}\n  HostName {}\n  User {}\n  Port {}",
                 ssh_config_value(&server.host),
@@ -625,6 +627,24 @@ fn render_ssh_config(servers: &[Server]) -> String {
         .collect::<Vec<_>>()
         .join("\n\n")
         + "\n"
+}
+
+fn valid_ssh_alias(alias: &str) -> bool {
+    !alias.trim().is_empty() && alias.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+    })
+}
+
+fn unique_ssh_alias(base: &str, reserved: &std::collections::HashSet<String>, used: &mut std::collections::HashSet<String>) -> String {
+    let mut suffix = 2;
+    let candidate = loop {
+        let candidate = format!("{base}-{suffix}");
+        let key = candidate.to_ascii_lowercase();
+        if !reserved.contains(&key) && !used.contains(&key) { break candidate; }
+        suffix += 1;
+    };
+    used.insert(candidate.to_ascii_lowercase());
+    candidate
 }
 
 fn ssh_config_value(value: &str) -> String {
@@ -691,6 +711,44 @@ mod tests {
 
     const TEST_KEY: &[u8] = b"-----BEGIN OPENSSH PRIVATE KEY-----\ntest fixture\n-----END OPENSSH PRIVATE KEY-----\n";
     const PASSPHRASE: &str = "correct horse battery staple";
+
+    #[test]
+    fn ssh_export_assigns_case_insensitive_unique_aliases_and_round_trips() {
+        let directory = tempdir().unwrap();
+        let database = Database::open(&directory.path().join("source.sqlite")).unwrap();
+        for (name, host, alias) in [
+            ("First", "192.0.2.1", Some("jump")),
+            ("Second", "192.0.2.2", Some("JUMP")),
+            ("Third", "192.0.2.3", Some("racktop-server-4")),
+            ("Fourth", "192.0.2.4", None),
+        ] {
+            let mut server = draft(None);
+            server.name = name.into();
+            server.host = host.into();
+            server.ssh_alias = alias.map(str::to_owned);
+            server.auth_method = "sshAgent".into();
+            database.save_server(server).unwrap();
+        }
+        let exported = export(&database, "", "ssh").unwrap();
+        let parsed = crate::ssh_config::parse(&exported.package);
+        assert_eq!(parsed.len(), 4);
+        let hosts = parsed.iter().map(|draft| draft.ssh_alias.as_deref().unwrap().to_ascii_lowercase()).collect::<std::collections::HashSet<_>>();
+        assert_eq!(hosts.len(), 4);
+        assert_eq!(parsed.iter().map(|draft| draft.host.as_str()).collect::<std::collections::HashSet<_>>().len(), 4);
+        assert!(exported.package.contains("Host jump\n"));
+        assert!(exported.package.contains("Host JUMP-2\n"));
+        assert!(exported.package.contains("Host racktop-server-4-2\n"));
+        let config_path = directory.path().join("exported-config");
+        fs::write(&config_path, &exported.package).unwrap();
+        for server in &parsed {
+            let output = std::process::Command::new("ssh")
+                .args(["-G", "-F"]).arg(&config_path)
+                .arg(server.ssh_alias.as_deref().unwrap()).output().unwrap();
+            assert!(output.status.success());
+            assert!(String::from_utf8_lossy(&output.stdout).lines()
+                .any(|line| line == format!("hostname {}", server.host)));
+        }
+    }
 
     #[test]
     fn username_free_concrete_hops_survive_encrypted_import() {

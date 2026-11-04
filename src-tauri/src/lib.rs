@@ -284,6 +284,7 @@ async fn delete_server(
     server_id: String,
     revoke_ssh_access: bool,
 ) -> Result<RemoteCleanupResult, String> {
+    let client_id = client_identity.as_str();
     let server = database.get_server(&server_id)?;
     let password = if server.auth_method == "password" {
         database.get_password(&server_id, false).unwrap_or(None)
@@ -302,7 +303,7 @@ async fn delete_server(
         &server,
         password.as_deref(),
         managed_public_key.as_deref(),
-        client_identity.as_str(),
+        client_id,
     )
     .await
     {
@@ -738,13 +739,14 @@ async fn configure_remote_history(
     client_identity: State<'_, remote_history::ClientIdentity>,
     server_id: String,
 ) -> Result<(), String> {
+    let client_id = client_identity.require()?;
     let server = database.get_server(&server_id)?;
     let password = if server.auth_method == "password" {
         database.get_password(&server_id, false)?
     } else {
         None
     };
-    remote_history::configure(&server, password.as_deref(), client_identity.as_str()).await
+    remote_history::configure(&server, password.as_deref(), client_id).await
 }
 
 #[tauri::command]
@@ -828,6 +830,7 @@ async fn retry_remote_cleanups(
     database: State<'_, Database>,
     client_identity: State<'_, remote_history::ClientIdentity>,
 ) -> Result<RemoteCleanupSweepResult, String> {
+    let client_id = client_identity.require()?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
@@ -853,7 +856,7 @@ async fn retry_remote_cleanups(
             &task.server,
             password.as_deref(),
             task.managed_public_key.as_deref(),
-            client_identity.as_str(),
+            client_id,
         )
         .await
         {
@@ -1565,7 +1568,7 @@ pub fn run() {
                 Box::<dyn std::error::Error>::from(std::io::Error::other(error))
             })?;
             let client_identity = remote_history::ClientIdentity::load_or_create(&app_data)
-                .map_err(|error| Box::<dyn std::error::Error>::from(std::io::Error::other(error)))?;
+                .unwrap_or_else(|error| remote_history::ClientIdentity::unavailable(&error));
             app.manage(database);
             app.manage(client_identity);
             app.manage(config_transfer::ConfigTransferState::default());

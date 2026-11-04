@@ -20,6 +20,7 @@ const REMOTE_DAEMON_SCRIPT: &str = include_str!("../assets/remote-history-daemon
 const REMOTE_USAGE_SCRIPT: &str = include_str!("../assets/remote-history-usage.sh");
 const CLIENT_ID_FILENAME: &str = "remote-history-client-id";
 const REMOTE_LIFECYCLE_SCRIPT: &str = include_str!("../assets/remote-history-lifecycle.sh");
+const REMOTE_LEGACY_SCRIPT: &str = include_str!("../assets/remote-history-legacy.sh");
 const REMOTE_REMOVE_SCRIPT: &str = r#"set -eu
 state="${RACKTOP_STATE_DIR:?}"
 if [ -r "$state/.daemon.pid" ]; then
@@ -35,19 +36,32 @@ printf '__RACKTOP_REMOTE_HISTORY_REMOVED__\n'
 "#;
 
 #[derive(Clone, Debug)]
-pub struct ClientIdentity(String);
+pub struct ClientIdentity(Option<String>);
 
 impl ClientIdentity {
+    pub fn unavailable(error: &str) -> Self {
+        eprintln!("{error}；远端历史功能暂不可用，原客户端关联已保留。");
+        Self(None)
+    }
+
     pub fn load_or_create(app_data_dir: &Path) -> Result<Self, String> {
         fs::create_dir_all(app_data_dir).map_err(|error| format!("无法创建 RackTop 数据目录：{error}"))?;
         let path = app_data_dir.join(CLIENT_ID_FILENAME);
         match fs::read_to_string(&path) {
-            Ok(value) => return Self::parse(&value),
+            Ok(value) => return match Self::parse(&value) {
+                Ok(identity) => Ok(identity),
+                Err(_) => {
+                    Ok(Self::unavailable("本机远端历史标识损坏；请从备份恢复原标识文件"))
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("无法读取本机远端历史标识：{error}")),
+            Err(error) => {
+                return Ok(Self::unavailable(&format!("无法读取本机远端历史标识：{error}")));
+            }
         }
 
         let id = Uuid::new_v4().to_string();
+        let temporary = app_data_dir.join(format!(".{CLIENT_ID_FILENAME}.{}.tmp", Uuid::new_v4()));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -55,35 +69,55 @@ impl ClientIdentity {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        match options.open(&path) {
+        match options.open(&temporary) {
             Ok(mut file) => {
-                file.write_all(id.as_bytes()).and_then(|()| file.sync_all())
-                    .map_err(|error| format!("无法保存本机远端历史标识：{error}"))?;
-                Ok(Self(id))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let value = fs::read_to_string(&path)
-                    .map_err(|error| format!("无法读取本机远端历史标识：{error}"))?;
-                Self::parse(&value)
+                let result = file.write_all(id.as_bytes()).and_then(|()| file.sync_all());
+                drop(file);
+                if let Err(error) = result {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(format!("无法保存本机远端历史标识：{error}"));
+                }
+                match fs::hard_link(&temporary, &path) {
+                    Ok(()) => {
+                        let _ = fs::remove_file(&temporary);
+                        #[cfg(unix)]
+                        fs::File::open(app_data_dir).and_then(|directory| directory.sync_all())
+                            .map_err(|error| format!("无法同步本机远端历史标识：{error}"))?;
+                        Ok(Self(Some(id)))
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let _ = fs::remove_file(&temporary);
+                        let value = fs::read_to_string(&path).map_err(|error| format!("无法读取本机远端历史标识：{error}"))?;
+                        Self::parse(&value)
+                    }
+                    Err(error) => {
+                        let _ = fs::remove_file(&temporary);
+                        Err(format!("无法保存本机远端历史标识：{error}"))
+                    }
+                }
             }
             Err(error) => Err(format!("无法创建本机远端历史标识：{error}")),
         }
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_deref().unwrap_or("")
+    }
+
+    pub fn require(&self) -> Result<&str, String> {
+        self.0.as_deref().ok_or_else(|| "本机远端历史标识损坏；已保留旧关联，远端历史操作暂不可用".into())
     }
 
     fn parse(value: &str) -> Result<Self, String> {
         Uuid::parse_str(value.trim())
-            .map(|id| Self(id.to_string()))
+            .map(|id| Self(Some(id.to_string())))
             .map_err(|_| "本机远端历史标识格式无效".to_string())
     }
 }
 
 pub(crate) fn remote_state_directory(server: &Server) -> String {
     format!(
-        "$HOME/.racktop/remote-history-store/{}",
+        "$HOME/.racktop-managed/remote-history-store/{}",
         endpoint_state_component(&server.host, server.port)
     )
 }
@@ -93,13 +127,13 @@ pub(crate) fn client_state_directory(server: &Server, client_id: &str) -> String
 }
 
 fn remote_state_directory_for_endpoint(host: &str, port: u16, client_id: &str) -> String {
-    format!("$HOME/.racktop/remote-history-store/{}/instances/{:x}", endpoint_state_component(host, port), Sha256::digest(client_id.as_bytes()))
+    format!("$HOME/.racktop-managed/remote-history-store/{}/instances/{:x}", endpoint_state_component(host, port), Sha256::digest(client_id.as_bytes()))
 }
 
 fn lifecycle_script(state: &str, action: &str) -> String {
     let (data, client) = state.rsplit_once("/instances/").expect("generated client path");
     let endpoint = data.rsplit('/').next().expect("generated endpoint");
-    format!("RACKTOP_HISTORY_ENDPOINT=\"{endpoint}\"\nRACKTOP_HISTORY_CLIENT=\"{client}\"\nRACKTOP_HISTORY_ACTION=\"{action}\"\n{}", REMOTE_LIFECYCLE_SCRIPT.replace("\r\n", "\n"))
+    format!("RACKTOP_HISTORY_ENDPOINT=\"{endpoint}\"\nRACKTOP_HISTORY_CLIENT=\"{client}\"\nRACKTOP_HISTORY_ACTION=\"{action}\"\n{}", REMOTE_LIFECYCLE_SCRIPT.replace("\r\n", "\n").replace("# RACKTOP_LEGACY_SNAPSHOT", &REMOTE_LEGACY_SCRIPT.replace("\r\n", "\n")))
 }
 
 fn endpoint_state_component(host: &str, port: u16) -> String {
@@ -139,6 +173,9 @@ fi
 }
 
 pub async fn configure(server: &Server, password: Option<&str>, client_id: &str) -> Result<(), String> {
+    if client_id.is_empty() {
+        return Err("本机远端历史标识损坏；已保留旧关联，远端历史操作暂不可用".into());
+    }
     if server.remote_history_enabled {
         install(server, password, client_id).await
     } else {
@@ -152,6 +189,9 @@ pub async fn remove(
     managed_public_key: Option<&str>,
     client_id: &str,
 ) -> Result<(), String> {
+    if client_id.is_empty() {
+        return Err("本机远端历史标识损坏；已保留旧关联，远端清理暂不可用".into());
+    }
     let state = client_state_directory(server, client_id);
     let script = format!("{}\n{}", lifecycle_script(&state, "remove"), build_remove_script(&state, managed_public_key)?);
     let output =
@@ -214,12 +254,10 @@ pub async fn fetch(
         return Ok(Vec::new());
     }
     let since = since_timestamp.max(0);
-    let state_dir = remote_state_directory(server);
-    let script = format!(
-        "history=\"{state_dir}/.history-v1.tsv\"; if [ -r \"$history\" ]; then awk -F '|' -v since={since} '($1 == \"v1\" || $1 == \"v2\" || $1 == \"v3\") && $2 >= since' \"$history\"; fi"
-    );
+    let script = compatibility_read_script(server, since, false);
     let output = run_remote_command(server, password, &script, Duration::from_secs(20)).await?;
-    parse_history(&output)
+    let mut seen = std::collections::HashSet::new();
+    Ok(parse_history(&output)?.into_iter().filter(|point| seen.insert(point.timestamp)).collect())
 }
 
 pub async fn fetch_usage(
@@ -231,15 +269,54 @@ pub async fn fetch_usage(
         return Ok(Vec::new());
     }
     let since = since_timestamp.max(0);
-    let state_dir = remote_state_directory(server);
-    let endpoint = endpoint_state_component(&server.host, server.port);
-    let script = format!("mkdir -p \"$HOME/.racktop/remote-history-locks\"; RACKTOP_HISTORY_LOCK=\"$HOME/.racktop/remote-history-locks/{endpoint}.lock\"; RACKTOP_STATE_DIR=\"{state_dir}\"; set -- {since}\n{}", REMOTE_USAGE_SCRIPT.replace("\r\n", "\n"));
+    let script = compatibility_read_script(server, since, true);
     let output = run_remote_command(server, password, &script, Duration::from_secs(20)).await?;
-    Ok(output
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| parse_usage_line(line).ok())
-        .collect())
+    Ok(merge_compatibility_usage(&output))
+}
+
+fn compatibility_read_script(server: &Server, since: i64, usage: bool) -> String {
+    let endpoint = endpoint_state_component(&server.host, server.port);
+    let data_state = remote_state_directory(server);
+    let reader = if usage {
+        format!("( unset RACKTOP_HISTORY_LOCK; RACKTOP_STATE_DIR=\"$read_state\"; set -- {since}\n{}\n)", REMOTE_USAGE_SCRIPT.replace("\r\n", "\n"))
+    } else {
+        format!("history=\"$read_state/.history-v1.tsv\"; if [ -r \"$history\" ]; then awk -F '|' -v since={since} '($1 == \"v1\" || $1 == \"v2\" || $1 == \"v3\") && $2 >= since' \"$history\"; fi")
+    };
+    format!(r#"set -eu
+umask 077
+endpoint="{endpoint}"
+base="$HOME/.racktop"
+legacy="$base/remote-history/{endpoint}"
+data_state="{data_state}"
+mkdir -p "$HOME/.racktop-managed/remote-history-locks"
+exec 6>"$HOME/.racktop-managed/remote-history-locks/{endpoint}.lock"
+flock -w 10 6 || exit 41
+{snapshot}
+for read_state in "$data_state" "$data_state/legacy-endpoint" "$data_state/legacy-store" "$data_state/legacy-root"; do
+  [ -d "$read_state" ] || continue
+  {reader}
+done
+"#, snapshot = REMOTE_LEGACY_SCRIPT.replace("\r\n", "\n"))
+}
+
+fn merge_compatibility_usage(output: &str) -> Vec<UsagePoint> {
+    // Merge disjoint minutes from all stores, preferring the current store on
+    // duplicate keys. Never add an hourly rollup over minute samples. Preserve
+    // both raw representations in the archive rather than guessing a split.
+    let mut seen = std::collections::HashSet::new();
+    let mut minute_hours = std::collections::HashSet::new();
+    let mut points = Vec::new();
+    for line in output.lines() {
+        if let Ok(point) = parse_usage_line(line) {
+            let hour = point.timestamp - point.timestamp.rem_euclid(3600);
+            if point.bucket_seconds == 60 { minute_hours.insert(hour); }
+            if seen.insert((point.timestamp, point.bucket_seconds, point.gpu_uuid.clone(), point.username.clone())) {
+                points.push(point);
+            }
+        }
+    }
+    points.into_iter().filter(|point| point.bucket_seconds == 60
+        || !minute_hours.contains(&(point.timestamp - point.timestamp.rem_euclid(3600)))).collect()
 }
 
 async fn install(server: &Server, password: Option<&str>, client_id: &str) -> Result<(), String> {
@@ -265,7 +342,7 @@ exec 7>"$state/.install.lock"
 flock -w 10 7 || exit 1
 export RACKTOP_STATE_DIR="$data_state"
 export RACKTOP_CLIENT_STATE_DIR="$state"
-export RACKTOP_HISTORY_LOCK="$base/remote-history-locks/$endpoint.lock"
+export RACKTOP_HISTORY_LOCK="$HOME/.racktop-managed/remote-history-locks/$endpoint.lock"
 printf '%s' '{encoded}' | base64 -d > "$state/.collector.sh.$$"
 printf '%s' '{daemon_encoded}' | base64 -d > "$state/.daemon.sh.$$"
 mv "$state/.collector.sh.$$" "$state/.collector.sh"
@@ -523,6 +600,52 @@ fn parse_usage_line(line: &str) -> Result<UsagePoint, String> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn compatibility_reader_keeps_root_and_recreated_endpoint_history_after_old_delete() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        // Reader behavior only; lifecycle locking is exercised separately by
+        // remoteHistoryLifecycle.test.js with real kernel locks.
+        fs::write(bin.join("flock"), "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(bin.join("flock"), fs::Permissions::from_mode(0o700)).unwrap();
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "test", "name": "test", "host": "gpu.example", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 2,
+            "historyRetentionDays": 90, "authMethod": "sshAgent", "status": "offline"
+        })).unwrap();
+        let endpoint = endpoint_state_component(&server.host, server.port);
+        let legacy = root.join(format!(".racktop/remote-history/{endpoint}"));
+        let managed = root.join(remote_state_directory(&server).strip_prefix("$HOME/").unwrap());
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&managed).unwrap();
+        for (path, timestamp) in [(&managed, 7200), (&legacy, 3600), (&root.join(".racktop"), 0)] {
+            fs::write(path.join(".history-v1.tsv"), format!("v1|{timestamp}|10|20|0|GPU-a,25,40\n")).unwrap();
+            fs::write(path.join(".usage-v1.tsv"), format!("v1|{timestamp}|GPU-a|alice|60|100|60\n")).unwrap();
+        }
+        let read = |usage| {
+            let output = std::process::Command::new("sh").args(["-c", &compatibility_read_script(&server, 0, usage)])
+                .env("HOME", root).env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()))
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap()
+        };
+        assert_eq!(parse_history(&read(false)).unwrap().len(), 3);
+        assert_eq!(merge_compatibility_usage(&read(true)).len(), 3);
+        // Old reinstallation can replace a file rather than append. Preserve
+        // already archived buckets as well as the newly created stream.
+        fs::write(root.join(".racktop/.history-v1.tsv"), "v1|10800|10|20|0|GPU-a,25,40\n").unwrap();
+        fs::write(root.join(".racktop/.usage-v1.tsv"), "v1|10800|GPU-a|alice|60|100|60\n").unwrap();
+        assert_eq!(parse_history(&read(false)).unwrap().len(), 4);
+        assert_eq!(merge_compatibility_usage(&read(true)).len(), 4);
+        fs::remove_dir_all(root.join(".racktop")).unwrap();
+        assert_eq!(parse_history(&read(false)).unwrap().len(), 4);
+        assert_eq!(merge_compatibility_usage(&read(true)).len(), 4);
+    }
+
     // Execute the shipped collector, including its history/usage pipeline, in an
     // isolated home with synthetic procfs and accelerator commands. No SSH/GPU.
     #[cfg(unix)]
@@ -673,7 +796,7 @@ mod tests {
         assert_ne!(first, different_port);
         assert_ne!(first, different_host);
         assert_ne!(first, different_client);
-        assert!(first.starts_with("$HOME/.racktop/remote-history-store/"));
+        assert!(first.starts_with("$HOME/.racktop-managed/remote-history-store/"));
     }
 
     #[test]
@@ -693,6 +816,35 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(fs::metadata(first_app.join(CLIENT_ID_FILENAME)).unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn corrupted_client_identity_does_not_block_startup_or_replace_old_association() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(CLIENT_ID_FILENAME);
+        fs::write(&path, "partial-id").unwrap();
+        let first = ClientIdentity::load_or_create(directory.path()).unwrap();
+        let second = ClientIdentity::load_or_create(directory.path()).unwrap();
+        assert_eq!(first.as_str(), "");
+        assert!(first.require().is_err());
+        assert_eq!(second.as_str(), "");
+        assert_eq!(fs::read_to_string(path).unwrap(), "partial-id");
+
+        fs::write(directory.path().join(CLIENT_ID_FILENAME), [0xff, 0xfe]).unwrap();
+        assert!(ClientIdentity::load_or_create(directory.path()).unwrap().require().is_err());
+    }
+
+    #[test]
+    fn concurrent_client_identity_creation_publishes_one_complete_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let identities = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8).map(|_| scope.spawn(|| {
+                ClientIdentity::load_or_create(directory.path()).unwrap().as_str().to_owned()
+            })).collect();
+            handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+        });
+        assert!(Uuid::parse_str(&identities[0]).is_ok());
+        assert!(identities.iter().all(|id| id == &identities[0]));
     }
 
     #[cfg(unix)]
@@ -1013,5 +1165,16 @@ mod tests {
         let hourly = parse_usage_line("v2|1722700800|GPU-a|alice|1800|7372800.00|3600").unwrap();
         assert_eq!(hourly.bucket_seconds, 3_600);
         assert_eq!(hourly.active_seconds, 1_800);
+    }
+    #[test]
+    fn compatibility_usage_does_not_mix_overlapping_old_and_new_hours() {
+        let output = "__RACKTOP_SOURCE__\nv1|3600|GPU-a|alice|60|100|60\n__RACKTOP_SOURCE__\nv2|3600|GPU-a|alice|3600|900|3600\nv2|0|GPU-a|alice|3600|900|3600\n";
+        let points = merge_compatibility_usage(output);
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].bucket_seconds, 60);
+        assert_eq!(points[1].timestamp, 0);
+        assert_eq!(points.iter().map(|point| point.active_seconds).sum::<i64>(), 3660);
+        let disjoint = "v1|3600|GPU-a|alice|60|100|60\n__RACKTOP_SOURCE__\nv1|3600|GPU-a|alice|60|100|60\nv1|3660|GPU-a|alice|60|100|60\n";
+        assert_eq!(merge_compatibility_usage(disjoint).len(), 2);
     }
 }

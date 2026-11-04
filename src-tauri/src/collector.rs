@@ -188,7 +188,7 @@ pub async fn collect_with_password_detailed(server: &Server, password: Option<&s
         "{history_state}RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{remote_script}",
         if include_processes { 1 } else { 0 },
         if include_disks { 1 } else { 0 },
-        if server.remote_history_enabled { 1 } else { 0 },
+        if server.remote_history_enabled && !client_id.is_empty() { 1 } else { 0 },
         history_state = remote_history_state_assignment(server, client_id),
         remote_script = REMOTE_SCRIPT.replace("\r\n", "\n"),
     )).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -206,7 +206,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn remote_history_state_assignment(server: &Server, client_id: &str) -> String {
-    if server.remote_history_enabled {
+    if server.remote_history_enabled && !client_id.is_empty() {
         format!(
             "RACKTOP_STATE_DIR=\"{}\" RACKTOP_CLIENT_STATE_DIR=\"{}\" ",
             crate::remote_history::remote_state_directory(server),
@@ -325,7 +325,7 @@ pub fn collection_display_command(server: &Server, include_processes: bool, incl
         "{history_state}RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{remote_script}",
         if include_processes { 1 } else { 0 },
         if include_disks { 1 } else { 0 },
-        if server.remote_history_enabled { 1 } else { 0 },
+        if server.remote_history_enabled && !client_id.is_empty() { 1 } else { 0 },
         history_state = remote_history_state_assignment(server, client_id),
         remote_script = REMOTE_SCRIPT.replace("\r\n", "\n"),
     );

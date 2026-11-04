@@ -27,6 +27,12 @@ pub struct RemoteCleanupTask {
     pub managed_public_key: Option<String>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CredentialReclaimTask {
+    identity_files: Vec<String>,
+    hops: Vec<SshHop>,
+}
+
 pub struct Database {
     connection: Mutex<Connection>,
     session_passwords: Mutex<HashMap<String, String>>,
@@ -1416,6 +1422,7 @@ impl Database {
              );",
             )
             .map_err(|error| error.to_string())?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS credential_reclaim_queue (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()));").map_err(|error| error.to_string())?;
         let cleanup_columns = {
             let mut statement = connection
                 .prepare("PRAGMA table_info(remote_cleanup_queue)")
@@ -1485,6 +1492,45 @@ impl Database {
         if !server_columns.contains("ssh_hops_json") {
             connection.execute("ALTER TABLE servers ADD COLUMN ssh_hops_json TEXT NOT NULL DEFAULT '[]'", []).map_err(|e| e.to_string())?;
         }
+        if !server_columns.contains("ssh_route_revision") {
+            connection.execute("ALTER TABLE servers ADD COLUMN ssh_route_revision INTEGER NOT NULL DEFAULT 0", []).map_err(|e| e.to_string())?;
+        }
+        if !server_columns.contains("ssh_hops_valid") {
+            connection.execute("ALTER TABLE servers ADD COLUMN ssh_hops_valid INTEGER NOT NULL DEFAULT 1", []).map_err(|e| e.to_string())?;
+        }
+        let route_guard_applied: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM storage_migrations WHERE key='legacy-route-guard-v1')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+        if !route_guard_applied {
+            // Earlier development builds had no trigger. Imports from those
+            // builds stored a concrete chain in proxy_jump, so a mismatch on
+            // first upgrade is evidence of a later legacy edit. Retain the raw
+            // metadata, but give the edited legacy route precedence.
+            let transaction = connection.transaction().map_err(|e| e.to_string())?;
+            let mut query = transaction.prepare("SELECT id,proxy_jump,ssh_hops_json FROM servers WHERE ssh_hops_json<>'[]'").map_err(|e| e.to_string())?;
+            let rows = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?))).map_err(|e| e.to_string())?;
+            let mut stale = Vec::new();
+            for row in rows {
+                let (id, proxy, json) = row.map_err(|e| e.to_string())?;
+                let hops: Vec<SshHop> = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+                if !hops.is_empty() && proxy.as_deref().map(str::trim) != crate::ssh_routes::concrete_chain(&hops).as_deref() {
+                    stale.push(id);
+                }
+            }
+            drop(query);
+            for id in stale {
+                transaction.execute("UPDATE servers SET ssh_hops_valid=0 WHERE id=?1", [id]).map_err(|e| e.to_string())?;
+            }
+            transaction.execute("INSERT INTO storage_migrations(key,applied_at) VALUES('legacy-route-guard-v1',unixepoch())", []).map_err(|e| e.to_string())?;
+            transaction.commit().map_err(|e| e.to_string())?;
+        }
+        // Old binaries update only legacy columns. Keep the saved hop metadata
+        // for credential ownership, but never let it override a later old edit.
+        connection.execute_batch("CREATE TRIGGER IF NOT EXISTS invalidate_legacy_ssh_route
+            AFTER UPDATE OF host,port,username,ssh_alias,proxy_jump,auth_method,identity_file ON servers
+            WHEN NEW.ssh_route_revision = OLD.ssh_route_revision AND
+                 (NEW.host IS NOT OLD.host OR NEW.port IS NOT OLD.port OR NEW.username IS NOT OLD.username
+                  OR NEW.ssh_alias IS NOT OLD.ssh_alias OR NEW.proxy_jump IS NOT OLD.proxy_jump
+                  OR NEW.auth_method IS NOT OLD.auth_method OR NEW.identity_file IS NOT OLD.identity_file)
+            BEGIN UPDATE servers SET ssh_hops_valid=0 WHERE id=NEW.id; END;").map_err(|e| e.to_string())?;
         if !server_columns.contains("location") {
             connection
                 .execute("ALTER TABLE servers ADD COLUMN location TEXT", [])
@@ -1642,13 +1688,15 @@ impl Database {
                 connection.execute("UPDATE disk_scans SET payload_json=?2 WHERE server_id=?1", params![state.server_id, serde_json::to_string(&state).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
             }
         }
-        Ok(Self {
+        let database = Self {
             connection: Mutex::new(connection),
             session_passwords: Mutex::new(HashMap::new()),
             credential_errors: Mutex::new(HashMap::new()),
             path: path.to_path_buf(),
             maintenance: AtomicBool::new(false),
-        })
+        };
+        database.retry_credential_reclaims();
+        Ok(database)
     }
 
     pub fn set_maintenance(&self, value: bool) { self.maintenance.store(value, Ordering::Release); }
@@ -1751,7 +1799,7 @@ impl Database {
     pub fn list_servers(&self) -> Result<Vec<Server>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection
-            .prepare("SELECT id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,remote_history_last_sync_at,auth_method,status,last_error,last_seen_at,sort_order,ssh_hops_json FROM servers ORDER BY sort_order,name COLLATE NOCASE")
+            .prepare("SELECT id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,remote_history_last_sync_at,auth_method,status,last_error,last_seen_at,sort_order,CASE WHEN ssh_hops_valid=1 THEN ssh_hops_json ELSE '[]' END FROM servers ORDER BY sort_order,name COLLATE NOCASE")
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], |row| {
@@ -1864,6 +1912,7 @@ impl Database {
     }
 
     pub fn save_server(&self, mut draft: ServerDraft) -> Result<Server, String> {
+        self.retry_credential_reclaims();
         if let Some(id) = draft.id.as_deref() {
             let old_key = self.connection.lock().map_err(|e| e.to_string())?
                 .query_row("SELECT identity_file FROM servers WHERE id=?1", [id], |row| row.get::<_, Option<String>>(0))
@@ -1871,9 +1920,9 @@ impl Database {
             let old_hops = self.connection.lock().map_err(|e| e.to_string())?
                 .query_row("SELECT ssh_hops_json FROM servers WHERE id=?1", [id], |row| row.get::<_, String>(0))
                 .optional().map_err(|e| e.to_string())?.map(|s| serde_json::from_str::<Vec<SshHop>>(&s)).transpose().map_err(|e| e.to_string())?.unwrap_or_default();
+            self.enqueue_credential_reclaim(old_key.into_iter().collect(), old_hops)?;
             let saved = self.save_server_inner(draft)?;
-            self.reclaim_hops(&old_hops)?;
-            self.reclaim_imported_key(old_key.as_deref())?;
+            self.retry_credential_reclaims();
             return Ok(saved);
         }
         if draft.auth_method == "password" && draft.password.as_deref().is_none_or(|p| p.trim().is_empty()) {
@@ -1888,6 +1937,45 @@ impl Database {
                 self.delete_server_record(&id, true)
                     .map_err(|cleanup| format!("{error}；撤销新记录失败：{cleanup}"))?;
                 Err(error)
+            }
+        }
+    }
+
+    fn enqueue_credential_reclaim(&self, identity_files: Vec<String>, hops: Vec<SshHop>) -> Result<(), String> {
+        let mut identity_files = identity_files;
+        identity_files.extend(hops.iter().filter_map(|hop| hop.identity_file.clone()));
+        identity_files.sort();
+        identity_files.dedup();
+        if identity_files.is_empty() && hops.iter().all(|hop| hop.credential_id.is_none()) { return Ok(()); }
+        let payload = serde_json::to_string(&CredentialReclaimTask { identity_files, hops }).map_err(|e| e.to_string())?;
+        let connection = self.connection.lock().map_err(|e| e.to_string())?;
+        connection.execute("INSERT INTO credential_reclaim_queue(id,payload_json) VALUES(?1,?2)", params![Uuid::new_v4().to_string(), payload]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn retry_credential_reclaims(&self) {
+        let tasks = (|| -> Result<Vec<(String, CredentialReclaimTask)>, String> {
+            let connection = self.connection.lock().map_err(|e| e.to_string())?;
+            let mut statement = connection.prepare("SELECT id,payload_json FROM credential_reclaim_queue ORDER BY created_at").map_err(|e| e.to_string())?;
+            let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|e| e.to_string())?;
+            rows.map(|row| {
+                let (id, json) = row.map_err(|e| e.to_string())?;
+                Ok((id, serde_json::from_str(&json).map_err(|e| e.to_string())?))
+            }).collect()
+        })();
+        let Ok(tasks) = tasks else { return; };
+        for (id, task) in tasks {
+            let result = (|| -> Result<(), String> {
+                for path in &task.identity_files { self.reclaim_imported_key(Some(path))?; }
+                self.reclaim_hops(&task.hops)?;
+                Ok(())
+            })();
+            if result.is_ok() {
+                if let Ok(connection) = self.connection.lock() {
+                    let _ = connection.execute("DELETE FROM credential_reclaim_queue WHERE id=?1", [id]);
+                }
+            } else {
+                eprintln!("旧私钥或跳板凭证暂未回收；配置已保存，将在下次保存或启动时重试。");
             }
         }
     }
@@ -1939,7 +2027,7 @@ impl Database {
         connection.execute(
             "INSERT INTO servers (id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,auth_method,status,sort_order,ssh_hops_json)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'unknown',COALESCE((SELECT MAX(sort_order)+1 FROM servers),0),?15)
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name,location=excluded.location,host=excluded.host,port=excluded.port,username=excluded.username,ssh_alias=excluded.ssh_alias,identity_file=excluded.identity_file,proxy_jump=excluded.proxy_jump,tags_json=excluded.tags_json,sampling_interval_seconds=excluded.sampling_interval_seconds,history_retention_days=excluded.history_retention_days,remote_history_enabled=excluded.remote_history_enabled,auth_method=excluded.auth_method,ssh_hops_json=excluded.ssh_hops_json",
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name,location=excluded.location,host=excluded.host,port=excluded.port,username=excluded.username,ssh_alias=excluded.ssh_alias,identity_file=excluded.identity_file,proxy_jump=excluded.proxy_jump,tags_json=excluded.tags_json,sampling_interval_seconds=excluded.sampling_interval_seconds,history_retention_days=excluded.history_retention_days,remote_history_enabled=excluded.remote_history_enabled,auth_method=excluded.auth_method,ssh_hops_json=excluded.ssh_hops_json,ssh_route_revision=servers.ssh_route_revision+1,ssh_hops_valid=1",
             params![id, name, blank_to_none(draft.location), draft.host.trim(), draft.port, draft.username.trim(), blank_to_none(draft.ssh_alias), blank_to_none(draft.identity_file), blank_to_none(draft.proxy_jump), tags, draft.sampling_interval_seconds.max(2), draft.history_retention_days.max(1), draft.remote_history_enabled, draft.auth_method, serde_json::to_string(&draft.ssh_hops).map_err(|e| e.to_string())?],
         ).map_err(|error| error.to_string())?;
         drop(connection);
@@ -2161,15 +2249,24 @@ impl Database {
         for hop in hops {
             self.reclaim_imported_key(hop.identity_file.as_deref())?;
             let Some(id) = hop.credential_id.as_deref().filter(|id| id.strip_prefix("racktop-hop-").is_some_and(|s| Uuid::parse_str(s).is_ok())) else { continue };
-            let mut references: Vec<SshHop> = self.list_servers()?.into_iter().flat_map(|s| s.ssh_hops).collect();
+            let mut references: Vec<SshHop> = Vec::new();
             let connection = self.connection.lock().map_err(|e| e.to_string())?;
+            let mut routes = connection.prepare("SELECT ssh_hops_json FROM servers").map_err(|e| e.to_string())?;
+            let rows = routes.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+            for row in rows {
+                references.extend(serde_json::from_str::<Vec<SshHop>>(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?);
+            }
             let mut statement = connection.prepare("SELECT server_json FROM remote_cleanup_queue").map_err(|e| e.to_string())?;
             let rows = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
             for row in rows {
                 references.extend(serde_json::from_str::<Server>(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?.ssh_hops);
             }
             if !references.iter().any(|hop| hop.credential_id.as_deref() == Some(id)) {
-                if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", id) { let _ = entry.delete_credential(); }
+                let entry = keyring::Entry::new("com.racktop.desktop", id).map_err(|_| "无法访问待回收跳板凭证".to_string())?;
+                match entry.delete_credential() {
+                    Ok(()) | Err(keyring::Error::NoEntry) => {},
+                    Err(_) => return Err("跳板凭证回收失败，将稍后重试".into()),
+                }
             }
         }
         Ok(())
@@ -2178,9 +2275,17 @@ impl Database {
     fn reclaim_imported_key(&self, candidate: Option<&str>) -> Result<(), String> {
         let Some(candidate) = candidate else { return Ok(()) };
         let expanded = crate::ssh_keys::expand_identity_path(candidate);
-        let Ok(path) = expanded.canonicalize() else { return Ok(()) };
+        let path = match expanded.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err("暂时无法访问待回收私钥，将稍后重试".into()),
+        };
         let directory = self.path.parent().unwrap_or(Path::new(".")).join("ssh-keys");
-        let Ok(directory) = directory.canonicalize() else { return Ok(()) };
+        let directory = match directory.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err("暂时无法访问私钥存储目录，将稍后重试".into()),
+        };
         // Only UUID copies created inside this application's private key store.
         if path.parent() != Some(directory.as_path())
             || path.extension().and_then(|s| s.to_str()) != Some("key")
@@ -4006,6 +4111,66 @@ mod tests {
     use crate::models::{AppSettings, GpuMetric, ProcessMetric, SystemMetric};
 
     #[test]
+    fn first_upgrade_detects_a_legacy_route_edit_from_before_guard_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pre-guard.sqlite");
+        let database = Database::open(&path).unwrap();
+        let mut initial = draft("Previous dev route", 90);
+        initial.proxy_jump = Some("test@old.example:22".into());
+        initial.ssh_hops = vec![SshHop {
+            host: "old.example".into(), port: 22, username: "test".into(),
+            auth_method: "sshAgent".into(), identity_file: None, credential_id: None,
+        }];
+        let server = database.save_server(initial).unwrap();
+        drop(database);
+        let previous = Connection::open(&path).unwrap();
+        previous.execute_batch("DROP TRIGGER invalidate_legacy_ssh_route; DELETE FROM storage_migrations WHERE key='legacy-route-guard-v1';").unwrap();
+        previous.execute("UPDATE servers SET proxy_jump='replacement.example' WHERE id=?1", [&server.id]).unwrap();
+        let upgraded = Database::open(&path).unwrap();
+        let edited = upgraded.get_server(&server.id).unwrap();
+        assert!(edited.ssh_hops.is_empty());
+        assert_eq!(edited.proxy_jump.as_deref(), Some("replacement.example"));
+        drop(upgraded);
+        assert!(Database::open(&path).unwrap().get_server(&server.id).unwrap().ssh_hops.is_empty());
+    }
+
+    #[test]
+    fn downgrade_edit_invalidates_hops_without_discarding_metadata_or_other_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("downgrade.sqlite");
+        let database = Database::open(&path).unwrap();
+        let mut initial = draft("Route", 90);
+        initial.proxy_jump = Some("old-jump.example".into());
+        initial.ssh_hops = vec![SshHop {
+            host: "old-jump.example".into(), port: 22, username: "test".into(),
+            auth_method: "sshAgent".into(), identity_file: None, credential_id: None,
+        }];
+        let server = database.save_server(initial).unwrap();
+        assert_eq!(database.get_server(&server.id).unwrap().ssh_hops.len(), 1);
+        // An old binary knows only the original columns, retaining new ones.
+        let old = Connection::open(&path).unwrap();
+        old.execute("UPDATE servers SET proxy_jump='new-jump.example' WHERE id=?1", [&server.id]).unwrap();
+        drop(database);
+        let upgraded = Database::open(&path).unwrap();
+        let edited = upgraded.get_server(&server.id).unwrap();
+        assert_eq!(edited.proxy_jump.as_deref(), Some("new-jump.example"));
+        assert!(edited.ssh_hops.is_empty());
+        let raw: String = old.query_row("SELECT ssh_hops_json FROM servers WHERE id=?1", [&server.id], |row| row.get(0)).unwrap();
+        assert!(raw.contains("old-jump.example"));
+        let mut new_edit = draft("Route after upgrade", 90);
+        new_edit.id = Some(server.id.clone());
+        new_edit.proxy_jump = Some("new-jump.example".into());
+        new_edit.ssh_hops = vec![SshHop {
+            host: "new-jump.example".into(), port: 22, username: "test".into(),
+            auth_method: "sshAgent".into(), identity_file: None, credential_id: None,
+        }];
+        upgraded.save_server(new_edit).unwrap();
+        assert_eq!(upgraded.get_server(&server.id).unwrap().ssh_hops[0].host, "new-jump.example");
+        let integrity: String = old.query_row("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
+        assert_eq!(integrity, "ok");
+    }
+
+    #[test]
     fn app_notification_preference_persists_across_database_reads() {
         let directory = tempfile::tempdir().unwrap();
         let database = Database::open(&directory.path().join("settings.sqlite")).unwrap();
@@ -4016,6 +4181,39 @@ mod tests {
         let restored = database.get_settings().unwrap();
 
         assert!(!restored.idle_notifications_enabled);
+    }
+
+    #[test]
+    fn server_edit_succeeds_when_key_reclaim_fails_and_retries_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("credentials.sqlite");
+        let database = Database::open(&db_path).unwrap();
+        let key_dir = directory.path().join("ssh-keys");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        let key_path = key_dir.join(format!("{}.key", Uuid::new_v4()));
+        std::fs::write(&key_path, b"old key").unwrap();
+        let mut initial = draft("Before", 30);
+        initial.identity_file = Some(key_path.to_string_lossy().into_owned());
+        initial.auth_method = "privateKey".into();
+        let saved = database.save_server(initial).unwrap();
+
+        std::fs::remove_file(&key_path).unwrap();
+        std::fs::create_dir(&key_path).unwrap();
+        let mut edit = draft("After", 30);
+        edit.id = Some(saved.id.clone());
+        let updated = database.save_server(edit).unwrap();
+        assert_eq!(updated.name, "After");
+        let queued: i64 = database.connection.lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM credential_reclaim_queue", [], |row| row.get(0)).unwrap();
+        assert_eq!(queued, 1);
+
+        std::fs::remove_dir(&key_path).unwrap();
+        drop(database);
+        let reopened = Database::open(&db_path).unwrap();
+        let queued: i64 = reopened.connection.lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM credential_reclaim_queue", [], |row| row.get(0)).unwrap();
+        assert_eq!(queued, 0);
+        assert_eq!(reopened.get_server(&saved.id).unwrap().name, "After");
     }
 
     fn draft(name: &str, retention_days: u32) -> ServerDraft {
