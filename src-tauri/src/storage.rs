@@ -179,27 +179,42 @@ fn prepare_usage_reconciliation(connection: &Connection) -> Result<(), String> {
 // Historical remote aggregates cannot be split back into individual minutes:
 // retain them as a coverage floor rather than guessing or adding them twice.
 fn capture_existing_usage(connection: &Connection, server_id: &str, hour: i64) -> Result<(), String> {
-    let changed: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM usage_buckets u LEFT JOIN usage_reconciled r
-         USING(server_id,timestamp,gpu_uuid,username)
-         WHERE u.server_id=?1 AND u.timestamp=?2 AND (r.server_id IS NULL
-           OR u.active_seconds<>r.active_seconds OR u.memory_mb_seconds<>r.memory_mb_seconds
-           OR u.coverage_seconds<>r.coverage_seconds))",
-        params![server_id,hour], |row| row.get(0),
-    ).map_err(|error| error.to_string())?;
-    if !changed { return Ok(()); }
-    // Rebase the whole hour together after an old binary writes it. Its public
-    // totals already include previous contributions; never add those again.
-    connection.execute("DELETE FROM usage_sources WHERE server_id=?1 AND hour=?2", params![server_id,hour]).map_err(|error| error.to_string())?;
-    connection.execute(
-        "INSERT INTO usage_sources(server_id,timestamp,hour,gpu_uuid,username,kind,active_seconds,memory_mb_seconds,coverage_seconds)
-         SELECT u.server_id,u.timestamp,u.timestamp,u.gpu_uuid,u.username,
-           CASE WHEN EXISTS(SELECT 1 FROM remote_usage_hours WHERE server_id=u.server_id AND timestamp=u.timestamp)
-             THEN 3 ELSE 4 END,
-           u.active_seconds,u.memory_mb_seconds,u.coverage_seconds
-         FROM usage_buckets u WHERE u.server_id=?1 AND u.timestamp=?2",
-        params![server_id,hour],
-    ).map_err(|error| error.to_string())?;
+    let changed = {
+        let mut statement = connection.prepare(
+            "SELECT u.gpu_uuid,u.username,u.active_seconds,u.memory_mb_seconds,u.coverage_seconds,
+               EXISTS(SELECT 1 FROM usage_sources s WHERE s.server_id=u.server_id AND s.hour=u.timestamp
+                 AND s.gpu_uuid=u.gpu_uuid AND s.username=u.username),
+               EXISTS(SELECT 1 FROM usage_sources s WHERE s.server_id=u.server_id AND s.hour=u.timestamp
+                 AND s.gpu_uuid=u.gpu_uuid AND s.username=u.username AND s.kind IN (1,3)),
+               EXISTS(SELECT 1 FROM remote_usage_hours h WHERE h.server_id=u.server_id AND h.timestamp=u.timestamp)
+             FROM usage_buckets u LEFT JOIN usage_reconciled r
+               USING(server_id,timestamp,gpu_uuid,username)
+             WHERE u.server_id=?1 AND u.timestamp=?2 AND (r.server_id IS NULL
+               OR u.active_seconds<>r.active_seconds OR u.memory_mb_seconds<>r.memory_mb_seconds
+               OR u.coverage_seconds<>r.coverage_seconds)",
+        ).map_err(|error| error.to_string())?;
+        statement.query_map(params![server_id,hour], |row| Ok((
+            row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,
+            row.get::<_,f64>(3)?,row.get::<_,i64>(4)?,row.get::<_,bool>(5)?,
+            row.get::<_,bool>(6)?,row.get::<_,bool>(7)?,
+        ))).map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>,_>>().map_err(|error| error.to_string())?
+    };
+    // Legacy writes have no provenance, but the public aggregate still tells us
+    // exactly which GPU/user changed. Rebase only that series and retain every
+    // untouched minute/hour source in the same hour.
+    for (gpu,user,active,memory,coverage,had_sources,had_hourly_source,has_legacy_hour_claim) in changed {
+        let kind = if had_hourly_source || (!had_sources && has_legacy_hour_claim) { 3 } else { 4 };
+        connection.execute(
+            "DELETE FROM usage_sources WHERE server_id=?1 AND hour=?2 AND gpu_uuid=?3 AND username=?4",
+            params![server_id,hour,gpu,user],
+        ).map_err(|error| error.to_string())?;
+        connection.execute(
+            "INSERT INTO usage_sources(server_id,timestamp,hour,gpu_uuid,username,kind,active_seconds,memory_mb_seconds,coverage_seconds)
+             VALUES(?1,?2,?2,?3,?4,?5,?6,?7,?8)",
+            params![server_id,hour,gpu,user,kind,active,memory,coverage],
+        ).map_err(|error| error.to_string())?;
+    }
     connection.execute("INSERT OR IGNORE INTO usage_legacy_minutes SELECT server_id,timestamp FROM remote_usage_minutes WHERE server_id=?1 AND timestamp>=?2 AND timestamp<?2+3600", params![server_id,hour]).map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -2844,7 +2859,7 @@ impl Database {
                 )
                 .map_err(|error| error.to_string())?;
             transaction.execute(
-                "DELETE FROM usage_sources WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid=?3 AND username=?4",
+                "DELETE FROM usage_sources WHERE server_id=?1 AND hour=?2 AND gpu_uuid=?3 AND username=?4",
                 params![server_id,timestamp,gpu_uuid,username],
             ).map_err(|error| error.to_string())?;
             transaction.execute(
@@ -4341,6 +4356,85 @@ mod tests {
             [&other_server.id], |row| row.get(0),
         ).unwrap();
         assert_eq!(upgraded_total, 3_600, "a fuller rollup must replace a partial contribution");
+    }
+
+    #[test]
+    fn legacy_rebase_is_scoped_to_the_changed_gpu_user_series() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("series-rebase.sqlite")).unwrap();
+        let server = database.save_server(draft("Series rebase", 90)).unwrap();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let hour = hour_start(now - 7_200);
+        let point = |timestamp, gpu: &str, user: &str, bucket_seconds, coverage, active| UsagePoint {
+            timestamp, bucket_seconds, gpu_uuid: gpu.into(), username: user.into(),
+            active_seconds: active, memory_mb_seconds: (active * 100) as f64,
+            coverage_seconds: coverage,
+        };
+        let initial = [
+            point(hour + 60, "GPU-a", "alice", 60, 60, 60),
+            point(hour, "GPU-b", "bob", 3_600, 600, 600),
+        ];
+        assert_eq!(database.import_remote_usage(&server.id, &initial, now).unwrap(), 2);
+        database.connection.lock().unwrap().execute(
+            "UPDATE usage_buckets SET active_seconds=active_seconds+60,memory_mb_seconds=memory_mb_seconds+6000,coverage_seconds=coverage_seconds+60 WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid='GPU-b' AND username='bob'",
+            params![server.id,hour],
+        ).unwrap();
+
+        let next_minute = point(hour + 120, "GPU-a", "alice", 60, 60, 60);
+        database.import_remote_usage(&server.id, &[next_minute], now).unwrap();
+        let connection = database.connection.lock().unwrap();
+        let alice: i64 = connection.query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid='GPU-a' AND username='alice'",
+            params![server.id,hour], |row| row.get(0),
+        ).unwrap();
+        let bob: i64 = connection.query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid='GPU-b' AND username='bob'",
+            params![server.id,hour], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(alice, 120, "untouched minute sources must keep accumulating");
+        assert_eq!(bob, 660, "the changed series must retain the legacy-written aggregate");
+        let alice_sources: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_sources WHERE server_id=?1 AND hour=?2 AND gpu_uuid='GPU-a' AND username='alice' AND kind=0",
+            params![server.id,hour], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(alice_sources, 2);
+    }
+
+    #[test]
+    fn quarantining_foreign_minute_sources_cannot_resurrect_on_same_hour_reconcile() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("quarantine-usage.sqlite")).unwrap();
+        let server = database.save_server(draft("Usage quarantine", 90)).unwrap();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let hour = hour_start(now - 7_200);
+        let point = |timestamp, gpu: &str, user: &str| UsagePoint {
+            timestamp, bucket_seconds: 60, gpu_uuid: gpu.into(), username: user.into(),
+            active_seconds: 60, memory_mb_seconds: 6_000.0, coverage_seconds: 60,
+        };
+        database.import_remote_usage(&server.id, &[point(hour + 60, "GPU-foreign", "bob")], now).unwrap();
+        let foreign = HashSet::from(["GPU-foreign".to_string()]);
+        assert_eq!(database.quarantine_foreign_remote_history(&server.id, &foreign).unwrap(), 1);
+        database.import_remote_usage(&server.id, &[point(hour + 120, "GPU-own", "alice")], now).unwrap();
+        assert_eq!(database.quarantine_foreign_remote_history(&server.id, &foreign).unwrap(), 0);
+
+        let connection = database.connection.lock().unwrap();
+        let foreign_rows: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_buckets WHERE server_id=?1 AND gpu_uuid='GPU-foreign'",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        let foreign_sources: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_sources WHERE server_id=?1 AND hour=?2 AND gpu_uuid='GPU-foreign'",
+            params![server.id,hour], |row| row.get(0),
+        ).unwrap();
+        let own_total: i64 = connection.query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid='GPU-own' AND username='alice'",
+            params![server.id,hour], |row| row.get(0),
+        ).unwrap();
+        let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
+        assert_eq!(foreign_rows, 0);
+        assert_eq!(foreign_sources, 0);
+        assert_eq!(own_total, 60);
+        assert_eq!(integrity, "ok");
     }
 
     #[test]
