@@ -3,14 +3,19 @@ set -e
 set -u
 umask 077
 
+# RACKTOP_DAEMON_LOCK
+if [ "${RACKTOP_DAEMON_LOCK_HELD:-0}" = 1 ]; then
+  ( : >&8 ) 2>/dev/null || { printf 'RackTop 本机 daemon 锁未被继承\n' >&2; exit 1; }
+else
+  racktop_acquire_daemon_lock || exit 0
+fi
+
 state_dir="${RACKTOP_CLIENT_STATE_DIR:-${RACKTOP_STATE_DIR:-$HOME/.racktop}}"
 data_state_dir="${RACKTOP_STATE_DIR:-$state_dir}"
 pid_file="$state_dir/.daemon.pid"
 collector="$state_dir/.collector.sh"
 heartbeat="$state_dir/.client-heartbeat"
 mkdir -p "$state_dir"
-exec 8>"$state_dir/.daemon.lock"
-flock -n 8 || exit 0
 
 if [ -r "$pid_file" ]; then
   existing_pid="$(cat "$pid_file" 2>/dev/null || true)"
