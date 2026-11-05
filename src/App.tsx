@@ -78,7 +78,7 @@ import { OnboardingChecklist, type OnboardingStep } from './components/Onboardin
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { ProjectForm } from './components/ProjectForm'
 import { ProjectConflictDialog, ProjectDeleteDialog, ProjectView, syncableProjectTargets } from './components/ProjectView'
-import { isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
+import { isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
 import { ResourceTrend } from './components/ResourceTrend'
 import { ServerForm } from './components/ServerForm'
 import { SshTerminal } from './components/SshTerminal'
@@ -891,6 +891,7 @@ function App() {
       const total = allEnabledServers.length
       let importedCount = 0
       const failedServerIds: string[] = []
+      const startingServerIds: string[] = []
       const recoveryRetry = enabledServers.some((server) => remoteSyncRecoveryQueued.current.has(server.id))
       let visible = recoveryRetry || (initial && shouldShowRemoteSyncImmediately(allEnabledServers, nowSeconds))
       const syncingState = (): RemoteSyncStatusState => ({ phase: 'syncing', completed, total, importedCount, failedServerIds: [] })
@@ -916,9 +917,15 @@ function App() {
               break
             } catch (reason) {
               lastError = reason
+              if (isRemoteHistoryStartingError(reason)) {
+                startingServerIds.push(server.id)
+                lastError = null
+                break
+              }
             }
           }
-          if (lastError || !result) throw lastError ?? new Error('历史同步未返回结果')
+          if (lastError) throw lastError
+          if (!result) return
           remoteSyncRecoveryQueued.current.delete(server.id)
           importedCount += result.importedCount
           if (!cancelled && result.importedCount > 0) notifyHistoryImported(server.id)
@@ -940,6 +947,8 @@ function App() {
       if (cancelled) return
       if (failedServerIds.length > 0) {
         setRemoteSyncStatus({ phase: 'error', completed, total, importedCount, failedServerIds })
+      } else if (startingServerIds.length > 0) {
+        setRemoteSyncStatus({ phase: 'starting', completed, total, importedCount, failedServerIds: [], startingServerIds })
       } else if (initial && visible) {
         setRemoteSyncStatus({ phase: 'success', completed, total, importedCount, failedServerIds: [] })
         successTimer = window.setTimeout(() => setRemoteSyncStatus(null), REMOTE_SYNC_SUCCESS_DURATION_MS)
@@ -1341,15 +1350,23 @@ function App() {
       let sync: RemoteHistorySyncResult | null = null
       if (saved.remoteHistoryEnabled) {
         let configurationError: unknown = null
+        let configurationStarting = false
         for (const delay of [0, 900, 1800]) {
           if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay))
           try {
             await api.configureRemoteHistory(saved.id)
             configurationError = null
             break
-          } catch (reason) { configurationError = reason }
+          } catch (reason) {
+            configurationError = reason
+            if (isRemoteHistoryStartingError(reason)) {
+              configurationStarting = true
+              break
+            }
+          }
         }
-        if (configurationError) setToast(`服务器已保存；远端历史将在连接稳定后重试：${String(configurationError)}`)
+        if (configurationStarting) setToast('服务器已保存；远端 daemon 正在启动，将在 5 分钟后重试')
+        else if (configurationError) setToast(`服务器已保存；远端历史将在连接稳定后重试：${String(configurationError)}`)
         else {
           try { sync = await api.syncRemoteHistory(saved.id) }
           catch (reason) { setToast(`服务器已保存，远端历史首次同步失败：${String(reason)}`) }

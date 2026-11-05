@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_STALE_SECONDS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './RemoteSyncStatus'
+import { isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_STALE_SECONDS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './RemoteSyncStatus'
 
 const baseStatus: RemoteSyncStatusState = { phase: 'syncing', completed: 2, total: 4, importedCount: 0, failedServerIds: [] }
 
@@ -20,6 +20,17 @@ describe('RemoteSyncStatus', () => {
     const failure = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'error', failedServerIds: ['a', 'b'] }} onOpenFailure={() => {}} />)
     expect(failure).toContain('<button')
     expect(failure).toContain('2 台历史同步失败 · 5 分钟后重试')
+    const starting = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'starting', startingServerIds: ['a'] }} onOpenFailure={() => {}} />)
+    expect(starting).toContain('远端 daemon 启动中 · 1 台，5 分钟后重试')
+  })
+
+  it('recognizes startup-in-progress and allows one retry after the server recovers', () => {
+    const startingError = '远端历史 daemon 正在启动，请稍后重试'
+    expect(isRemoteHistoryStartingError(startingError)).toBe(true)
+    expect(isRemoteHistoryStartingError('Permission denied')).toBe(false)
+    const startingStatus: RemoteSyncStatusState = { ...baseStatus, phase: 'starting', startingServerIds: ['server-a'], failedServerIds: [] }
+    expect(shouldRetryRemoteSyncAfterRecovery(startingStatus, 'server-a', false)).toBe(true)
+    expect(shouldRetryRemoteSyncAfterRecovery(startingStatus, 'server-a', true)).toBe(false)
   })
 
   it('retries a failed remote sync once when that server recovers', () => {

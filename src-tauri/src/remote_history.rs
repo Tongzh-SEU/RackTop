@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 const REMOTE_COLLECTOR_SCRIPT: &str = concat!(include_str!("../assets/ascend-collector.sh"), include_str!("../assets/remote-history-collector.sh"));
 const REMOTE_DAEMON_SCRIPT: &str = include_str!("../assets/remote-history-daemon.sh");
+const REMOTE_DAEMON_LOCK_SCRIPT: &str = include_str!("../assets/remote-history-daemon-lock.sh");
 const REMOTE_USAGE_SCRIPT: &str = include_str!("../assets/remote-history-usage.sh");
 const CLIENT_ID_FILENAME: &str = "remote-history-client-id";
 const REMOTE_LIFECYCLE_SCRIPT: &str = include_str!("../assets/remote-history-lifecycle.sh");
@@ -336,9 +337,14 @@ async fn install(server: &Server, password: Option<&str>, client_id: &str) -> Re
     // Windows checkouts may expose bundled shell assets as CRLF. Normalize before
     // sending them to Linux, where a trailing CR changes `set -e` into an invalid option.
     let collector_script = REMOTE_COLLECTOR_SCRIPT.replace("\r\n", "\n");
-    let daemon_script = REMOTE_DAEMON_SCRIPT.replace("\r\n", "\n");
     let state_dir = client_state_directory(server, client_id);
     let data_state_dir = remote_state_directory(server);
+    let (state_data_path, client_component) = state_dir.rsplit_once("/instances/").expect("generated client state path");
+    let endpoint = state_data_path.rsplit('/').next().expect("generated endpoint component");
+    let daemon_lock_script = REMOTE_DAEMON_LOCK_SCRIPT.replace("\r\n", "\n");
+    let daemon_script = REMOTE_DAEMON_SCRIPT
+        .replace("# RACKTOP_DAEMON_LOCK", &daemon_lock_script)
+        .replace("\r\n", "\n");
     let lifecycle = lifecycle_script(&state_dir, "register");
     let encoded = STANDARD.encode(collector_script);
     let daemon_encoded = STANDARD.encode(daemon_script);
@@ -347,12 +353,31 @@ async fn install(server: &Server, password: Option<&str>, client_id: &str) -> Re
 set -u
 state="{state_dir}"
 data_state="{data_state_dir}"
+export RACKTOP_HISTORY_ENDPOINT="{endpoint}"
+export RACKTOP_HISTORY_CLIENT="{client_component}"
 command -v flock >/dev/null 2>&1 || {{ printf '远端历史需要 util-linux 的 flock 命令' >&2; exit 1; }}
 command -v timeout >/dev/null 2>&1 || {{ printf '远端历史需要 timeout 命令' >&2; exit 1; }}
+{daemon_lock_script}
+unset RACKTOP_DAEMON_LOCK_DIR
+if racktop_acquire_daemon_lock; then
+  :
+else
+  lock_status=$?
+  if [ "$lock_status" -eq 1 ]; then
+    racktop_report_busy_daemon_status "$state/.daemon.sh" "$data_state/.daemon.sh" "$HOME/.racktop/remote-history/$endpoint/.daemon.sh"
+  else
+    printf '__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__\n'
+  fi
+  exit 0
+fi
+# Older releases used only PID and flock files on $HOME. Avoid adding another
+# daemon when one is still alive or stuck before it could update either file.
+if racktop_daemon_exists "$state/.daemon.sh" "$data_state/.daemon.sh" "$HOME/.racktop/remote-history/$endpoint/.daemon.sh"; then
+  printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
+  exit 0
+fi
 {lifecycle}
 chmod 700 "$state"
-exec 7>"$state/.install.lock"
-flock -w 10 7 || exit 1
 export RACKTOP_STATE_DIR="$data_state"
 export RACKTOP_CLIENT_STATE_DIR="$state"
 export RACKTOP_HISTORY_LOCK="$HOME/.racktop-managed/remote-history-locks/$endpoint.lock"
@@ -363,41 +388,33 @@ mv "$state/.daemon.sh.$$" "$state/.daemon.sh"
 chmod 700 "$state/.collector.sh" "$state/.daemon.sh"
 touch "$state/.client-heartbeat"
 touch "$data_state/.client-heartbeat"
-running=0
-if [ -r "$state/.daemon.pid" ]; then
-  pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o args= 2>/dev/null | grep -F "sh $state/.daemon.sh" >/dev/null 2>&1; then running=1; fi
+export RACKTOP_DAEMON_LOCK_HELD=1
+: > "$state/.daemon.log"
+if command -v setsid >/dev/null 2>&1; then
+  nohup setsid sh "$state/.daemon.sh" 6>&- 7>&- </dev/null >"$state/.daemon.log" 2>&1 &
+else
+  nohup sh "$state/.daemon.sh" 6>&- 7>&- </dev/null >"$state/.daemon.log" 2>&1 &
 fi
-if [ "$running" -ne 1 ]; then
-  rm -f "$state/.daemon.pid"
-  : > "$state/.daemon.log"
-  if command -v setsid >/dev/null 2>&1; then
-    nohup setsid sh "$state/.daemon.sh" 6>&- 7>&- </dev/null >"$state/.daemon.log" 2>&1 &
-  else
-    nohup sh "$state/.daemon.sh" 6>&- 7>&- </dev/null >"$state/.daemon.log" 2>&1 &
-  fi
-  flock -u 6
-  ready=0
-  for attempt in 1 2 3; do
-    sleep 1
-    pid="$(cat "$state/.daemon.pid" 2>/dev/null || true)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then ready=1; break; fi
-  done
-  if [ "$ready" -ne 1 ]; then
-    printf '远端历史常驻进程启动失败' >&2
-    if [ -s "$state/.daemon.log" ]; then printf '：' >&2; tail -n 8 "$state/.daemon.log" >&2; fi
-    exit 43
-  fi
+flock -u 6
+ready=0
+for attempt in 1 2 3; do
+  sleep 1
+  if racktop_daemon_exists "$state/.daemon.sh" "" ""; then ready=1; break; fi
+done
+if [ "$ready" -ne 1 ]; then
+  printf '远端历史常驻进程启动失败；未检测到存活的 daemon' >&2
+  exit 43
 fi
 printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
 "#,
     );
     let output = run_remote_command(server, password, &script, Duration::from_secs(25)).await?;
-    if output
-        .lines()
-        .any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_READY__")
-    {
+    if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_READY__") {
         Ok(())
+    } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_STARTING__") {
+        Err("远端历史 daemon 正在启动，请稍后重试".into())
+    } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__") {
+        Err("远端系统没有可用的本地临时文件系统锁，远端历史 daemon 未启动".into())
     } else {
         Err("远端历史任务安装后未返回确认标记".into())
     }
@@ -954,7 +971,11 @@ mod tests {
         std::fs::write(root.join("telemetry.csv"), "GPU-daemon, 56, 145.7, 42\n").unwrap();
         let collector = REMOTE_COLLECTOR_SCRIPT.replace("/proc/", &format!("{}/", proc.display()));
         std::fs::write(state.join(".collector.sh"), collector).unwrap();
-        std::fs::write(state.join(".daemon.sh"), REMOTE_DAEMON_SCRIPT).unwrap();
+        let daemon_lock_script = REMOTE_DAEMON_LOCK_SCRIPT.replace("\r\n", "\n");
+        let daemon_script = REMOTE_DAEMON_SCRIPT.replace("# RACKTOP_DAEMON_LOCK", &daemon_lock_script);
+        let lock_dir = root.join(".racktop-locks");
+        std::fs::create_dir(&lock_dir).unwrap();
+        std::fs::write(state.join(".daemon.sh"), daemon_script).unwrap();
         std::fs::write(state.join(".client-heartbeat"), "").unwrap();
         let stale_heartbeat = std::process::Command::new("touch")
             .args(["-t", "200001010000"])
@@ -978,6 +999,9 @@ mod tests {
             .arg(state.join(".daemon.sh"))
             .env("HOME", root)
             .env("RACKTOP_STATE_DIR", &state)
+            .env("RACKTOP_HISTORY_ENDPOINT", "endpoint-a")
+            .env("RACKTOP_HISTORY_CLIENT", "aa")
+            .env("RACKTOP_DAEMON_LOCK_DIR", &lock_dir)
             .env("RACKTOP_COLLECTOR_BOUNDED", "1")
             .env("RACKTOP_TEST_GPUS", root.join("gpus.csv"))
             .env("RACKTOP_TEST_TELEMETRY", root.join("telemetry.csv"))
@@ -1054,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn collector_keeps_thirty_days_and_avoids_sensitive_process_data() {
+    fn collector_keeps_thirty_days_and_daemon_lock_is_independent_of_home_storage() {
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("2592000"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("value=(total > 0 ?"));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("umask 077"));
@@ -1064,8 +1088,18 @@ mod tests {
         assert!(REMOTE_DAEMON_SCRIPT.contains(".client-heartbeat"));
         assert!(REMOTE_DAEMON_SCRIPT.contains("-gt 90"));
         assert!(REMOTE_DAEMON_SCRIPT.contains("sleep 60"));
-        let daemon_script = REMOTE_DAEMON_SCRIPT.replace("\r\n", "\n");
+        assert!(REMOTE_DAEMON_SCRIPT.contains("# RACKTOP_DAEMON_LOCK"));
+        assert!(REMOTE_DAEMON_LOCK_SCRIPT.contains("/run/lock"));
+        assert!(REMOTE_DAEMON_LOCK_SCRIPT.contains("stat -f -c %T"));
+        assert!(REMOTE_DAEMON_LOCK_SCRIPT.contains("flock -n 8"));
+        assert!(REMOTE_DAEMON_LOCK_SCRIPT.contains("racktop_daemon_exists"));
+        assert!(REMOTE_DAEMON_LOCK_SCRIPT.contains("racktop_report_busy_daemon_status"));
+        assert!(REMOTE_DAEMON_LOCK_SCRIPT.contains("__RACKTOP_REMOTE_HISTORY_STARTING__"));
+        let daemon_script = REMOTE_DAEMON_SCRIPT
+            .replace("# RACKTOP_DAEMON_LOCK", REMOTE_DAEMON_LOCK_SCRIPT)
+            .replace("\r\n", "\n");
         assert!(daemon_script.contains("set -e\nset -u"));
+        assert!(daemon_script.find("racktop_acquire_daemon_lock").unwrap() < daemon_script.find("mkdir -p \"$state_dir\"").unwrap());
         assert!(REMOTE_DAEMON_SCRIPT.contains("sh \"$collector\""));
         assert!(REMOTE_COLLECTOR_SCRIPT.contains("#!/bin/sh"));
         assert!(
@@ -1083,12 +1117,65 @@ mod tests {
     }
 
     #[test]
-    fn remote_daemon_install_keeps_actionable_startup_diagnostics() {
+    fn remote_daemon_install_locks_locally_before_shared_home_access() {
         let source = include_str!("remote_history.rs");
         assert!(source.contains("nohup setsid sh \"$state/.daemon.sh\""));
         assert!(source.contains("replace(\"\\r\\n\", \"\\n\")"));
         assert!(source.contains("$state/.daemon.log"));
-        assert!(source.contains("tail -n 8 \"$state/.daemon.log\""));
+        let install_start = source.find("async fn install(").unwrap();
+        let install_end = source[install_start..].find("#[cfg(test)]\nfn build_disable_script").unwrap() + install_start;
+        let install = &source[install_start..install_end];
+        let lock = install.find("if racktop_acquire_daemon_lock").unwrap();
+        let lifecycle = install.find("{lifecycle}").unwrap();
+        assert!(lock < lifecycle);
+        assert!(install.contains("RACKTOP_DAEMON_LOCK_HELD=1"));
+        assert!(install.contains("unset RACKTOP_DAEMON_LOCK_DIR"));
+        assert!(install.contains("racktop_report_busy_daemon_status \"$state/.daemon.sh\""));
+        assert!(!install.contains("$state/.install.lock"));
+        assert!(!install.contains("pid=\"$(cat \"$state/.daemon.pid\""));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn daemon_lock_busy_reports_ready_only_after_confirming_daemon_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        for (name, body) in [
+            ("ps", "printf '%s\\n' \"${RACKTOP_TEST_PS_OUTPUT:-}\""),
+            ("sleep", "exit 0"),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let daemon = root.join(".daemon.sh");
+        let run_status = |ps_output: &str| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "{}\nracktop_report_busy_daemon_status \"$1\" \"\" \"\"",
+                    REMOTE_DAEMON_LOCK_SCRIPT
+                ))
+                .arg("sh")
+                .arg(&daemon)
+                .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()))
+                .env("RACKTOP_DAEMON_START_WAIT_SECONDS", "1")
+                .env("RACKTOP_TEST_PS_OUTPUT", ps_output)
+                .output()
+                .unwrap()
+        };
+
+        let starting = run_status("");
+        assert!(starting.status.success());
+        assert_eq!(String::from_utf8_lossy(&starting.stdout).trim(), "__RACKTOP_REMOTE_HISTORY_STARTING__");
+
+        let running = run_status(&format!("123 sh {}", daemon.display()));
+        assert!(running.status.success());
+        assert_eq!(String::from_utf8_lossy(&running.stdout).trim(), "__RACKTOP_REMOTE_HISTORY_READY__");
     }
 
     #[test]
