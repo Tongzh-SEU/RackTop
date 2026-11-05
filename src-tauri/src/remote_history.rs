@@ -364,7 +364,7 @@ if racktop_acquire_daemon_lock; then
 else
   lock_status=$?
   if [ "$lock_status" -eq 1 ]; then
-    printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
+    racktop_report_busy_daemon_status "$state/.daemon.sh" "$data_state/.daemon.sh" "$HOME/.racktop/remote-history/$endpoint/.daemon.sh"
   else
     printf '__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__\n'
   fi
@@ -411,6 +411,8 @@ printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
     let output = run_remote_command(server, password, &script, Duration::from_secs(25)).await?;
     if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_READY__") {
         Ok(())
+    } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_STARTING__") {
+        Err("远端历史 daemon 正在启动，请稍后重试".into())
     } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__") {
         Err("远端系统没有可用的本地临时文件系统锁，远端历史 daemon 未启动".into())
     } else {
@@ -1091,6 +1093,8 @@ mod tests {
         assert!(REMOTE_DAEMON_LOCK_SCRIPT.contains("stat -f -c %T"));
         assert!(REMOTE_DAEMON_LOCK_SCRIPT.contains("flock -n 8"));
         assert!(REMOTE_DAEMON_LOCK_SCRIPT.contains("racktop_daemon_exists"));
+        assert!(REMOTE_DAEMON_LOCK_SCRIPT.contains("racktop_report_busy_daemon_status"));
+        assert!(REMOTE_DAEMON_LOCK_SCRIPT.contains("__RACKTOP_REMOTE_HISTORY_STARTING__"));
         let daemon_script = REMOTE_DAEMON_SCRIPT
             .replace("# RACKTOP_DAEMON_LOCK", REMOTE_DAEMON_LOCK_SCRIPT)
             .replace("\r\n", "\n");
@@ -1126,8 +1130,52 @@ mod tests {
         assert!(lock < lifecycle);
         assert!(install.contains("RACKTOP_DAEMON_LOCK_HELD=1"));
         assert!(install.contains("unset RACKTOP_DAEMON_LOCK_DIR"));
+        assert!(install.contains("racktop_report_busy_daemon_status \"$state/.daemon.sh\""));
         assert!(!install.contains("$state/.install.lock"));
         assert!(!install.contains("pid=\"$(cat \"$state/.daemon.pid\""));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn daemon_lock_busy_reports_ready_only_after_confirming_daemon_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        for (name, body) in [
+            ("ps", "printf '%s\\n' \"${RACKTOP_TEST_PS_OUTPUT:-}\""),
+            ("sleep", "exit 0"),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let daemon = root.join(".daemon.sh");
+        let run_status = |ps_output: &str| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "{}\nracktop_report_busy_daemon_status \"$1\" \"\" \"\"",
+                    REMOTE_DAEMON_LOCK_SCRIPT
+                ))
+                .arg("sh")
+                .arg(&daemon)
+                .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()))
+                .env("RACKTOP_DAEMON_START_WAIT_SECONDS", "1")
+                .env("RACKTOP_TEST_PS_OUTPUT", ps_output)
+                .output()
+                .unwrap()
+        };
+
+        let starting = run_status("");
+        assert!(starting.status.success());
+        assert_eq!(String::from_utf8_lossy(&starting.stdout).trim(), "__RACKTOP_REMOTE_HISTORY_STARTING__");
+
+        let running = run_status(&format!("123 sh {}", daemon.display()));
+        assert!(running.status.success());
+        assert_eq!(String::from_utf8_lossy(&running.stdout).trim(), "__RACKTOP_REMOTE_HISTORY_READY__");
     }
 
     #[test]

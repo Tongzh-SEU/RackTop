@@ -6,11 +6,12 @@ export const REMOTE_SYNC_FEEDBACK_DELAY_MS = 800
 export const REMOTE_SYNC_SUCCESS_DURATION_MS = 2_000
 
 export interface RemoteSyncStatusState {
-  phase: 'syncing' | 'success' | 'error'
+  phase: 'syncing' | 'starting' | 'success' | 'error'
   completed: number
   total: number
   importedCount: number
   failedServerIds: string[]
+  startingServerIds?: string[]
 }
 
 export class RemoteSyncCoordinator {
@@ -39,12 +40,22 @@ export function shouldShowRemoteSyncImmediately(servers: Array<Pick<Server, 'rem
 }
 
 export function shouldRetryRemoteSyncAfterRecovery(status: RemoteSyncStatusState | null, serverId: string, alreadyQueued: boolean) {
-  return !alreadyQueued && status?.phase === 'error' && status.failedServerIds.includes(serverId)
+  return !alreadyQueued && Boolean(status && (
+    (status.phase === 'error' && status.failedServerIds.includes(serverId)) ||
+    (status.phase === 'starting' && status.startingServerIds?.includes(serverId))
+  ))
+}
+
+export function isRemoteHistoryStartingError(error: unknown) {
+  return String(error).includes('远端历史 daemon 正在启动')
 }
 
 export function RemoteSyncStatus({ status, onOpenFailure }: { status: RemoteSyncStatusState; onOpenFailure: () => void }) {
   if (status.phase === 'syncing') {
     return <span className="remote-sync-status remote-sync-status--syncing" role="status" aria-live="polite"><RefreshCw className="spin" size={13} />正在同步历史数据 · {status.completed}/{status.total} 台</span>
+  }
+  if (status.phase === 'starting') {
+    return <span className="remote-sync-status remote-sync-status--syncing" role="status" aria-live="polite">远端 daemon 启动中 · {status.startingServerIds?.length ?? 1} 台，5 分钟后重试</span>
   }
   if (status.phase === 'success') {
     return <span className="remote-sync-status remote-sync-status--success" role="status" aria-live="polite"><CheckCircle2 size={13} />历史已同步 · 新增 {status.importedCount.toLocaleString('zh-CN')} 条</span>

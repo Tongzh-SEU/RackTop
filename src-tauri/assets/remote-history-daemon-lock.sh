@@ -58,3 +58,22 @@ racktop_daemon_exists() {
     END { exit !found }
   '
 }
+
+racktop_wait_for_daemon() {
+  racktop_wait_attempts="$1"
+  shift
+  while [ "$racktop_wait_attempts" -gt 0 ]; do
+    if racktop_daemon_exists "$@"; then return 0; fi
+    sleep 1
+    racktop_wait_attempts=$((racktop_wait_attempts - 1))
+  done
+  racktop_daemon_exists "$@"
+}
+
+racktop_report_busy_daemon_status() {
+  if racktop_wait_for_daemon "${RACKTOP_DAEMON_START_WAIT_SECONDS:-5}" "$@"; then
+    printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
+  else
+    printf '__RACKTOP_REMOTE_HISTORY_STARTING__\n'
+  fi
+}
