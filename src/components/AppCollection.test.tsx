@@ -184,6 +184,43 @@ it('retries a remote history timeout quickly and returns to sync when reachable'
   expect(container.textContent).not.toContain('历史同步失败')
 })
 
+it('retries all 11 failed history connections automatically and clears the batch status', async () => {
+  api.isDesktop = true
+  const servers = Array.from({ length: 11 }, (_, index) => ({
+    ...server,
+    id: `server-${index + 1}`,
+    name: `server-${index + 1}`,
+    remoteHistoryEnabled: true,
+    remoteHistoryLastSyncAt: null,
+  }))
+  vi.mocked(api.listServers).mockResolvedValue(servers)
+  let collectionCalls = 0
+  vi.spyOn(api, 'collectServer').mockImplementation((serverId, includeProcesses, includeDisks) => {
+    collectionCalls += 1
+    if (collectionCalls <= servers.length) return collectSuccessfully(serverId, includeProcesses, includeDisks)
+    return new Promise(() => {})
+  })
+  let failingAttemptsRemaining = servers.length * 3
+  const configure = vi.spyOn(api, 'configureRemoteHistory').mockImplementation(async () => {
+    if (failingAttemptsRemaining > 0) {
+      failingAttemptsRemaining -= 1
+      throw new Error('连接 GPU 节点同步历史超时')
+    }
+  })
+  const sync = vi.spyOn(api, 'syncRemoteHistory').mockResolvedValue({ importedCount: 1, latestTimestamp: start / 1000 })
+
+  await render()
+  await act(async () => vi.advanceTimersByTimeAsync(3_000))
+  expect(configure).toHaveBeenCalledTimes(servers.length * 3)
+  expect(sync).not.toHaveBeenCalled()
+  expect(container.textContent).toContain('11 台历史同步失败 · 15 秒后重试')
+
+  await act(async () => vi.advanceTimersByTimeAsync(15_000))
+  expect(configure).toHaveBeenCalledTimes(servers.length * 4)
+  expect(sync).toHaveBeenCalledTimes(servers.length)
+  expect(container.textContent).not.toContain('历史同步失败')
+})
+
 it('retries legacy cleanup with backoff and resumes history sync when the old daemon exits', async () => {
   api.isDesktop = true
   vi.mocked(api.listServers).mockResolvedValue([{ ...server, remoteHistoryEnabled: true, remoteHistoryLastSyncAt: null }])
