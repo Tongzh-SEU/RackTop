@@ -670,6 +670,65 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn concurrent_install_retries_run_the_unmodified_script_and_start_one_daemon() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "concurrent-test", "name": "concurrent-test", "host": "example.com", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 5,
+            "historyRetentionDays": 90, "remoteHistoryEnabled": true,
+            "authMethod": "sshAgent", "status": "unknown"
+        })).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(root.join("lock-root")).unwrap();
+
+        for (name, body) in [
+            ("flock", "#!/usr/bin/env python3\nimport fcntl, sys\nfd = int(sys.argv[-1])\nif '-u' in sys.argv: flags = fcntl.LOCK_UN\nelse: flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if '-n' in sys.argv else 0)\ntry: fcntl.flock(fd, flags)\nexcept BlockingIOError: sys.exit(1)\n"),
+            ("stat", "#!/bin/sh\ncase \"$*\" in *%T*) echo tmpfs ;; *%u*) id -u ;; *%a*) echo 700 ;; esac\n"),
+            ("timeout", "#!/bin/sh\nexit 0\n"),
+            ("ps", "#!/bin/sh\nif [ -f \"$HOME/started\" ]; then printf '123 sh %s\\n' \"$TEST_DAEMON\"; fi\n"),
+            ("nohup", "#!/bin/sh\nprintf 'started\\n' >> \"$HOME/start-count\"\ntouch \"$HOME/started\"\n"),
+        ] {
+            let file = bin.join(name);
+            fs::write(&file, body).unwrap();
+            fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        // This is the actual generated installer. A missing endpoint assignment
+        // fails under set -u before the daemon lock can be acquired.
+        let script = build_install_script(&server, "concurrent-client")
+            .replace("/run/lock/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid")
+            .replace("/dev/shm/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid");
+        let endpoint_init = script.find("\nendpoint=\"").expect("installer initializes endpoint");
+        let lock_acquire = script.find("if racktop_acquire_daemon_lock").expect("installer acquires daemon lock");
+        assert!(endpoint_init < lock_acquire, "endpoint must be initialized before lock checks that use it");
+        let daemon = client_state_directory(&server, "concurrent-client").replace("$HOME", root.to_str().unwrap());
+        let daemon = format!("{daemon}/.daemon.sh");
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+
+        let mut attempts = Vec::new();
+        for _ in 0..8 {
+            attempts.push(std::process::Command::new("sh")
+                .arg("-c").arg(&script)
+                .env("HOME", root)
+                .env("PATH", &path)
+                .env("TEST_DAEMON", &daemon)
+                .stdout(Stdio::piped()).stderr(Stdio::piped())
+                .spawn().unwrap());
+        }
+        for attempt in attempts {
+            let output = attempt.wait_with_output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("__RACKTOP_REMOTE_HISTORY_READY__"));
+        }
+        assert_eq!(fs::read_to_string(root.join("start-count")).unwrap().lines().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn compatibility_reader_keeps_root_and_recreated_endpoint_history_after_old_delete() {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
