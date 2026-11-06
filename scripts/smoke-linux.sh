@@ -18,12 +18,24 @@ trap cleanup EXIT
 
 "$APP_PATH" > "$TEST_DATA/app.log" 2>&1 &
 APP_PID=$!
-sleep 8
-if ! kill -0 "$APP_PID" 2>/dev/null; then
+DATABASE_PATH="$XDG_DATA_HOME/com.racktop.desktop/racktop.sqlite"
+for attempt in $(seq 1 30); do
+  if ! kill -0 "$APP_PID" 2>/dev/null; then
+    echo "RackTop exited before creating its database." >&2
+    cat "$TEST_DATA/app.log"
+    exit 1
+  fi
+  if [ -s "$DATABASE_PATH" ]; then
+    break
+  fi
+  sleep 1
+done
+if [ ! -s "$DATABASE_PATH" ]; then
+  echo "RackTop stayed alive but did not create its database at $DATABASE_PATH." >&2
+  find "$TEST_DATA" -maxdepth 5 -type f -print >&2
   cat "$TEST_DATA/app.log"
   exit 1
 fi
-test -s "$XDG_DATA_HOME/com.racktop.desktop/racktop.sqlite"
 for attempt in 1 2; do
   timeout 10 "$APP_PATH"
   kill -0 "$APP_PID"

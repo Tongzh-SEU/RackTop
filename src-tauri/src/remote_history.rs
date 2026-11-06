@@ -1118,7 +1118,9 @@ mod tests {
 
     #[test]
     fn remote_daemon_install_locks_locally_before_shared_home_access() {
-        let source = include_str!("remote_history.rs");
+        // Windows checkouts may use CRLF, while the source assertions below
+        // intentionally match LF-delimited Rust snippets.
+        let source = include_str!("remote_history.rs").replace("\r\n", "\n");
         assert!(source.contains("nohup setsid sh \"$state/.daemon.sh\""));
         assert!(source.contains("replace(\"\\r\\n\", \"\\n\")"));
         assert!(source.contains("$state/.daemon.log"));
