@@ -36,11 +36,13 @@ racktop_select_daemon_lock_root() {
 racktop_acquire_install_lock() {
   racktop_select_daemon_lock_root "${1:-}" || return $?
   case "${RACKTOP_HISTORY_ENDPOINT:-}" in ''|*[!a-zA-Z0-9-]*) return 2 ;; esac
-  exec 9>"$racktop_lock_root/$RACKTOP_HISTORY_ENDPOINT.install.lock" || {
+  # History migration/collectors use fd 9; keep installation serialization on
+  # its own descriptor until the replacement daemon has been confirmed.
+  exec 5>"$racktop_lock_root/$RACKTOP_HISTORY_ENDPOINT.install.lock" || {
     printf '__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__\n'
     return 2
   }
-  if ! flock -n 9; then
+  if ! flock -n 5; then
     printf '__RACKTOP_REMOTE_HISTORY_LOCK_BUSY__\n'
     return 1
   fi
