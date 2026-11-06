@@ -10,6 +10,7 @@ import { DISK_STATUS_INTERVAL_MS } from '../utils/refreshCadence'
 
 vi.mock('./SshTerminal', () => ({ SshTerminal: () => null }))
 vi.mock('./TrendChart', () => ({ TrendChart: () => null }))
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 globalThis.ResizeObserver = class implements ResizeObserver {
@@ -23,6 +24,7 @@ Object.defineProperty(window, 'matchMedia', {
 })
 
 const start = 1_800_000_000_000
+const originalDesktop = api.isDesktop
 let root: ReturnType<typeof createRoot>
 let container: HTMLDivElement
 let server: Server
@@ -53,6 +55,7 @@ afterEach(() => {
   container.remove()
   localStorage.clear()
   vi.restoreAllMocks()
+  api.isDesktop = originalDesktop
   vi.useRealTimers()
 })
 
@@ -112,4 +115,18 @@ describe('App disk collection cadence', () => {
     await act(async () => vi.advanceTimersByTimeAsync(500))
     expect(collect.mock.lastCall?.[2]).toBe(true)
   })
+})
+
+it('shows the actual history sync failure when opening the status', async () => {
+  api.isDesktop = true
+  vi.mocked(api.listServers).mockResolvedValue([{ ...server, remoteHistoryEnabled: true, remoteHistoryLastSyncAt: null }])
+  vi.spyOn(api, 'collectServer').mockImplementation(collectSuccessfully)
+  vi.spyOn(api, 'configureRemoteHistory').mockRejectedValue(new Error('旧版历史入口检查失败'))
+  await render()
+  await act(async () => vi.advanceTimersByTimeAsync(3_100))
+  const status = [...container.querySelectorAll<HTMLButtonElement>('button')]
+    .find((button) => button.textContent?.includes('1 台历史同步失败'))
+  expect(status).toBeDefined()
+  await act(async () => status?.click())
+  expect(container.textContent).toContain('历史同步失败：旧版历史入口检查失败')
 })

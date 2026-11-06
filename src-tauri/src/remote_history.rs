@@ -1,6 +1,6 @@
 use crate::{
     collector::{
-        classify_ssh_error, configured_ssh_command, configured_ssh_command_without_control,
+        configured_ssh_command, configured_ssh_command_without_control, run_ssh_script,
     },
     models::{HistoryPoint, Server, UsagePoint},
 };
@@ -10,9 +10,8 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::Path,
-    process::Stdio,
 };
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 use uuid::Uuid;
 
 const REMOTE_COLLECTOR_SCRIPT: &str = concat!(include_str!("../assets/ascend-collector.sh"), include_str!("../assets/remote-history-collector.sh"));
@@ -334,6 +333,20 @@ pub(crate) fn merge_compatibility_usage(output: &str) -> Vec<UsagePoint> {
 }
 
 async fn install(server: &Server, password: Option<&str>, client_id: &str) -> Result<(), String> {
+    let script = build_install_script(server, client_id);
+    let output = run_remote_command(server, password, &script, Duration::from_secs(25)).await?;
+    if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_READY__") {
+        Ok(())
+    } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_STARTING__") {
+        Err("远端历史 daemon 正在启动，请稍后重试".into())
+    } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__") {
+        Err("远端系统没有可用的本地临时文件系统锁，远端历史 daemon 未启动".into())
+    } else {
+        Err("远端历史任务安装后未返回确认标记".into())
+    }
+}
+
+fn build_install_script(server: &Server, client_id: &str) -> String {
     // Windows checkouts may expose bundled shell assets as CRLF. Normalize before
     // sending them to Linux, where a trailing CR changes `set -e` into an invalid option.
     let collector_script = REMOTE_COLLECTOR_SCRIPT.replace("\r\n", "\n");
@@ -348,12 +361,13 @@ async fn install(server: &Server, password: Option<&str>, client_id: &str) -> Re
     let lifecycle = lifecycle_script(&state_dir, "register");
     let encoded = STANDARD.encode(collector_script);
     let daemon_encoded = STANDARD.encode(daemon_script);
-    let script = format!(
+    format!(
         r#"set -e
 set -u
 state="{state_dir}"
 data_state="{data_state_dir}"
-export RACKTOP_HISTORY_ENDPOINT="{endpoint}"
+endpoint="{endpoint}"
+export RACKTOP_HISTORY_ENDPOINT="$endpoint"
 export RACKTOP_HISTORY_CLIENT="{client_component}"
 command -v flock >/dev/null 2>&1 || {{ printf '远端历史需要 util-linux 的 flock 命令' >&2; exit 1; }}
 command -v timeout >/dev/null 2>&1 || {{ printf '远端历史需要 timeout 命令' >&2; exit 1; }}
@@ -370,13 +384,13 @@ else
   fi
   exit 0
 fi
+{lifecycle}
 # Older releases used only PID and flock files on $HOME. Avoid adding another
 # daemon when one is still alive or stuck before it could update either file.
 if racktop_daemon_exists "$state/.daemon.sh" "$data_state/.daemon.sh" "$HOME/.racktop/remote-history/$endpoint/.daemon.sh"; then
   printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
   exit 0
 fi
-{lifecycle}
 chmod 700 "$state"
 export RACKTOP_STATE_DIR="$data_state"
 export RACKTOP_CLIENT_STATE_DIR="$state"
@@ -407,17 +421,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
 "#,
-    );
-    let output = run_remote_command(server, password, &script, Duration::from_secs(25)).await?;
-    if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_READY__") {
-        Ok(())
-    } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_STARTING__") {
-        Err("远端历史 daemon 正在启动，请稍后重试".into())
-    } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__") {
-        Err("远端系统没有可用的本地临时文件系统锁，远端历史 daemon 未启动".into())
-    } else {
-        Err("远端历史任务安装后未返回确认标记".into())
-    }
+    )
 }
 
 #[cfg(test)]
@@ -448,22 +452,8 @@ async fn run_remote_command(
     script: &str,
     duration: Duration,
 ) -> Result<String, String> {
-    let (mut command, target) = configured_ssh_command(server, password)?;
-    command
-        .arg(target)
-        .arg(script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = timeout(duration, command.output())
-        .await
-        .map_err(|_| format!("连接 {} 同步历史超时", server.name))?
-        .map_err(|error| format!("无法启动系统 ssh：{error}"))?;
-    if !output.status.success() {
-        return Err(classify_ssh_error(
-            String::from_utf8_lossy(&output.stderr).trim(),
-        ));
-    }
+    let (command, target) = configured_ssh_command(server, password)?;
+    let output = run_ssh_script(command, &target, script, duration, &format!("连接 {} 同步历史超时", server.name)).await?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -473,22 +463,8 @@ async fn run_remote_cleanup_command(
     script: &str,
     duration: Duration,
 ) -> Result<String, String> {
-    let (mut command, target) = configured_ssh_command_without_control(server, password)?;
-    command
-        .arg(target)
-        .arg(script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = timeout(duration, command.output())
-        .await
-        .map_err(|_| format!("连接 {} 删除远端数据超时", server.name))?
-        .map_err(|error| format!("无法启动系统 ssh：{error}"))?;
-    if !output.status.success() {
-        return Err(classify_ssh_error(
-            String::from_utf8_lossy(&output.stderr).trim(),
-        ));
-    }
+    let (command, target) = configured_ssh_command_without_control(server, password)?;
+    let output = run_ssh_script(command, &target, script, duration, &format!("连接 {} 删除远端数据超时", server.name)).await?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -629,6 +605,68 @@ fn parse_usage_line(line: &str) -> Result<UsagePoint, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_runs_on_clean_and_legacy_hosts_and_registers_before_reusing_daemon() {
+        use std::os::unix::fs::PermissionsExt;
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "upgrade-test", "name": "upgrade-test", "host": "example.com", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 5,
+            "historyRetentionDays": 90, "remoteHistoryEnabled": true,
+            "authMethod": "sshAgent", "status": "unknown"
+        })).unwrap();
+        for legacy_daemon in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path();
+            let bin = root.join("bin");
+            fs::create_dir(&bin).unwrap();
+            fs::create_dir(root.join("lock-root")).unwrap();
+            let state = client_state_directory(&server, "upgrade-client").replace("$HOME", root.to_str().unwrap());
+            let data = remote_state_directory(&server).replace("$HOME", root.to_str().unwrap());
+            let daemon = if legacy_daemon { format!("{data}/.daemon.sh") } else { format!("{state}/.daemon.sh") };
+            if legacy_daemon {
+                fs::create_dir_all(&data).unwrap();
+                fs::write(&daemon, "legacy daemon").unwrap();
+                fs::create_dir(root.join(".racktop")).unwrap();
+                fs::write(root.join(".racktop/.history-v1.tsv"), "v1|3600|10|20|0|GPU-a,30,40\n").unwrap();
+            }
+            for (name, body) in [
+                ("flock", "exit 0"),
+                ("stat", "case \"$*\" in *%T*) echo tmpfs ;; *%u*) id -u ;; *%a*) echo 700 ;; esac"),
+                ("timeout", "exit 0"),
+                ("ps", "if [ \"$TEST_LEGACY\" = 1 ] || [ -f \"$HOME/started\" ]; then printf '123 sh %s\\n' \"$TEST_DAEMON\"; fi"),
+                ("nohup", "touch \"$HOME/started\""),
+            ] {
+                let file = bin.join(name);
+                fs::write(&file, format!("#!/bin/sh\n{body}\n")).unwrap();
+                fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            // Virtualize only Linux tmpfs paths; execute the actual generated
+            // installer, lifecycle and snapshot code with a disposable HOME.
+            let script = build_install_script(&server, "upgrade-client")
+                .replace("/run/lock/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid")
+                .replace("/dev/shm/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid");
+            let output = std::process::Command::new("sh").arg("-c").arg(&script)
+                .env("HOME", root)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("TEST_LEGACY", if legacy_daemon { "1" } else { "0" })
+                .env("TEST_DAEMON", &daemon)
+                .output().unwrap();
+            assert!(output.status.success(), "legacy={legacy_daemon}: {}", String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("__RACKTOP_REMOTE_HISTORY_READY__"));
+            assert!(Path::new(&state).is_dir(), "the client registration must survive daemon reuse");
+            if legacy_daemon {
+                assert_eq!(fs::read_to_string(format!("{data}/legacy-root/.history-v1.tsv")).unwrap(), "v1|3600|10|20|0|GPU-a,30,40\n");
+                assert_eq!(fs::read_to_string(&daemon).unwrap(), "legacy daemon");
+                assert!(!root.join("started").exists());
+            } else {
+                assert!(Path::new(&format!("{state}/.collector.sh")).is_file());
+                assert!(root.join("started").exists());
+            }
+        }
+    }
 
     #[cfg(unix)]
     #[test]

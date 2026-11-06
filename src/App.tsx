@@ -104,6 +104,7 @@ import { clearTrendHistoryCache } from './utils/trendHistoryCache'
 import { gpuContextName, serverDisplayName } from './utils/serverName'
 import { loadLaunchProfiles, loadManagedRuns } from './utils/managedRuns'
 import { detectAppPlatform } from './utils/platform'
+import { enableAutoHideScrollbars } from './utils/autoHideScrollbars'
 import { acceleratorDeviceName, acceleratorDriverLabel, acceleratorLabel } from './utils/accelerator'
 import { allowsServerNotification, defaultServerNotificationSettings, normalizeServerNotificationSettings, SERVER_NOTIFICATION_CATEGORY_ITEMS } from './utils/serverNotifications'
 import { isNewerVersion, loadCachedUpdate, loadIgnoredUpdateVersion, saveCachedUpdate, saveIgnoredUpdateVersion, shouldShowUpdateBadge, UPDATE_CHECK_INTERVAL_MS, type ReleaseInfo } from './utils/updateCheck'
@@ -495,6 +496,7 @@ function App() {
   const remoteHistoryServerKey = servers.filter((server) => server.remoteHistoryEnabled).map((server) => server.id).sort().join('\n')
 
   useEffect(() => { remoteHistoryServersRef.current = servers }, [servers])
+  useEffect(() => enableAutoHideScrollbars(appPlatform), [])
   useEffect(() => { remoteSyncStatusRef.current = remoteSyncStatus }, [remoteSyncStatus])
   useEffect(() => { projectsRef.current = projects }, [projects])
   useEffect(() => { busyProjectTargetsRef.current = busyProjectTargets }, [busyProjectTargets])
@@ -605,9 +607,10 @@ function App() {
           ? `大文件同步期间采集暂时延迟 · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试`
           : `${message} · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试`,
       } : server))
-      if (message.includes('主机指纹')) {
+      if (!quiet && message.includes('主机指纹')) {
         try {
-          setPendingHostKey(await api.scanHostKey(serverId))
+          const info = await api.scanHostKey(serverId)
+          if (info.changed) setPendingHostKey(info)
         } catch (scanError) {
           if (!quiet) setToast(String(scanError))
         }
@@ -891,6 +894,7 @@ function App() {
       const total = allEnabledServers.length
       let importedCount = 0
       const failedServerIds: string[] = []
+      const failedServerErrors: Record<string, string> = {}
       const startingServerIds: string[] = []
       const recoveryRetry = enabledServers.some((server) => remoteSyncRecoveryQueued.current.has(server.id))
       let visible = recoveryRetry || (initial && shouldShowRemoteSyncImmediately(allEnabledServers, nowSeconds))
@@ -932,8 +936,9 @@ function App() {
           if (!cancelled && result.latestTimestamp) {
             setServers((current) => current.map((item) => item.id === server.id && item.remoteHistoryLastSyncAt !== result.latestTimestamp ? { ...item, remoteHistoryLastSyncAt: result.latestTimestamp } : item))
           }
-        } catch {
+        } catch (error) {
           failedServerIds.push(server.id)
+          failedServerErrors[server.id] = error instanceof Error ? error.message : String(error)
         } finally {
           completed += 1
           remoteSyncInFlight.current.delete(server.id)
@@ -946,7 +951,7 @@ function App() {
       }
       if (cancelled) return
       if (failedServerIds.length > 0) {
-        setRemoteSyncStatus({ phase: 'error', completed, total, importedCount, failedServerIds })
+        setRemoteSyncStatus({ phase: 'error', completed, total, importedCount, failedServerIds, failedServerErrors })
       } else if (startingServerIds.length > 0) {
         setRemoteSyncStatus({ phase: 'starting', completed, total, importedCount, failedServerIds: [], startingServerIds })
       } else if (initial && visible) {
@@ -1811,6 +1816,8 @@ function App() {
               setSelectedGpuUuid(null)
               setSelectedTab('connection')
               setMainView('server')
+              const reason = remoteSyncStatus.failedServerErrors?.[serverId]
+              if (reason) setToast(`历史同步失败：${reason}`)
             }} />}</span>}
             <span className={`refresh-label ${paused ? 'is-paused' : ''}`}><Clock3 size={14} />{paused ? '采集已暂停' : mainView === 'server' && selectedServer ? relativeTime(selectedServer.lastSeenAt) : totals.latestRefresh ? relativeTime(totals.latestRefresh) : `${settings?.defaultSamplingIntervalSeconds ?? 2} 秒采样`}</span>
             <button className="button button--secondary" onClick={() => void runManualRefreshAll()} disabled={manualRefreshingAll}><RefreshCw size={16} className={manualRefreshingAll ? 'spin' : ''} />刷新全部</button>

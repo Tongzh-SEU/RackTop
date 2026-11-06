@@ -11,6 +11,7 @@ export interface RemoteSyncStatusState {
   total: number
   importedCount: number
   failedServerIds: string[]
+  failedServerErrors?: Record<string, string>
   startingServerIds?: string[]
 }
 

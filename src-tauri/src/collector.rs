@@ -4,7 +4,11 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::{collections::{HashMap, HashSet}, process::Stdio, time::{SystemTime, UNIX_EPOCH}};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use tokio::{process::Command, time::{timeout, Duration}};
+use tokio::{io::AsyncWriteExt, process::Command, time::{timeout, Duration}};
+
+// OpenSSH records a first-seen key during the connection itself and still
+// rejects changed keys. Apply the same policy to collection, history and hops.
+pub(crate) const HOST_KEY_CHECKING: &str = "StrictHostKeyChecking=accept-new";
 
 const REMOTE_SCRIPT: &str = concat!(include_str!("../assets/ascend-collector.sh"), r#"export LANG=C LC_ALL=C;
 cleanup_marker="$HOME/.racktop/.cleanup-usercpu-redirection-v1";
@@ -183,20 +187,16 @@ pub struct CollectionResult {
 }
 
 pub async fn collect_with_password_detailed(server: &Server, password: Option<&str>, include_processes: bool, include_disks: bool, client_id: &str) -> Result<CollectionResult, String> {
-    let (mut command, target) = configured_ssh_command(server, password)?;
-    command.arg(target).arg(format!(
+    let (command, target) = configured_ssh_command(server, password)?;
+    let script = format!(
         "{history_state}RACKTOP_INCLUDE_PROCESSES={} RACKTOP_INCLUDE_DISKS={} RACKTOP_REMOTE_HISTORY={};{remote_script}",
         if include_processes { 1 } else { 0 },
         if include_disks { 1 } else { 0 },
         if server.remote_history_enabled && !client_id.is_empty() { 1 } else { 0 },
         history_state = remote_history_state_assignment(server, client_id),
         remote_script = REMOTE_SCRIPT.replace("\r\n", "\n"),
-    )).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let output = timeout(Duration::from_secs(30), command.output()).await.map_err(|_| format!("连接 {} 超时（30 秒）", server.name))?.map_err(|error| format!("无法启动系统 ssh：{error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(classify_ssh_error(&stderr));
-    }
+    );
+    let output = run_ssh_script(command, &target, &script, Duration::from_secs(30), &format!("连接 {} 超时（30 秒）", server.name)).await?;
     let snapshot = parse_snapshot(&server.id, &String::from_utf8_lossy(&output.stdout))?;
     Ok(CollectionResult { snapshot, response_bytes: output.stdout.len() as u64 })
 }
@@ -298,7 +298,7 @@ pub fn collection_display_command(server: &Server, include_processes: bool, incl
         "-o ConnectTimeout=8".to_string(),
         "-o ServerAliveInterval=5".to_string(),
         "-o ServerAliveCountMax=2".to_string(),
-        "-o StrictHostKeyChecking=yes".to_string(),
+        format!("-o {HOST_KEY_CHECKING}"),
     ];
     if server.auth_method == "password" {
         arguments.extend([
@@ -329,7 +329,7 @@ pub fn collection_display_command(server: &Server, include_processes: bool, incl
         history_state = remote_history_state_assignment(server, client_id),
         remote_script = REMOTE_SCRIPT.replace("\r\n", "\n"),
     );
-    format!("ssh {} {} {}", arguments.join(" "), shell_quote(&target), shell_quote(&remote_command))
+    format!("ssh {} {} 'sh -s' <<'RACKTOP_SCRIPT'\n{}\nRACKTOP_SCRIPT", arguments.join(" "), shell_quote(&target), remote_command)
 }
 
 pub(crate) fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<(Command, String), String> {
@@ -345,7 +345,7 @@ fn configured_ssh_command_with_control(server: &Server, password: Option<&str>, 
     command.kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x08000000);
-    command.args(["-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=yes"]);
+    command.args(["-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", HOST_KEY_CHECKING]);
     if server.auth_method == "password" {
         let password = password.ok_or("没有可用密码；请重新编辑服务器并输入密码")?;
         let executable = std::env::current_exe().map_err(|error| format!("无法定位 RackTop SSH_ASKPASS：{error}"))?;
@@ -383,6 +383,40 @@ fn configured_ssh_command_with_control(server: &Server, password: Option<&str>, 
     Ok((command, target))
 }
 
+// Send scripts over stdin instead of the command line. The history installer
+// exceeds Windows' 32767-character process limit, and quoting multiline script
+// arguments also depends on the user's login shell.
+pub(crate) async fn run_ssh_script(
+    mut command: Command,
+    target: &str,
+    script: &str,
+    duration: Duration,
+    timeout_message: &str,
+) -> Result<std::process::Output, String> {
+    command.arg(target).arg("sh -s")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|error| format!("无法启动系统 ssh：{error}"))?;
+    let mut stdin = child.stdin.take().ok_or("无法发送 SSH 脚本")?;
+    let (written, output) = timeout(duration, async {
+        tokio::join!(async move {
+            let written = stdin.write_all(script.as_bytes()).await;
+            // ChildStdin::shutdown is a no-op on Unix. Drop the pipe so sh -s
+            // receives EOF, even if writing failed partway through.
+            drop(stdin);
+            written
+        }, child.wait_with_output())
+    }).await.map_err(|_| timeout_message.to_string())?;
+    let output = output.map_err(|error| format!("SSH 执行失败：{error}"))?;
+    // Authentication/connection errors can close stdin early. Keep the actual
+    // SSH error instead of replacing it with a misleading broken-pipe error.
+    if !output.status.success() {
+        return Err(classify_ssh_error(String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    written.map_err(|error| format!("无法发送 SSH 脚本：{error}"))?;
+    Ok(output)
+}
+
 pub async fn install_nvidia_driver(server: &Server, password: Option<&str>) -> Result<String, String> {
     let (mut detect, target) = configured_ssh_command(server, password)?;
     detect.arg(&target).arg("if [ -r /etc/os-release ]; then . /etc/os-release; printf '%s' \"${ID:-unknown}\"; else printf unknown; fi").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -409,15 +443,19 @@ pub async fn install_nvidia_driver(server: &Server, password: Option<&str>) -> R
 
 pub(crate) fn classify_ssh_error(stderr: &str) -> String {
     let lower = stderr.to_lowercase();
-    if lower.contains("host key verification failed") || lower.contains("no host key is known") {
-        "主机指纹尚未信任或已发生变化。为防止中间人攻击，RackTop 已阻止连接；请先用系统 ssh 核对并接受指纹。".into()
+    if lower.contains("remote host identification has changed") || lower.contains("offending ") && lower.contains(" key") {
+        "主机指纹已发生变化，连接已阻止。请核对服务器的新指纹后更新 known_hosts。".into()
+    } else if lower.contains("timed out") || lower.contains("connection timeout") {
+        format!("SSH 连接超时，请检查服务器地址和网络：{stderr}")
+    } else if lower.contains("host key verification failed") || lower.contains("no host key is known") {
+        format!("SSH 主机指纹验证失败：{stderr}")
     } else if lower.contains("permission denied") {
         format!("SSH 认证失败：{stderr}")
     } else if lower.contains("connection refused") {
         format!("SSH 连接被拒绝：{stderr}")
     } else if lower.contains("connection closed by 127.0.0.1") || lower.contains("connect to host 127.0.0.1") {
         format!("本机 SSH 代理拒绝了连接：{stderr}。请确认代理正在运行；若此服务器不需要代理，请检查 ~/.ssh/config 中的 ProxyCommand / ProxyJump。")
-    } else if lower.contains("no route to host") || lower.contains("operation timed out") {
+    } else if lower.contains("no route to host") {
         format!("服务器不可达：{stderr}")
     } else if stderr.is_empty() {
         "SSH 命令执行失败，未返回错误详情".into()
@@ -1003,7 +1041,38 @@ mod tests {
 
     #[test]
     fn classifies_changed_host_key() {
-        assert!(classify_ssh_error("Host key verification failed").contains("中间人攻击"));
+        let changed = classify_ssh_error("WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed.");
+        assert!(changed.contains("主机指纹已发生变化"));
+        assert!(!classify_ssh_error("Host key verification failed.").contains("已发生变化"));
+    }
+
+    #[test]
+    fn timeout_is_not_reported_as_changed_or_untrusted_key() {
+        for message in [
+            "ssh: connect to host example.com port 22: Connection timed out",
+            "Connection timed out during banner exchange\nHost key verification failed.",
+        ] {
+            let error = classify_ssh_error(message);
+            assert!(error.contains("连接超时"));
+            assert!(!error.contains("主机指纹"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ssh_scripts_stream_large_payload_without_putting_it_on_command_line() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let mock = directory.path().join("ssh");
+        std::fs::write(&mock, "#!/bin/sh\n[ \"$#\" = 2 ] && [ \"$1\" = target ] && [ \"$2\" = 'sh -s' ] || exit 2\nexec sh -s\n").unwrap();
+        std::fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let script = format!("# {}\nprintf 'streamed\\n'\n", "x".repeat(150_000));
+        let output = run_ssh_script(Command::new(&mock), "target", &script, Duration::from_secs(5), "timeout").await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "streamed\n");
+        std::fs::write(&mock, "#!/bin/sh\nprintf 'Connection timed out during banner exchange' >&2\nexit 255\n").unwrap();
+        let error = run_ssh_script(Command::new(&mock), "target", &script, Duration::from_secs(5), "timeout").await.unwrap_err();
+        assert!(error.contains("连接超时"));
+        assert!(!error.contains("Broken pipe"));
     }
 
     #[test]
