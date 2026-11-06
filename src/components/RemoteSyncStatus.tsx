@@ -6,13 +6,14 @@ export const REMOTE_SYNC_FEEDBACK_DELAY_MS = 800
 export const REMOTE_SYNC_SUCCESS_DURATION_MS = 2_000
 
 export interface RemoteSyncStatusState {
-  phase: 'syncing' | 'starting' | 'success' | 'error'
+  phase: 'syncing' | 'starting' | 'cleanupPending' | 'success' | 'error'
   completed: number
   total: number
   importedCount: number
   failedServerIds: string[]
   failedServerErrors?: Record<string, string>
   startingServerIds?: string[]
+  cleanupPendingServerIds?: string[]
 }
 
 export class RemoteSyncCoordinator {
@@ -43,12 +44,18 @@ export function shouldShowRemoteSyncImmediately(servers: Array<Pick<Server, 'rem
 export function shouldRetryRemoteSyncAfterRecovery(status: RemoteSyncStatusState | null, serverId: string, alreadyQueued: boolean) {
   return !alreadyQueued && Boolean(status && (
     (status.phase === 'error' && status.failedServerIds.includes(serverId)) ||
-    (status.phase === 'starting' && status.startingServerIds?.includes(serverId))
+    (status.phase === 'starting' && status.startingServerIds?.includes(serverId)) ||
+    (status.phase === 'cleanupPending' && status.cleanupPendingServerIds?.includes(serverId)) ||
+    status.cleanupPendingServerIds?.includes(serverId)
   ))
 }
 
 export function isRemoteHistoryStartingError(error: unknown) {
   return String(error).includes('远端历史 daemon 正在启动')
+}
+
+export function isRemoteHistoryCleanupPendingError(error: unknown) {
+  return String(error).includes('旧版远端历史进程正在退出')
 }
 
 export function RemoteSyncStatus({ status, onOpenFailure }: { status: RemoteSyncStatusState; onOpenFailure: () => void }) {
@@ -58,8 +65,15 @@ export function RemoteSyncStatus({ status, onOpenFailure }: { status: RemoteSync
   if (status.phase === 'starting') {
     return <span className="remote-sync-status remote-sync-status--syncing" role="status" aria-live="polite">远端 daemon 启动中 · {status.startingServerIds?.length ?? 1} 台，5 分钟后重试</span>
   }
+  if (status.phase === 'cleanupPending') {
+    return <span className="remote-sync-status remote-sync-status--syncing" role="status" aria-live="polite">旧版远端进程退出中 · {status.cleanupPendingServerIds?.length ?? 1} 台，5 分钟后重试</span>
+  }
   if (status.phase === 'success') {
     return <span className="remote-sync-status remote-sync-status--success" role="status" aria-live="polite"><CheckCircle2 size={13} />历史已同步 · 新增 {status.importedCount.toLocaleString('zh-CN')} 条</span>
   }
-  return <button type="button" className="remote-sync-status remote-sync-status--error" onClick={onOpenFailure}><AlertCircle size={13} />{status.failedServerIds.length} 台历史同步失败 · 5 分钟后重试</button>
+  const cleanupPendingCount = status.cleanupPendingServerIds?.length ?? 0
+  const message = cleanupPendingCount > 0
+    ? `旧版远端进程退出中 · ${cleanupPendingCount} 台；${status.failedServerIds.length} 台同步失败，5 分钟后重试`
+    : `${status.failedServerIds.length} 台历史同步失败 · 5 分钟后重试`
+  return <button type="button" className="remote-sync-status remote-sync-status--error" onClick={onOpenFailure}><AlertCircle size={13} />{message}</button>
 }

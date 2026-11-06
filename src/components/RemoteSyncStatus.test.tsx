@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_STALE_SECONDS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './RemoteSyncStatus'
+import { isRemoteHistoryCleanupPendingError, isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_STALE_SECONDS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './RemoteSyncStatus'
 
 const baseStatus: RemoteSyncStatusState = { phase: 'syncing', completed: 2, total: 4, importedCount: 0, failedServerIds: [] }
 
@@ -22,15 +22,23 @@ describe('RemoteSyncStatus', () => {
     expect(failure).toContain('2 台历史同步失败 · 5 分钟后重试')
     const starting = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'starting', startingServerIds: ['a'] }} onOpenFailure={() => {}} />)
     expect(starting).toContain('远端 daemon 启动中 · 1 台，5 分钟后重试')
+    const cleanupPending = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'cleanupPending', cleanupPendingServerIds: ['a'] }} onOpenFailure={() => {}} />)
+    expect(cleanupPending).toContain('旧版远端进程退出中 · 1 台，5 分钟后重试')
   })
 
   it('recognizes startup-in-progress and allows one retry after the server recovers', () => {
     const startingError = '远端历史 daemon 正在启动，请稍后重试'
     expect(isRemoteHistoryStartingError(startingError)).toBe(true)
+    const cleanupPendingError = '旧版远端历史进程正在退出，等待清理完成后重试'
+    expect(isRemoteHistoryCleanupPendingError(cleanupPendingError)).toBe(true)
     expect(isRemoteHistoryStartingError('Permission denied')).toBe(false)
+    expect(isRemoteHistoryCleanupPendingError('Permission denied')).toBe(false)
     const startingStatus: RemoteSyncStatusState = { ...baseStatus, phase: 'starting', startingServerIds: ['server-a'], failedServerIds: [] }
     expect(shouldRetryRemoteSyncAfterRecovery(startingStatus, 'server-a', false)).toBe(true)
     expect(shouldRetryRemoteSyncAfterRecovery(startingStatus, 'server-a', true)).toBe(false)
+    const cleanupPendingStatus: RemoteSyncStatusState = { ...baseStatus, phase: 'cleanupPending', cleanupPendingServerIds: ['server-a'], failedServerIds: [] }
+    expect(shouldRetryRemoteSyncAfterRecovery(cleanupPendingStatus, 'server-a', false)).toBe(true)
+    expect(shouldRetryRemoteSyncAfterRecovery(cleanupPendingStatus, 'server-a', true)).toBe(false)
   })
 
   it('retries a failed remote sync once when that server recovers', () => {

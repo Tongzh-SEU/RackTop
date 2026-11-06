@@ -78,7 +78,7 @@ import { OnboardingChecklist, type OnboardingStep } from './components/Onboardin
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { ProjectForm } from './components/ProjectForm'
 import { ProjectConflictDialog, ProjectDeleteDialog, ProjectView, syncableProjectTargets } from './components/ProjectView'
-import { isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
+import { isRemoteHistoryCleanupPendingError, isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
 import { ResourceTrend } from './components/ResourceTrend'
 import { ServerForm } from './components/ServerForm'
 import { SshTerminal } from './components/SshTerminal'
@@ -896,6 +896,7 @@ function App() {
       const failedServerIds: string[] = []
       const failedServerErrors: Record<string, string> = {}
       const startingServerIds: string[] = []
+      const cleanupPendingServerIds: string[] = []
       const recoveryRetry = enabledServers.some((server) => remoteSyncRecoveryQueued.current.has(server.id))
       let visible = recoveryRetry || (initial && shouldShowRemoteSyncImmediately(allEnabledServers, nowSeconds))
       const syncingState = (): RemoteSyncStatusState => ({ phase: 'syncing', completed, total, importedCount, failedServerIds: [] })
@@ -921,6 +922,11 @@ function App() {
               break
             } catch (reason) {
               lastError = reason
+              if (isRemoteHistoryCleanupPendingError(reason)) {
+                cleanupPendingServerIds.push(server.id)
+                lastError = null
+                break
+              }
               if (isRemoteHistoryStartingError(reason)) {
                 startingServerIds.push(server.id)
                 lastError = null
@@ -951,7 +957,9 @@ function App() {
       }
       if (cancelled) return
       if (failedServerIds.length > 0) {
-        setRemoteSyncStatus({ phase: 'error', completed, total, importedCount, failedServerIds, failedServerErrors })
+        setRemoteSyncStatus({ phase: 'error', completed, total, importedCount, failedServerIds, failedServerErrors, cleanupPendingServerIds })
+      } else if (cleanupPendingServerIds.length > 0) {
+        setRemoteSyncStatus({ phase: 'cleanupPending', completed, total, importedCount, failedServerIds: [], cleanupPendingServerIds })
       } else if (startingServerIds.length > 0) {
         setRemoteSyncStatus({ phase: 'starting', completed, total, importedCount, failedServerIds: [], startingServerIds })
       } else if (initial && visible) {
@@ -1356,6 +1364,7 @@ function App() {
       if (saved.remoteHistoryEnabled) {
         let configurationError: unknown = null
         let configurationStarting = false
+        let configurationCleanupPending = false
         for (const delay of [0, 900, 1800]) {
           if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay))
           try {
@@ -1364,13 +1373,18 @@ function App() {
             break
           } catch (reason) {
             configurationError = reason
+            if (isRemoteHistoryCleanupPendingError(reason)) {
+              configurationCleanupPending = true
+              break
+            }
             if (isRemoteHistoryStartingError(reason)) {
               configurationStarting = true
               break
             }
           }
         }
-        if (configurationStarting) setToast('服务器已保存；远端 daemon 正在启动，将在 5 分钟后重试')
+        if (configurationCleanupPending) setToast('服务器已保存；旧版远端进程退出中，将在 5 分钟后重试')
+        else if (configurationStarting) setToast('服务器已保存；远端 daemon 正在启动，将在 5 分钟后重试')
         else if (configurationError) setToast(`服务器已保存；远端历史将在连接稳定后重试：${String(configurationError)}`)
         else {
           try { sync = await api.syncRemoteHistory(saved.id) }
