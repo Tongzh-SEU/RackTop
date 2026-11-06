@@ -15,4 +15,15 @@ describe('scrollbar platform styles', () => {
     const hiddenThumbRule = styles.match(/([^{}]+)\{[^{}]*--scrollbar-thumb:\s*transparent[^{}]*\}/)
     expect(hiddenThumbRule?.[1]?.trim()).toBe(':root:is([data-platform="windows"], [data-platform="linux"]) :is(.server-list, .workspace__scroll):not([data-scrollbar-active])')
   })
+
+  it('keeps hover color aligned with the sidebar token on every platform', () => {
+    expect(styles).toContain('.workspace__scroll:hover { scrollbar-color: var(--scrollbar-thumb) transparent; }')
+    expect(styles).toContain('.workspace__scroll:hover::-webkit-scrollbar-thumb { background-color: var(--scrollbar-thumb); }')
+  })
+
+  it('uses the same Windows/Linux thumb color for the sidebar and workspace', () => {
+    const thumbRule = styles.match(/:root:is\(\[data-platform="windows"\], \[data-platform="linux"\]\) \.server-list::-webkit-scrollbar-thumb,\s*:root:is\(\[data-platform="windows"\], \[data-platform="linux"\]\) \.workspace__scroll::-webkit-scrollbar-thumb\s*\{([^}]*)\}/)
+    expect(thumbRule?.[1]).toContain('background: var(--scrollbar-thumb)')
+    expect(styles).toContain(':root:is([data-platform="windows"], [data-platform="linux"]) :is(.server-list, .workspace__scroll) { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }')
+  })
 })

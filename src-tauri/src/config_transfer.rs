@@ -827,6 +827,7 @@ mod tests {
         assert_eq!(fs::read(&key).unwrap(), TEST_KEY);
         let (command, _) = crate::collector::configured_ssh_command(&server, None).unwrap();
         let args: Vec<_> = command.as_std().get_args().map(|s| s.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|pair| pair[0] == "-o" && pair[1] == crate::collector::HOST_KEY_CHECKING));
         assert!(args.iter().any(|a| a.contains("--racktop-proxy")));
         assert!(!args.iter().any(|a| a == "-J"));
         // Exporting again must include the independent hop key, even though

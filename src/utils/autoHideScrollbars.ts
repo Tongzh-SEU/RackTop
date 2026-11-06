@@ -6,13 +6,21 @@ const HIDE_DELAY_MS = 900
 export function enableAutoHideScrollbars(platform: AppPlatform, scope: Document = document) {
   if (platform !== 'windows' && platform !== 'linux') return () => {}
   const timers = new Map<HTMLElement, ReturnType<typeof setTimeout>>()
+  const hide = (element: HTMLElement) => {
+    const timer = timers.get(element)
+    if (timer !== undefined) clearTimeout(timer)
+    timers.delete(element)
+    delete element.dataset.scrollbarActive
+  }
   const reveal = (element: HTMLElement) => {
-    if (element.scrollHeight <= element.clientHeight) return
+    if (element.scrollHeight <= element.clientHeight) {
+      hide(element)
+      return
+    }
     clearTimeout(timers.get(element))
     element.dataset.scrollbarActive = 'true'
     timers.set(element, setTimeout(() => {
-      delete element.dataset.scrollbarActive
-      timers.delete(element)
+      hide(element)
     }, HIDE_DELAY_MS))
   }
   const onScroll = (event: Event) => {
@@ -29,9 +37,6 @@ export function enableAutoHideScrollbars(platform: AppPlatform, scope: Document 
   return () => {
     scope.removeEventListener('scroll', onScroll, true)
     scope.removeEventListener('pointermove', onPointerMove)
-    for (const [element, timer] of timers) {
-      clearTimeout(timer)
-      delete element.dataset.scrollbarActive
-    }
+    for (const element of timers.keys()) hide(element)
   }
 }

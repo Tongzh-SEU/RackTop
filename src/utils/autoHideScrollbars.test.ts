@@ -70,4 +70,27 @@ describe('desktop scrollbar visibility', () => {
     expect(vi.getTimerCount()).toBe(0)
     list.remove()
   })
+
+  it.each(['windows', 'linux'] as const)('hides immediately when a visible list stops overflowing on %s', (platform) => {
+    vi.useFakeTimers()
+    const remove = enableAutoHideScrollbars(platform)
+    const list = document.createElement('div')
+    list.className = 'server-list'
+    document.body.appendChild(list)
+    let contentHeight = 500
+    Object.defineProperties(list, {
+      scrollHeight: { get: () => contentHeight },
+      clientHeight: { value: 300 },
+      getBoundingClientRect: { value: () => ({ right: 300 }) },
+    })
+    list.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 295 }))
+    expect(list.dataset.scrollbarActive).toBe('true')
+
+    contentHeight = 250
+    list.dispatchEvent(new Event('scroll'))
+    expect(list.dataset.scrollbarActive).toBeUndefined()
+    expect(vi.getTimerCount()).toBe(0)
+    remove()
+    list.remove()
+  })
 })
