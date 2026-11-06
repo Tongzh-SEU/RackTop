@@ -21,9 +21,9 @@ describe('RemoteSyncStatus', () => {
     expect(failure).toContain('<button')
     expect(failure).toContain('2 台历史同步失败 · 5 分钟后重试')
     const starting = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'starting', startingServerIds: ['a'], retryDelaySeconds: 15 }} onOpenFailure={() => {}} />)
-    expect(starting).toContain('远端 daemon 启动中 · 1 台，15 秒后重试')
+    expect(starting).toBe('')
     const cleanupPending = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'cleanupPending', cleanupPendingServerIds: ['a'] }} onOpenFailure={() => {}} />)
-    expect(cleanupPending).toContain('旧版远端进程退出中 · 1 台，5 分钟后重试')
+    expect(cleanupPending).toBe('')
   })
 
   it('recognizes startup-in-progress and allows one retry after the server recovers', () => {

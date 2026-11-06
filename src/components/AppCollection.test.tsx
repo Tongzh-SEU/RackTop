@@ -158,6 +158,7 @@ it('queues an edited server for retry even when its last history sync is fresh',
   expect(configure).toHaveBeenCalledTimes(3)
   expect(sync).toHaveBeenCalledTimes(2)
   expect(container.textContent).not.toContain('旧版远端进程退出中')
+  expect(container.textContent).not.toContain('远端历史准备中，将自动重试')
 })
 
 it('retries a remote history timeout quickly and returns to sync when reachable', async () => {
@@ -237,14 +238,14 @@ it('retries legacy cleanup with backoff and resumes history sync when the old da
   await render()
   expect(configure).toHaveBeenCalledTimes(1)
   expect(sync).not.toHaveBeenCalled()
-  expect(container.textContent).toContain('旧版远端进程退出中 · 1 台，15 秒后重试')
+  expect(container.textContent).not.toContain('旧版远端进程退出中')
 
   await act(async () => vi.advanceTimersByTimeAsync(15_000 - 1))
   expect(configure).toHaveBeenCalledTimes(1)
   expect(sync).not.toHaveBeenCalled()
   await act(async () => vi.advanceTimersByTimeAsync(1))
   expect(configure).toHaveBeenCalledTimes(2)
-  expect(container.textContent).toContain('旧版远端进程退出中 · 1 台，30 秒后重试')
+  expect(container.textContent).not.toContain('旧版远端进程退出中')
 
   await act(async () => vi.advanceTimersByTimeAsync(30_000))
   expect(configure).toHaveBeenCalledTimes(3)

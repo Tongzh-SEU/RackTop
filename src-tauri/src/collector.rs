@@ -1220,6 +1220,22 @@ mod tests {
     }
 
     #[test]
+    fn first_ssh_connection_accepts_new_host_keys_automatically() {
+        let server = Server {
+            id: "server-1".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22,
+            username: "user".into(), ssh_alias: None, identity_file: None, proxy_jump: None, ssh_hops: Vec::new(),
+            tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
+            remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(), status: "unknown".into(),
+            last_error: None, last_seen_at: None,
+        };
+        let (command, _) = configured_ssh_command(&server, None).unwrap();
+        let arguments: Vec<String> = command.as_std().get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+
+        assert!(arguments.windows(2).any(|pair| pair[0] == "-o" && pair[1] == HOST_KEY_CHECKING));
+        assert_eq!(HOST_KEY_CHECKING, "StrictHostKeyChecking=accept-new");
+    }
+
+    #[test]
     fn explicit_private_key_is_restricted_to_that_identity() {
         let server = Server {
             id: "server-1".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22,

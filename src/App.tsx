@@ -1408,7 +1408,6 @@ function App() {
         if (configurationCleanupPending || configurationStarting || (configurationError && isRemoteHistoryRetryableError(configurationError))) {
           remoteSyncRecoveryQueued.current.add(saved.id)
           setRemoteSyncRetryRevision((revision) => revision + 1)
-          setToast('服务器已保存；远端历史准备中，将自动重试')
         } else if (configurationError) {
           setToast(`服务器已保存；远端历史将在连接稳定后重试：${String(configurationError)}`)
         }

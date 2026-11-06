@@ -74,18 +74,10 @@ export function RemoteSyncStatus({ status, onOpenFailure }: { status: RemoteSync
   if (status.phase === 'syncing') {
     return <span className="remote-sync-status remote-sync-status--syncing" role="status" aria-live="polite"><RefreshCw className="spin" size={13} />正在同步历史数据 · {status.completed}/{status.total} 台</span>
   }
-  if (status.phase === 'starting') {
-    return <span className="remote-sync-status remote-sync-status--syncing" role="status" aria-live="polite">远端 daemon 启动中 · {status.startingServerIds?.length ?? 1} 台，{retryDelayLabel(status.retryDelaySeconds)}</span>
-  }
-  if (status.phase === 'cleanupPending') {
-    return <span className="remote-sync-status remote-sync-status--syncing" role="status" aria-live="polite">旧版远端进程退出中 · {status.cleanupPendingServerIds?.length ?? 1} 台，{retryDelayLabel(status.retryDelaySeconds)}</span>
-  }
+  if (status.phase === 'starting' || status.phase === 'cleanupPending') return null
   if (status.phase === 'success') {
     return <span className="remote-sync-status remote-sync-status--success" role="status" aria-live="polite"><CheckCircle2 size={13} />历史已同步 · 新增 {status.importedCount.toLocaleString('zh-CN')} 条</span>
   }
-  const cleanupPendingCount = status.cleanupPendingServerIds?.length ?? 0
-  const message = cleanupPendingCount > 0
-    ? `旧版远端进程退出中 · ${cleanupPendingCount} 台；${status.failedServerIds.length} 台同步失败，${retryDelayLabel(status.retryDelaySeconds)}`
-    : `${status.failedServerIds.length} 台历史同步失败 · ${retryDelayLabel(status.retryDelaySeconds)}`
+  const message = `${status.failedServerIds.length} 台历史同步失败 · ${retryDelayLabel(status.retryDelaySeconds)}`
   return <button type="button" className="remote-sync-status remote-sync-status--error" onClick={onOpenFailure}><AlertCircle size={13} />{message}</button>
 }
