@@ -398,18 +398,29 @@ else
         "$data_state/.daemon.sh" "$data_state/.collector.sh" \
         "$HOME/.racktop/remote-history-store/$endpoint/.daemon.sh" "$HOME/.racktop/remote-history-store/$endpoint/.collector.sh" \
         "$HOME/.racktop/remote-history/$endpoint/.daemon.sh" "$HOME/.racktop/remote-history/$endpoint/.collector.sh"; then
-      if racktop_wait_for_daemon "${{RACKTOP_DAEMON_START_WAIT_SECONDS:-5}}" "$state/.daemon.sh" "" ""; then
+      if racktop_daemon_exists "$state/.daemon.sh" "" ""; then
         printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
+        exit 0
+      fi
+      if racktop_acquire_daemon_lock; then
+        :
       else
-        printf '__RACKTOP_REMOTE_HISTORY_STARTING__\n'
+        lock_status=$?
+        if [ "$lock_status" -eq 1 ]; then
+          printf '__RACKTOP_REMOTE_HISTORY_STARTING__\n'
+        else
+          printf '__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__\n'
+        fi
+        exit 0
       fi
     else
       printf '__RACKTOP_REMOTE_HISTORY_CLEANUP_PENDING__\n'
+      exit 0
     fi
   else
     printf '__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__\n'
+    exit 0
   fi
-  exit 0
 fi
 if racktop_cleanup_legacy_daemons "$HOME/.racktop/.daemon.sh" "$HOME/.racktop/.collector.sh" \
   "$data_state/.daemon.sh" "$data_state/.collector.sh" \
@@ -766,6 +777,86 @@ mod tests {
         assert!(legacy.0.try_wait().unwrap().is_some(), "legacy daemon still running after install");
         assert_eq!(fs::read_to_string(&history).unwrap(), original_history);
         assert!(root.join("started").exists(), "new managed daemon was not started; stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_reacquires_a_legacy_daemon_lock_and_starts_in_the_same_attempt() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "upgrade-test", "name": "upgrade-test", "host": "example.com", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 5,
+            "historyRetentionDays": 90, "remoteHistoryEnabled": true,
+            "authMethod": "sshAgent", "status": "unknown"
+        })).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(root.join("lock-root")).unwrap();
+        let endpoint = endpoint_state_component(&server.host, server.port);
+        let client_component = format!("{:x}", Sha256::digest("upgrade-client".as_bytes()));
+        let uid = fs::metadata(root).unwrap().uid();
+        let lock_root = root.join(format!("lock-root/racktop-{uid}"));
+        fs::create_dir_all(&lock_root).unwrap();
+        let _daemon_lock = fs::File::create(lock_root.join(format!("{endpoint}-{client_component}.lock"))).unwrap();
+        fs::write(root.join("legacy-lock-held"), "held").unwrap();
+        fs::write(root.join("legacy-running"), "running").unwrap();
+        let legacy_daemon = root.join(".racktop/.daemon.sh");
+        fs::create_dir_all(legacy_daemon.parent().unwrap()).unwrap();
+        fs::write(&legacy_daemon, "#!/bin/sh\n").unwrap();
+        let state = client_state_directory(&server, "upgrade-client").replace("$HOME", root.to_str().unwrap());
+
+        let flock_wrapper = r#"#!/bin/sh
+case "$*" in
+  *"-n 8"*)
+    attempts="$(cat "$HOME/daemon-lock-attempts" 2>/dev/null || printf 0)"
+    attempts=$((attempts + 1))
+    printf '%s\n' "$attempts" > "$HOME/daemon-lock-attempts"
+    [ -e "$HOME/legacy-lock-held" ] && exit 1
+    ;;
+esac
+exit 0
+"#;
+        let ps_wrapper = r#"#!/bin/sh
+case "$*" in
+  *ppid=*)
+    if [ -f "$HOME/legacy-running" ]; then
+      printf '99999999 1 S sh %s\n' "$TEST_LEGACY_DAEMON"
+      rm -f "$HOME/legacy-running" "$HOME/legacy-lock-held"
+    fi
+    ;;
+  *)
+    if [ -f "$HOME/started" ]; then printf '99999999 sh %s\n' "$TEST_DAEMON"; fi
+    ;;
+esac
+"#;
+        for (name, body) in [
+            ("flock", flock_wrapper),
+            ("stat", "case \"$*\" in *%T*) echo tmpfs ;; *%u*) id -u ;; *%a*) echo 700 ;; esac"),
+            ("timeout", "exit 0"),
+            ("ps", ps_wrapper),
+            ("nohup", "touch \"$HOME/started\""),
+        ] {
+            let file = bin.join(name);
+            fs::write(&file, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let script = build_install_script(&server, "upgrade-client")
+            .replace("/run/lock/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid")
+            .replace("/dev/shm/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid");
+        let output = std::process::Command::new("sh").arg("-c").arg(&script)
+            .env("HOME", root)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("TEST_LEGACY_DAEMON", &legacy_daemon)
+            .env("TEST_DAEMON", format!("{state}/.daemon.sh"))
+            .output().unwrap();
+
+        assert!(output.status.success(), "stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("__RACKTOP_REMOTE_HISTORY_READY__"), "stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(root.join("started").exists(), "the replacement daemon must start without waiting for the periodic retry");
+        assert_eq!(fs::read_to_string(root.join("daemon-lock-attempts")).unwrap().trim(), "2");
     }
 
     #[cfg(unix)]
@@ -1449,7 +1540,8 @@ mod tests {
         assert!(install_lock < lock && lock < cleanup && cleanup < lifecycle);
         assert!(install.contains("RACKTOP_DAEMON_LOCK_HELD=1"));
         assert!(install.contains("unset RACKTOP_DAEMON_LOCK_DIR"));
-        assert!(install.contains("racktop_wait_for_daemon \"${{RACKTOP_DAEMON_START_WAIT_SECONDS:-5}}\" \"$state/.daemon.sh\""));
+        assert!(install.contains("racktop_daemon_exists \"$state/.daemon.sh\" \"\" \"\""));
+        assert_eq!(install.matches("if racktop_acquire_daemon_lock").count(), 2);
         assert!(install.contains("__RACKTOP_REMOTE_HISTORY_CLEANUP_PENDING__"));
         assert!(install.contains("flock -u 5"));
         assert!(!install.contains("$state/.install.lock"));
