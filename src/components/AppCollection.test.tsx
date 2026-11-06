@@ -131,7 +131,7 @@ it('shows the actual history sync failure when opening the status', async () => 
   expect(container.textContent).toContain('历史同步失败：旧版历史入口检查失败')
 })
 
-it('waits for legacy cleanup and resumes history sync on the five-minute retry', async () => {
+it('retries legacy cleanup with backoff and resumes history sync when the old daemon exits', async () => {
   api.isDesktop = true
   vi.mocked(api.listServers).mockResolvedValue([{ ...server, remoteHistoryEnabled: true, remoteHistoryLastSyncAt: null }])
   // Keep later live collections pending so this test exercises the periodic
@@ -140,19 +140,24 @@ it('waits for legacy cleanup and resumes history sync on the five-minute retry',
     .mockImplementation(() => new Promise(() => {}))
   const configure = vi.spyOn(api, 'configureRemoteHistory')
     .mockRejectedValueOnce(new Error('旧版远端历史进程正在退出，等待清理完成后重试'))
+    .mockRejectedValueOnce(new Error('旧版远端历史进程正在退出，等待清理完成后重试'))
     .mockResolvedValue(undefined)
   const sync = vi.spyOn(api, 'syncRemoteHistory').mockResolvedValue({ importedCount: 1, latestTimestamp: start / 1000 })
 
   await render()
   expect(configure).toHaveBeenCalledTimes(1)
   expect(sync).not.toHaveBeenCalled()
-  expect(container.textContent).toContain('旧版远端进程退出中 · 1 台，5 分钟后重试')
+  expect(container.textContent).toContain('旧版远端进程退出中 · 1 台，15 秒后重试')
 
-  await act(async () => vi.advanceTimersByTimeAsync(5 * 60_000 - 1))
+  await act(async () => vi.advanceTimersByTimeAsync(15_000 - 1))
   expect(configure).toHaveBeenCalledTimes(1)
   expect(sync).not.toHaveBeenCalled()
   await act(async () => vi.advanceTimersByTimeAsync(1))
   expect(configure).toHaveBeenCalledTimes(2)
+  expect(container.textContent).toContain('旧版远端进程退出中 · 1 台，30 秒后重试')
+
+  await act(async () => vi.advanceTimersByTimeAsync(30_000))
+  expect(configure).toHaveBeenCalledTimes(3)
   expect(sync).toHaveBeenCalledTimes(1)
   expect(sync).toHaveBeenCalledWith(server.id)
   expect(container.textContent).not.toContain('旧版远端进程退出中')

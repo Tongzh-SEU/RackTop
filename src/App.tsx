@@ -78,7 +78,7 @@ import { OnboardingChecklist, type OnboardingStep } from './components/Onboardin
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { ProjectForm } from './components/ProjectForm'
 import { ProjectConflictDialog, ProjectDeleteDialog, ProjectView, syncableProjectTargets } from './components/ProjectView'
-import { isRemoteHistoryCleanupPendingError, isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
+import { isRemoteHistoryCleanupPendingError, isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_CLEANUP_RETRY_INITIAL_MS, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_RETRY_MAX_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
 import { ResourceTrend } from './components/ResourceTrend'
 import { ServerForm } from './components/ServerForm'
 import { SshTerminal } from './components/SshTerminal'
@@ -883,12 +883,14 @@ function App() {
     let cancelled = false
     let feedbackTimer: number | null = null
     let successTimer: number | null = null
-    const syncAllRemoteHistory = async (initial: boolean) => remoteSyncCoordinator.current.run(async () => {
+    let cleanupRetryTimer: number | null = null
+    let cleanupRetryDelayMs = REMOTE_SYNC_CLEANUP_RETRY_INITIAL_MS
+    const syncAllRemoteHistory = async (initial: boolean, retryServerIds?: Set<string>) => remoteSyncCoordinator.current.run(async () => {
       if (cancelled) return
       const allEnabledServers = remoteHistoryServersRef.current.filter((server) => server.remoteHistoryEnabled)
       const nowSeconds = Math.floor(Date.now() / 1000)
       const freshServerCount = initial ? allEnabledServers.filter((server) => isRemoteSyncFresh(server, nowSeconds)).length : 0
-      const enabledServers = allEnabledServers.filter((server) => (!initial || !isRemoteSyncFresh(server, nowSeconds)) && !remoteSyncInFlight.current.has(server.id))
+      const enabledServers = allEnabledServers.filter((server) => (!initial || !isRemoteSyncFresh(server, nowSeconds)) && (!retryServerIds || retryServerIds.has(server.id)) && !remoteSyncInFlight.current.has(server.id))
       if (enabledServers.length === 0) return
       let completed = freshServerCount
       const total = allEnabledServers.length
@@ -956,10 +958,26 @@ function App() {
         feedbackTimer = null
       }
       if (cancelled) return
+      const cleanupRetryDelaySeconds = cleanupPendingServerIds.length > 0 ? Math.ceil(cleanupRetryDelayMs / 1000) : undefined
+      if (cleanupRetryTimer !== null) {
+        window.clearTimeout(cleanupRetryTimer)
+        cleanupRetryTimer = null
+      }
+      if (cleanupPendingServerIds.length > 0) {
+        const retryDelay = cleanupRetryDelayMs
+        cleanupRetryDelayMs = Math.min(cleanupRetryDelayMs * 2, REMOTE_SYNC_RETRY_MAX_MS)
+        const retryServerIds = new Set(cleanupPendingServerIds)
+        cleanupRetryTimer = window.setTimeout(() => {
+          cleanupRetryTimer = null
+          void syncAllRemoteHistory(false, retryServerIds)
+        }, retryDelay)
+      } else {
+        cleanupRetryDelayMs = REMOTE_SYNC_CLEANUP_RETRY_INITIAL_MS
+      }
       if (failedServerIds.length > 0) {
-        setRemoteSyncStatus({ phase: 'error', completed, total, importedCount, failedServerIds, failedServerErrors, cleanupPendingServerIds })
+        setRemoteSyncStatus({ phase: 'error', completed, total, importedCount, failedServerIds, failedServerErrors, cleanupPendingServerIds, retryDelaySeconds: cleanupRetryDelaySeconds })
       } else if (cleanupPendingServerIds.length > 0) {
-        setRemoteSyncStatus({ phase: 'cleanupPending', completed, total, importedCount, failedServerIds: [], cleanupPendingServerIds })
+        setRemoteSyncStatus({ phase: 'cleanupPending', completed, total, importedCount, failedServerIds: [], cleanupPendingServerIds, retryDelaySeconds: cleanupRetryDelaySeconds })
       } else if (startingServerIds.length > 0) {
         setRemoteSyncStatus({ phase: 'starting', completed, total, importedCount, failedServerIds: [], startingServerIds })
       } else if (initial && visible) {
@@ -977,6 +995,7 @@ function App() {
       window.clearInterval(interval)
       if (feedbackTimer !== null) window.clearTimeout(feedbackTimer)
       if (successTimer !== null) window.clearTimeout(successTimer)
+      if (cleanupRetryTimer !== null) window.clearTimeout(cleanupRetryTimer)
     }
   }, [remoteHistoryServerKey, remoteSyncRetryRevision, initialCollectionComplete])
 
