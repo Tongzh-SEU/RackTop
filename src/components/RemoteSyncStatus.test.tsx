@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { isRemoteHistoryCleanupPendingError, isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_STALE_SECONDS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './RemoteSyncStatus'
+import { isRemoteHistoryCleanupPendingError, isRemoteHistoryRetryableError, isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_STALE_SECONDS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './RemoteSyncStatus'
 
 const baseStatus: RemoteSyncStatusState = { phase: 'syncing', completed: 2, total: 4, importedCount: 0, failedServerIds: [] }
 
@@ -20,8 +20,8 @@ describe('RemoteSyncStatus', () => {
     const failure = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'error', failedServerIds: ['a', 'b'] }} onOpenFailure={() => {}} />)
     expect(failure).toContain('<button')
     expect(failure).toContain('2 台历史同步失败 · 5 分钟后重试')
-    const starting = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'starting', startingServerIds: ['a'] }} onOpenFailure={() => {}} />)
-    expect(starting).toContain('远端 daemon 启动中 · 1 台，5 分钟后重试')
+    const starting = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'starting', startingServerIds: ['a'], retryDelaySeconds: 15 }} onOpenFailure={() => {}} />)
+    expect(starting).toContain('远端 daemon 启动中 · 1 台，15 秒后重试')
     const cleanupPending = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'cleanupPending', cleanupPendingServerIds: ['a'] }} onOpenFailure={() => {}} />)
     expect(cleanupPending).toContain('旧版远端进程退出中 · 1 台，5 分钟后重试')
   })
@@ -29,6 +29,9 @@ describe('RemoteSyncStatus', () => {
   it('recognizes startup-in-progress and allows one retry after the server recovers', () => {
     const startingError = '远端历史 daemon 正在启动，请稍后重试'
     expect(isRemoteHistoryStartingError(startingError)).toBe(true)
+    expect(isRemoteHistoryRetryableError('连接 GPU 节点同步历史超时')).toBe(true)
+    expect(isRemoteHistoryRetryableError('SSH 连接失败：Connection refused')).toBe(true)
+    expect(isRemoteHistoryRetryableError('SSH 主机指纹验证失败：Host key verification failed')).toBe(false)
     const cleanupPendingError = '旧版远端历史进程正在退出，等待清理完成后重试'
     expect(isRemoteHistoryCleanupPendingError(cleanupPendingError)).toBe(true)
     expect(isRemoteHistoryStartingError('Permission denied')).toBe(false)

@@ -131,6 +131,59 @@ it('shows the actual history sync failure when opening the status', async () => 
   expect(container.textContent).toContain('历史同步失败：旧版历史入口检查失败')
 })
 
+it('queues an edited server for retry even when its last history sync is fresh', async () => {
+  api.isDesktop = true
+  vi.mocked(api.listServers).mockResolvedValue([{ ...server, remoteHistoryEnabled: true, remoteHistoryLastSyncAt: null }])
+  vi.spyOn(api, 'collectServer').mockImplementation(collectSuccessfully)
+  const configure = vi.spyOn(api, 'configureRemoteHistory')
+    .mockResolvedValueOnce(undefined)
+    .mockRejectedValueOnce(new Error('旧版远端历史进程正在退出，等待清理完成后重试'))
+    .mockResolvedValue(undefined)
+  const sync = vi.spyOn(api, 'syncRemoteHistory').mockResolvedValue({ importedCount: 0, latestTimestamp: start / 1000 })
+  vi.spyOn(api, 'saveServer').mockImplementation(async (draft) => ({ ...server, ...draft, id: server.id, remoteHistoryEnabled: true, remoteHistoryLastSyncAt: start / 1000 }))
+
+  await render()
+  expect(configure).toHaveBeenCalledTimes(1)
+  expect(sync).toHaveBeenCalledTimes(1)
+
+  const serverRow = container.querySelector<HTMLButtonElement>('.server-row')
+  await act(async () => serverRow?.click())
+  const connectionTab = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((button) => button.textContent === '配置')
+  await act(async () => connectionTab?.click())
+  const editButton = [...container.querySelectorAll<HTMLButtonElement>('.connection-panel button')].find((button) => button.textContent?.includes('编辑配置'))
+  await act(async () => editButton?.click())
+  const submitButton = container.querySelector<HTMLButtonElement>('.server-form button[type="submit"]')
+  await act(async () => submitButton?.click())
+
+  expect(configure).toHaveBeenCalledTimes(3)
+  expect(sync).toHaveBeenCalledTimes(2)
+  expect(container.textContent).not.toContain('旧版远端进程退出中')
+})
+
+it('retries a remote history timeout quickly and returns to sync when reachable', async () => {
+  api.isDesktop = true
+  vi.mocked(api.listServers).mockResolvedValue([{ ...server, remoteHistoryEnabled: true, remoteHistoryLastSyncAt: null }])
+  vi.spyOn(api, 'collectServer').mockImplementationOnce(collectSuccessfully)
+    .mockImplementation(() => new Promise(() => {}))
+  const configure = vi.spyOn(api, 'configureRemoteHistory')
+    .mockRejectedValueOnce(new Error('连接 GPU 节点同步历史超时'))
+    .mockRejectedValueOnce(new Error('连接 GPU 节点同步历史超时'))
+    .mockRejectedValueOnce(new Error('连接 GPU 节点同步历史超时'))
+    .mockResolvedValue(undefined)
+  const sync = vi.spyOn(api, 'syncRemoteHistory').mockResolvedValue({ importedCount: 1, latestTimestamp: start / 1000 })
+
+  await render()
+  await act(async () => vi.advanceTimersByTimeAsync(3_000))
+  expect(configure).toHaveBeenCalledTimes(3)
+  expect(sync).not.toHaveBeenCalled()
+  expect(container.textContent).toContain('1 台历史同步失败 · 15 秒后重试')
+
+  await act(async () => vi.advanceTimersByTimeAsync(15_000))
+  expect(configure).toHaveBeenCalledTimes(4)
+  expect(sync).toHaveBeenCalledTimes(1)
+  expect(container.textContent).not.toContain('历史同步失败')
+})
+
 it('retries legacy cleanup with backoff and resumes history sync when the old daemon exits', async () => {
   api.isDesktop = true
   vi.mocked(api.listServers).mockResolvedValue([{ ...server, remoteHistoryEnabled: true, remoteHistoryLastSyncAt: null }])
