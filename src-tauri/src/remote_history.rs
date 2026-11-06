@@ -462,8 +462,8 @@ for attempt in 1 2 3; do
   if racktop_daemon_exists "$state/.daemon.sh" "" ""; then ready=1; break; fi
 done
 if [ "$ready" -ne 1 ]; then
-  printf '远端历史常驻进程启动失败；未检测到存活的 daemon' >&2
-  exit 43
+  printf '__RACKTOP_REMOTE_HISTORY_STARTING__\n'
+  exit 0
 fi
 flock -u 5
 printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
@@ -781,6 +781,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn cleanup_force_kills_a_legacy_process_tree_that_ignores_term() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let legacy_dir = root.join(".racktop");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_daemon = legacy_dir.join(".daemon.sh");
+        fs::write(&legacy_daemon, "#!/bin/sh\ntrap '' TERM\nwhile :; do sleep 30; done\n").unwrap();
+        fs::set_permissions(&legacy_daemon, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut legacy = ChildProcessGuard(std::process::Command::new("sh")
+            .arg(&legacy_daemon)
+            .env("HOME", root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn().unwrap());
+        std::thread::sleep(Duration::from_millis(100));
+
+        let script = format!(
+            "{}\nracktop_cleanup_legacy_daemons \"$HOME/.racktop/.daemon.sh\" \"\"\n",
+            REMOTE_DAEMON_CLEANUP_SCRIPT.replace("\r\n", "\n")
+        );
+        let output = std::process::Command::new("sh").arg("-c").arg(script)
+            .env("HOME", root)
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(legacy.0.try_wait().unwrap().is_some(), "TERM-ignoring legacy daemon was not force-killed");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn installer_reacquires_a_legacy_daemon_lock_and_starts_in_the_same_attempt() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let server: Server = serde_json::from_value(serde_json::json!({
@@ -908,6 +939,49 @@ esac
             assert_eq!(root.join("started").exists(), mode == "gone", "mode={mode}: unexpected replacement daemon state");
         }
         assert_eq!(fs::read_to_string(root.join("start-count")).unwrap().lines().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_reports_unconfirmed_new_daemon_as_retryable_starting_state() {
+        use std::os::unix::fs::PermissionsExt;
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "startup-test", "name": "startup-test", "host": "example.com", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 5,
+            "historyRetentionDays": 90, "remoteHistoryEnabled": true,
+            "authMethod": "sshAgent", "status": "unknown"
+        })).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(root.join("lock-root")).unwrap();
+        for (name, body) in [
+            ("flock", "case \"$*\" in *'-u 6'*) touch \"$HOME/launch-stage-reached\" ;; esac; exit 0"),
+            ("stat", "case \"$*\" in *%T*) echo tmpfs ;; *%u*) id -u ;; *%a*) echo 700 ;; esac"),
+            ("timeout", "exit 0"),
+            ("ps", "exit 0"),
+            ("sleep", "exit 0"),
+            ("nohup", "exit 0"),
+        ] {
+            let file = bin.join(name);
+            fs::write(&file, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let script = build_install_script(&server, "startup-client")
+            .replace("/run/lock/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid")
+            .replace("/dev/shm/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid");
+        let output = std::process::Command::new("sh").arg("-c").arg(&script)
+            .env("HOME", root)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output().unwrap();
+
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("__RACKTOP_REMOTE_HISTORY_STARTING__"), "stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let state = client_state_directory(&server, "startup-client").replace("$HOME", root.to_str().unwrap());
+        assert!(Path::new(&state).join(".daemon.sh").exists());
+        assert!(root.join("launch-stage-reached").exists());
     }
 
     #[cfg(unix)]
@@ -1526,7 +1600,8 @@ esac
         let source = include_str!("remote_history.rs").replace("\r\n", "\n");
         assert!(REMOTE_DAEMON_CLEANUP_SCRIPT.contains("ps -ww -u"));
         assert!(REMOTE_DAEMON_CLEANUP_SCRIPT.contains("kill -TERM"));
-        assert!(!REMOTE_DAEMON_CLEANUP_SCRIPT.contains("kill -KILL"));
+        assert!(REMOTE_DAEMON_CLEANUP_SCRIPT.contains("kill -KILL"));
+        assert!(REMOTE_DAEMON_CLEANUP_SCRIPT.contains("ends_with_path(args, daemon)"));
         assert!(source.contains("nohup setsid sh \"$state/.daemon.sh\""));
         assert!(source.contains("replace(\"\\r\\n\", \"\\n\")"));
         assert!(source.contains("$state/.daemon.log"));

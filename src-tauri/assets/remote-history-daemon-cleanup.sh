@@ -42,24 +42,40 @@ racktop_legacy_process_snapshot() {
 racktop_stop_legacy_daemons() {
   racktop_legacy_daemon="$1"
   racktop_legacy_collector="$2"
+  racktop_stop_started="$(date +%s 2>/dev/null)" || return 1
+  case "$racktop_stop_started" in ''|*[!0-9]*) return 1 ;; esac
+  racktop_force_at=$((racktop_stop_started + 3))
 
   while :; do
     racktop_snapshot="$(racktop_legacy_process_snapshot "$racktop_legacy_daemon" "$racktop_legacy_collector")" || return 1
     [ -n "$racktop_snapshot" ] || return 0
-    if printf '%s\n' "$racktop_snapshot" | awk '$3 ~ /^D/ { found = 1 } END { exit !found }'; then
-      return 1
-    fi
     racktop_now="$(date +%s 2>/dev/null)" || return 1
     case "$racktop_now" in ''|*[!0-9]*) return 1 ;; esac
     [ "$racktop_now" -lt "$racktop_cleanup_deadline" ] || return 1
 
-    racktop_deepest="$(printf '%s\n' "$racktop_snapshot" | awk 'BEGIN { depth = 0 } $1 > depth { depth = $1 } END { print depth }')"
-    racktop_pids="$(printf '%s\n' "$racktop_snapshot" | awk -v depth="$racktop_deepest" '$1 == depth { print $2 }')"
-    [ -n "$racktop_pids" ] || return 1
-    # Stop collector children before their daemon parent.
-    for racktop_pid in $racktop_pids; do
-      kill -TERM "$racktop_pid" 2>/dev/null || true
-    done
+    if printf '%s\n' "$racktop_snapshot" | awk '$3 ~ /^D/ { found = 1 } END { exit !found }'; then
+      racktop_pids="$(printf '%s\n' "$racktop_snapshot" | awk '{ print $2 }')"
+      for racktop_pid in $racktop_pids; do
+        kill -KILL "$racktop_pid" 2>/dev/null || true
+      done
+      return 1
+    fi
+
+    if [ "$racktop_now" -ge "$racktop_force_at" ]; then
+      racktop_pids="$(printf '%s\n' "$racktop_snapshot" | awk '{ print $2 }')"
+      [ -n "$racktop_pids" ] || return 1
+      for racktop_pid in $racktop_pids; do
+        kill -KILL "$racktop_pid" 2>/dev/null || true
+      done
+    else
+      racktop_deepest="$(printf '%s\n' "$racktop_snapshot" | awk 'BEGIN { depth = 0 } $1 > depth { depth = $1 } END { print depth }')"
+      racktop_pids="$(printf '%s\n' "$racktop_snapshot" | awk -v depth="$racktop_deepest" '$1 == depth { print $2 }')"
+      [ -n "$racktop_pids" ] || return 1
+      # Stop collector children before their daemon parent.
+      for racktop_pid in $racktop_pids; do
+        kill -TERM "$racktop_pid" 2>/dev/null || true
+      done
+    fi
     sleep 1
   done
 }
