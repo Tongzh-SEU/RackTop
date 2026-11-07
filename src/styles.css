@@ -155,9 +155,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .workspace__scroll--terminal > .detail-page--terminal { flex: 0 0 auto; height: auto; margin-bottom: 14px; }
 .terminal-workspace { display: grid; flex: 1 1 0; min-width: 0; min-height: 0; width: min(1180px, calc(100% - 52px)); margin: 0 auto 26px; }
 .terminal-workspace[hidden] { display: none; }
+:is(.server-list, .workspace__scroll) { --scrollbar-thumb: color-mix(in srgb, var(--text-tertiary) 20%, transparent); }
+.server-list { scrollbar-color: var(--scrollbar-thumb) transparent; }
 .workspace__scroll::-webkit-scrollbar { width: 9px; }
 .workspace__scroll::-webkit-scrollbar-track { background: transparent; }
 .workspace__scroll::-webkit-scrollbar-thumb { min-height: 44px; border: 3px solid transparent; border-radius: 999px; background: color-mix(in srgb, var(--text-tertiary) 20%, transparent); background-clip: padding-box; }
+/* Native macOS overlay visibility stays untouched; Windows and Linux hide only
+   the inactive thumb and reserve a stable gutter for overflowing content. */
+:root:is([data-platform="windows"], [data-platform="linux"]) :is(.server-list, .workspace__scroll) { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
+:root:is([data-platform="windows"], [data-platform="linux"]) .server-list::-webkit-scrollbar { width: 9px; }
+:root:is([data-platform="windows"], [data-platform="linux"]) .server-list::-webkit-scrollbar-track { background: transparent; }
+:root:is([data-platform="windows"], [data-platform="linux"]) .server-list::-webkit-scrollbar-thumb,
+:root:is([data-platform="windows"], [data-platform="linux"]) .workspace__scroll::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); }
+:root:is([data-platform="windows"], [data-platform="linux"]) .server-list::-webkit-scrollbar-thumb { min-height: 44px; border: 3px solid transparent; border-radius: 999px; background-clip: padding-box; }
+:root:is([data-platform="windows"], [data-platform="linux"]) :is(.server-list, .workspace__scroll)::-webkit-scrollbar-button { display: none; }
+:root:is([data-platform="windows"], [data-platform="linux"]) :is(.server-list, .workspace__scroll):not([data-scrollbar-active]) { --scrollbar-thumb: transparent; }
 .topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; min-height: 78px; padding: 14px 26px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); background: var(--bg); }
 .topbar__title { flex: 1; min-width: 0; }
 .topbar__title, .topbar__title *, .refresh-label, .refresh-label * { pointer-events: none; }
@@ -1117,8 +1129,8 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .workspace__scroll:hover { scrollbar-color: color-mix(in srgb, var(--text-tertiary) 34%, transparent) transparent; }
-  .workspace__scroll:hover::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--text-tertiary) 34%, transparent); }
+  .workspace__scroll:hover { scrollbar-color: var(--scrollbar-thumb) transparent; }
+  .workspace__scroll:hover::-webkit-scrollbar-thumb { background-color: var(--scrollbar-thumb); }
   .settings-body:hover { scrollbar-color: color-mix(in srgb, var(--text-tertiary) 34%, transparent) transparent; }
   .settings-body:hover::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--text-tertiary) 34%, transparent); }
   .server-form__body:hover { scrollbar-color: color-mix(in srgb, var(--text-tertiary) 34%, transparent) transparent; }
@@ -1247,8 +1259,10 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
   .sheet, .toast { transform: none !important; }
   .project-target__action-button:active { transform: none; }
+  .spin { animation: spin 1.25s linear infinite !important; }
 }
 :root[data-reduce-motion="true"] *, :root[data-reduce-motion="true"] *::before, :root[data-reduce-motion="true"] *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+:root[data-reduce-motion="true"] .spin { animation: spin 1.25s linear infinite !important; }
 :root[data-reduce-motion="true"] .project-target__action-button:active { transform: none; }
 @media (prefers-reduced-transparency: reduce) { .sidebar, .topbar, .sheet__header, .sheet__footer { background: var(--surface-solid); backdrop-filter: none; -webkit-backdrop-filter: none; } }
 @media (prefers-contrast: more) { :root { --border: rgba(0,0,0,.35); --border-strong: rgba(0,0,0,.55); } .sidebar, .topbar, .panel, .metric-card { background: var(--surface-solid); } }

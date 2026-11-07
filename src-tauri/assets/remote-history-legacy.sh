@@ -10,15 +10,43 @@ snapshot_legacy_history() {
   touch "$data_state/.legacy-reference"
   (
     collect_lock="$source_dir/.collect.lock"
-    attempts=0
-    while ! mkdir "$collect_lock" 2>/dev/null; do
-      attempts=$((attempts + 1))
-      if [ "$attempts" -ge 10 ]; then
-        printf '旧版远端采集正在写入或锁尚未释放，请稍后重试\n' >&2
-        exit 41
+    if ! mkdir "$collect_lock" 2>/dev/null; then
+      if [ "${RACKTOP_LEGACY_ALLOW_STALE_LOCK_RECOVERY:-0}" = 1 ]; then
+        if [ ! -d "$collect_lock" ] || [ -L "$collect_lock" ]; then
+          printf '旧版远端采集锁不是可安全回收的目录，已保留原数据\n' >&2
+          exit 41
+        fi
+        if ! command -v racktop_legacy_process_snapshot >/dev/null 2>&1; then
+          printf '无法确认旧版远端采集进程状态，已保留目录锁和原数据\n' >&2
+          exit 41
+        fi
+        legacy_writers="$(racktop_legacy_process_snapshot "$source_dir/.daemon.sh" "$source_dir/.collector.sh")" || {
+          printf '无法确认旧版远端采集进程状态，已保留目录锁和原数据\n' >&2
+          exit 41
+        }
+        if [ -n "$legacy_writers" ]; then
+          printf '旧版远端采集进程仍在运行，已保留目录锁和原数据\n' >&2
+          exit 41
+        fi
+        # rmdir only removes an empty stale lock; mkdir immediately reacquires
+        # it so an older client racing this check cannot write during snapshot.
+        rmdir "$collect_lock" 2>/dev/null || true
+        if ! mkdir "$collect_lock" 2>/dev/null; then
+          printf '旧版远端采集锁仍被占用或无法回收，已保留原数据\n' >&2
+          exit 41
+        fi
+      else
+        attempts=0
+        while ! mkdir "$collect_lock" 2>/dev/null; do
+          attempts=$((attempts + 1))
+          if [ "$attempts" -ge 10 ]; then
+            printf '旧版远端采集锁仍存在，请等待安装恢复或稍后重试\n' >&2
+            exit 41
+          fi
+          sleep 1
+        done
       fi
-      sleep 1
-    done
+    fi
     trap 'rmdir "$collect_lock" 2>/dev/null || true' EXIT
     trap 'exit 41' HUP INT TERM
     exec 9>"$source_dir/.usage.lock"

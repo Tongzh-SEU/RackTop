@@ -81,6 +81,8 @@ test.skipIf(process.platform !== 'linux')('releases the actual collector lock af
 
 test.skipIf(process.platform === 'win32')('two clients share one minute without duplicating history and preserve old rows', () => {
   const f = fixture()
+  const fixedNow = Math.floor(Date.now() / 60000) * 60 + 5
+  writeFileSync(join(f.directory, 'date'), `#!/bin/sh\nprintf '%s\\n' '${fixedNow}'\n`, { mode: 0o700 })
   const history = join(f.state, '.history-v1.tsv')
   const oldBucket = Math.floor(Date.now() / 60000) * 60 - 600
   const oldRow = `v3|${oldBucket}|10|20|0|GPU-old,30,40,0,50,100,20`

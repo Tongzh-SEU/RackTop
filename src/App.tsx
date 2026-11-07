@@ -78,7 +78,7 @@ import { OnboardingChecklist, type OnboardingStep } from './components/Onboardin
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { ProjectForm } from './components/ProjectForm'
 import { ProjectConflictDialog, ProjectDeleteDialog, ProjectView, syncableProjectTargets } from './components/ProjectView'
-import { isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
+import { isRemoteHistoryCleanupPendingError, isRemoteHistoryRetryableError, isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_RETRY_INITIAL_MS, REMOTE_SYNC_RETRY_MAX_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
 import { ResourceTrend } from './components/ResourceTrend'
 import { ServerForm } from './components/ServerForm'
 import { SshTerminal } from './components/SshTerminal'
@@ -104,6 +104,7 @@ import { clearTrendHistoryCache } from './utils/trendHistoryCache'
 import { gpuContextName, serverDisplayName } from './utils/serverName'
 import { loadLaunchProfiles, loadManagedRuns } from './utils/managedRuns'
 import { detectAppPlatform } from './utils/platform'
+import { enableAutoHideScrollbars } from './utils/autoHideScrollbars'
 import { acceleratorDeviceName, acceleratorDriverLabel, acceleratorLabel } from './utils/accelerator'
 import { allowsServerNotification, defaultServerNotificationSettings, normalizeServerNotificationSettings, SERVER_NOTIFICATION_CATEGORY_ITEMS } from './utils/serverNotifications'
 import { isNewerVersion, loadCachedUpdate, loadIgnoredUpdateVersion, saveCachedUpdate, saveIgnoredUpdateVersion, shouldShowUpdateBadge, UPDATE_CHECK_INTERVAL_MS, type ReleaseInfo } from './utils/updateCheck'
@@ -495,6 +496,7 @@ function App() {
   const remoteHistoryServerKey = servers.filter((server) => server.remoteHistoryEnabled).map((server) => server.id).sort().join('\n')
 
   useEffect(() => { remoteHistoryServersRef.current = servers }, [servers])
+  useEffect(() => enableAutoHideScrollbars(appPlatform), [])
   useEffect(() => { remoteSyncStatusRef.current = remoteSyncStatus }, [remoteSyncStatus])
   useEffect(() => { projectsRef.current = projects }, [projects])
   useEffect(() => { busyProjectTargetsRef.current = busyProjectTargets }, [busyProjectTargets])
@@ -605,9 +607,10 @@ function App() {
           ? `大文件同步期间采集暂时延迟 · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试`
           : `${message} · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试`,
       } : server))
-      if (message.includes('主机指纹')) {
+      if (!quiet && message.includes('主机指纹')) {
         try {
-          setPendingHostKey(await api.scanHostKey(serverId))
+          const info = await api.scanHostKey(serverId)
+          if (info.changed) setPendingHostKey(info)
         } catch (scanError) {
           if (!quiet) setToast(String(scanError))
         }
@@ -880,18 +883,22 @@ function App() {
     let cancelled = false
     let feedbackTimer: number | null = null
     let successTimer: number | null = null
-    const syncAllRemoteHistory = async (initial: boolean) => remoteSyncCoordinator.current.run(async () => {
+    let remoteHistoryRetryTimer: number | null = null
+    let remoteHistoryRetryDelayMs = REMOTE_SYNC_RETRY_INITIAL_MS
+    const syncAllRemoteHistory = async (initial: boolean, onlyRetryServerIds?: Set<string>) => remoteSyncCoordinator.current.run(async () => {
       if (cancelled) return
       const allEnabledServers = remoteHistoryServersRef.current.filter((server) => server.remoteHistoryEnabled)
       const nowSeconds = Math.floor(Date.now() / 1000)
-      const freshServerCount = initial ? allEnabledServers.filter((server) => isRemoteSyncFresh(server, nowSeconds)).length : 0
-      const enabledServers = allEnabledServers.filter((server) => (!initial || !isRemoteSyncFresh(server, nowSeconds)) && !remoteSyncInFlight.current.has(server.id))
+      const freshServerCount = initial ? allEnabledServers.filter((server) => isRemoteSyncFresh(server, nowSeconds) && !remoteSyncRecoveryQueued.current.has(server.id)).length : 0
+      const enabledServers = allEnabledServers.filter((server) => (!initial || !isRemoteSyncFresh(server, nowSeconds) || remoteSyncRecoveryQueued.current.has(server.id)) && (!onlyRetryServerIds || onlyRetryServerIds.has(server.id)) && !remoteSyncInFlight.current.has(server.id))
       if (enabledServers.length === 0) return
       let completed = freshServerCount
       const total = allEnabledServers.length
       let importedCount = 0
       const failedServerIds: string[] = []
+      const failedServerErrors: Record<string, string> = {}
       const startingServerIds: string[] = []
+      const cleanupPendingServerIds: string[] = []
       const recoveryRetry = enabledServers.some((server) => remoteSyncRecoveryQueued.current.has(server.id))
       let visible = recoveryRetry || (initial && shouldShowRemoteSyncImmediately(allEnabledServers, nowSeconds))
       const syncingState = (): RemoteSyncStatusState => ({ phase: 'syncing', completed, total, importedCount, failedServerIds: [] })
@@ -917,6 +924,11 @@ function App() {
               break
             } catch (reason) {
               lastError = reason
+              if (isRemoteHistoryCleanupPendingError(reason)) {
+                cleanupPendingServerIds.push(server.id)
+                lastError = null
+                break
+              }
               if (isRemoteHistoryStartingError(reason)) {
                 startingServerIds.push(server.id)
                 lastError = null
@@ -932,8 +944,9 @@ function App() {
           if (!cancelled && result.latestTimestamp) {
             setServers((current) => current.map((item) => item.id === server.id && item.remoteHistoryLastSyncAt !== result.latestTimestamp ? { ...item, remoteHistoryLastSyncAt: result.latestTimestamp } : item))
           }
-        } catch {
+        } catch (error) {
           failedServerIds.push(server.id)
+          failedServerErrors[server.id] = error instanceof Error ? error.message : String(error)
         } finally {
           completed += 1
           remoteSyncInFlight.current.delete(server.id)
@@ -945,10 +958,31 @@ function App() {
         feedbackTimer = null
       }
       if (cancelled) return
+      const retryableFailureServerIds = failedServerIds.filter((serverId) => isRemoteHistoryRetryableError(failedServerErrors[serverId]))
+      const retryServerIds = new Set([...cleanupPendingServerIds, ...startingServerIds, ...retryableFailureServerIds])
+      const retryDelaySeconds = retryServerIds.size > 0 ? Math.ceil(remoteHistoryRetryDelayMs / 1000) : undefined
+      if (remoteHistoryRetryTimer !== null) {
+        window.clearTimeout(remoteHistoryRetryTimer)
+        remoteHistoryRetryTimer = null
+      }
+      if (retryServerIds.size > 0) {
+        for (const serverId of retryServerIds) remoteSyncRecoveryQueued.current.add(serverId)
+        const retryDelay = remoteHistoryRetryDelayMs
+        remoteHistoryRetryDelayMs = Math.min(remoteHistoryRetryDelayMs * 2, REMOTE_SYNC_RETRY_MAX_MS)
+        remoteHistoryRetryTimer = window.setTimeout(() => {
+          remoteHistoryRetryTimer = null
+          void syncAllRemoteHistory(false, retryServerIds)
+        }, retryDelay)
+      } else {
+        remoteHistoryRetryDelayMs = REMOTE_SYNC_RETRY_INITIAL_MS
+        for (const server of enabledServers) remoteSyncRecoveryQueued.current.delete(server.id)
+      }
       if (failedServerIds.length > 0) {
-        setRemoteSyncStatus({ phase: 'error', completed, total, importedCount, failedServerIds })
+        setRemoteSyncStatus({ phase: 'error', completed, total, importedCount, failedServerIds, failedServerErrors, cleanupPendingServerIds, retryDelaySeconds })
+      } else if (cleanupPendingServerIds.length > 0) {
+        setRemoteSyncStatus({ phase: 'cleanupPending', completed, total, importedCount, failedServerIds: [], cleanupPendingServerIds, retryDelaySeconds })
       } else if (startingServerIds.length > 0) {
-        setRemoteSyncStatus({ phase: 'starting', completed, total, importedCount, failedServerIds: [], startingServerIds })
+        setRemoteSyncStatus({ phase: 'starting', completed, total, importedCount, failedServerIds: [], startingServerIds, retryDelaySeconds })
       } else if (initial && visible) {
         setRemoteSyncStatus({ phase: 'success', completed, total, importedCount, failedServerIds: [] })
         successTimer = window.setTimeout(() => setRemoteSyncStatus(null), REMOTE_SYNC_SUCCESS_DURATION_MS)
@@ -964,6 +998,7 @@ function App() {
       window.clearInterval(interval)
       if (feedbackTimer !== null) window.clearTimeout(feedbackTimer)
       if (successTimer !== null) window.clearTimeout(successTimer)
+      if (remoteHistoryRetryTimer !== null) window.clearTimeout(remoteHistoryRetryTimer)
     }
   }, [remoteHistoryServerKey, remoteSyncRetryRevision, initialCollectionComplete])
 
@@ -1351,6 +1386,7 @@ function App() {
       if (saved.remoteHistoryEnabled) {
         let configurationError: unknown = null
         let configurationStarting = false
+        let configurationCleanupPending = false
         for (const delay of [0, 900, 1800]) {
           if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay))
           try {
@@ -1359,14 +1395,22 @@ function App() {
             break
           } catch (reason) {
             configurationError = reason
+            if (isRemoteHistoryCleanupPendingError(reason)) {
+              configurationCleanupPending = true
+              break
+            }
             if (isRemoteHistoryStartingError(reason)) {
               configurationStarting = true
               break
             }
           }
         }
-        if (configurationStarting) setToast('服务器已保存；远端 daemon 正在启动，将在 5 分钟后重试')
-        else if (configurationError) setToast(`服务器已保存；远端历史将在连接稳定后重试：${String(configurationError)}`)
+        if (configurationCleanupPending || configurationStarting || (configurationError && isRemoteHistoryRetryableError(configurationError))) {
+          remoteSyncRecoveryQueued.current.add(saved.id)
+          setRemoteSyncRetryRevision((revision) => revision + 1)
+        } else if (configurationError) {
+          setToast(`服务器已保存；远端历史将在连接稳定后重试：${String(configurationError)}`)
+        }
         else {
           try { sync = await api.syncRemoteHistory(saved.id) }
           catch (reason) { setToast(`服务器已保存，远端历史首次同步失败：${String(reason)}`) }
@@ -1811,6 +1855,8 @@ function App() {
               setSelectedGpuUuid(null)
               setSelectedTab('connection')
               setMainView('server')
+              const reason = remoteSyncStatus.failedServerErrors?.[serverId]
+              if (reason) setToast(`历史同步失败：${reason}`)
             }} />}</span>}
             <span className={`refresh-label ${paused ? 'is-paused' : ''}`}><Clock3 size={14} />{paused ? '采集已暂停' : mainView === 'server' && selectedServer ? relativeTime(selectedServer.lastSeenAt) : totals.latestRefresh ? relativeTime(totals.latestRefresh) : `${settings?.defaultSamplingIntervalSeconds ?? 2} 秒采样`}</span>
             <button className="button button--secondary" onClick={() => void runManualRefreshAll()} disabled={manualRefreshingAll}><RefreshCw size={16} className={manualRefreshingAll ? 'spin' : ''} />刷新全部</button>

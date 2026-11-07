@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
+import type { DragDropEvent } from '@tauri-apps/api/webview'
 import { ArrowLeftRight, ArrowUpFromLine, CheckCircle2, FileCode2, FileInput, FileJson, FileOutput, KeyRound, LockKeyhole, LoaderCircle, X } from 'lucide-react'
 import { api } from '../services/api'
 import type { Server, ServerConfigImportPreview, ServerDraft } from '../types/models'
@@ -25,6 +27,7 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
   const menuRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const nativeDropHandlerRef = useRef<(event: { payload: DragDropEvent }) => void>(() => {})
   const [menuOpen, setMenuOpen] = useState(false)
   const [dialog, setDialog] = useState<Dialog>(null)
   const [panelPosition, setPanelPosition] = useState({ left: 12, bottom: 12, maxHeight: 'calc(100vh - 24px)' })
@@ -92,6 +95,29 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
     if (!dialog) return
     return () => triggerRef.current?.focus()
   }, [dialog])
+
+  nativeDropHandlerRef.current = ({ payload }) => {
+    if (dialog !== 'import') return
+    if (payload.type === 'enter' || payload.type === 'over') {
+      setDraggingFile(true)
+      return
+    }
+    setDraggingFile(false)
+    if (payload.type === 'drop' && payload.paths[0]) void readPackageFromPath(payload.paths[0])
+  }
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
+    let active = true
+    let unlisten: (() => void) | undefined
+    void getCurrentWebview().onDragDropEvent((event) => nativeDropHandlerRef.current(event)).then((stop) => {
+      if (active) unlisten = stop
+      else stop()
+    }).catch((reason) => {
+      if (active) setError(`无法接收拖入文件：${String(reason)}`)
+    })
+    return () => { active = false; unlisten?.() }
+  }, [])
 
   useEffect(() => {
     if (!dialog) return
@@ -167,17 +193,14 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
     }
   }
 
-  async function readPackage(file?: File) {
-    if (!file || busy) return
+  async function loadPackage(readFile: () => Promise<{ name: string; contents: string }>) {
+    if (busy) return
     resetImport()
     setError(null)
-    if (file.size > 32 * 1024 * 1024) {
-      setError('配置包超过 32 MB，无法导入')
-      return
-    }
     setBusy(true)
     try {
-      const contents = await file.text()
+      const { name, contents } = await readFile()
+      if (new Blob([contents]).size > 32 * 1024 * 1024) throw new Error('配置包超过 32 MB，无法导入')
       if (importKind === 'ssh') {
         if (contents.trimStart().startsWith('{')) throw new Error('加密配置包请使用“导入配置”')
         // A selected file is not necessarily this device's ~/.ssh/config.
@@ -190,12 +213,41 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
       } else {
         setPackageContents(contents)
       }
-      setFilename(file.name)
+      setFilename(name)
     } catch (reason) {
       setError(`无法读取配置包：${String(reason)}`)
     } finally {
       setBusy(false)
     }
+  }
+
+  function readPackage(file?: File) {
+    if (!file) return
+    if (file.size > 32 * 1024 * 1024) {
+      resetImport()
+      setError('配置包超过 32 MB，无法导入')
+      return
+    }
+    void loadPackage(async () => ({ name: file.name, contents: await file.text() }))
+  }
+
+  async function readPackageFromPath(path: string) {
+    await loadPackage(() => api.readConfigTransferFile(path))
+  }
+
+  function handleFileDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (!event.dataTransfer.types.includes('Files')) return
+    event.preventDefault()
+    if (!busy) setDraggingFile(true)
+  }
+
+  function handleFileDrop(event: React.DragEvent<HTMLDivElement>) {
+    const file = event.dataTransfer.files[0]
+    if (!file) return
+    event.preventDefault()
+    event.stopPropagation()
+    setDraggingFile(false)
+    void readPackage(file)
   }
 
   async function verifyImport() {
@@ -274,7 +326,7 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
       <button role="menuitem" aria-label="导入 SSH Config" onClick={() => openImport('ssh')}><span className="config-transfer-menu-icon"><FileInput size={17} strokeWidth={1.6} /></span><span><strong>导入 SSH Config</strong></span></button>
     </div>, document.body)}
 
-    {dialog && createPortal(<div className="transfer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && closeDialog()}>
+    {dialog && createPortal(<div className="transfer-backdrop" onDragOver={handleFileDragOver} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingFile(false) }} onDrop={handleFileDrop} onMouseDown={(event) => event.target === event.currentTarget && closeDialog()}>
       <section ref={dialogRef} style={panelPosition} className="transfer-surface config-transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="config-transfer-title" aria-busy={busy}>
         <header className="transfer-header">
           <h2 id="config-transfer-title">{dialogTitle}</h2>
@@ -294,7 +346,7 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
               {importKind === 'ssh' ? <FileCode2 size={25} /> : <FileJson size={25} />}
               <div><strong title={filename}>{filename}</strong><small>{plainDrafts ? 'SSH Config' : '加密配置包'}</small></div>
               <button className="icon-button" disabled={busy} onClick={() => { resetImport(); setError(null) }} aria-label="移除已选文件"><X size={16} /></button>
-            </div> : <div className={`transfer-dropzone ${draggingFile ? 'is-dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); if (!busy) setDraggingFile(true) }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingFile(false) }} onDrop={(event) => { event.preventDefault(); setDraggingFile(false); void readPackage(event.dataTransfer.files[0]) }}>
+            </div> : <div className={`transfer-dropzone ${draggingFile ? 'is-dragging' : ''}`}>
               <span><ArrowUpFromLine size={23} /></span>
               <strong>把配置文件拖到这里</strong>
               <button data-transfer-focus className="button button--secondary" disabled={busy} onClick={() => fileInputRef.current?.click()}>{busy ? '正在读取…' : '选择文件'}</button>

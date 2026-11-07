@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -92,6 +92,40 @@ pub struct SavedExport {
     pub path: String,
     pub server_count: usize,
     pub private_key_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DroppedConfigFile {
+    pub name: String,
+    pub contents: String,
+}
+
+pub fn read_dropped_file(path: &Path) -> Result<DroppedConfigFile, String> {
+    let path_metadata = fs::metadata(path).map_err(|error| format!("无法读取配置文件：{error}"))?;
+    if !path_metadata.is_file() {
+        return Err("请选择配置文件".into());
+    }
+
+    let file = fs::File::open(path).map_err(|error| format!("无法读取配置文件：{error}"))?;
+    let metadata = file.metadata().map_err(|error| format!("无法读取配置文件信息：{error}"))?;
+    if !metadata.is_file() {
+        return Err("请选择配置文件".into());
+    }
+    if metadata.len() > MAX_PACKAGE_BYTES as u64 {
+        return Err("配置包超过 32 MB，无法导入".into());
+    }
+
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_PACKAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("无法读取配置文件：{error}"))?;
+    if bytes.len() > MAX_PACKAGE_BYTES {
+        return Err("配置包超过 32 MB，无法导入".into());
+    }
+    let contents = String::from_utf8(bytes).map_err(|error| format!("配置文件不是有效的 UTF-8 文本：{error}"))?;
+    let name = path.file_name().ok_or_else(|| "无法识别配置文件名".to_string())?.to_string_lossy().into_owned();
+    Ok(DroppedConfigFile { name, contents })
 }
 
 pub fn save_export(path: &Path, exported: ExportedPackage) -> Result<SavedExport, String> {
@@ -713,6 +747,21 @@ mod tests {
     const PASSPHRASE: &str = "correct horse battery staple";
 
     #[test]
+    fn reads_dropped_config_file_and_enforces_file_and_size_limits() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("racktop-config.json");
+        fs::write(&path, "{\"format\":\"racktop-server-config\"}").unwrap();
+        let dropped = read_dropped_file(&path).unwrap();
+        assert_eq!(dropped.name, "racktop-config.json");
+        assert_eq!(dropped.contents, "{\"format\":\"racktop-server-config\"}");
+        assert!(read_dropped_file(directory.path()).unwrap_err().contains("请选择配置文件"));
+
+        let oversized = directory.path().join("oversized.json");
+        fs::File::create(&oversized).unwrap().set_len(MAX_PACKAGE_BYTES as u64 + 1).unwrap();
+        assert!(read_dropped_file(&oversized).unwrap_err().contains("超过 32 MB"));
+    }
+
+    #[test]
     fn ssh_export_assigns_case_insensitive_unique_aliases_and_round_trips() {
         let directory = tempdir().unwrap();
         let database = Database::open(&directory.path().join("source.sqlite")).unwrap();
@@ -827,6 +876,7 @@ mod tests {
         assert_eq!(fs::read(&key).unwrap(), TEST_KEY);
         let (command, _) = crate::collector::configured_ssh_command(&server, None).unwrap();
         let args: Vec<_> = command.as_std().get_args().map(|s| s.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|pair| pair[0] == "-o" && pair[1] == crate::collector::HOST_KEY_CHECKING));
         assert!(args.iter().any(|a| a.contains("--racktop-proxy")));
         assert!(!args.iter().any(|a| a == "-J"));
         // Exporting again must include the independent hop key, even though

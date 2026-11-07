@@ -1,6 +1,6 @@
 use crate::{
     collector::{
-        classify_ssh_error, configured_ssh_command, configured_ssh_command_without_control,
+        configured_ssh_command, configured_ssh_command_without_control, run_ssh_script,
     },
     models::{HistoryPoint, Server, UsagePoint},
 };
@@ -10,14 +10,14 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::Path,
-    process::Stdio,
 };
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 use uuid::Uuid;
 
 const REMOTE_COLLECTOR_SCRIPT: &str = concat!(include_str!("../assets/ascend-collector.sh"), include_str!("../assets/remote-history-collector.sh"));
 const REMOTE_DAEMON_SCRIPT: &str = include_str!("../assets/remote-history-daemon.sh");
 const REMOTE_DAEMON_LOCK_SCRIPT: &str = include_str!("../assets/remote-history-daemon-lock.sh");
+const REMOTE_DAEMON_CLEANUP_SCRIPT: &str = include_str!("../assets/remote-history-daemon-cleanup.sh");
 const REMOTE_USAGE_SCRIPT: &str = include_str!("../assets/remote-history-usage.sh");
 const CLIENT_ID_FILENAME: &str = "remote-history-client-id";
 const REMOTE_LIFECYCLE_SCRIPT: &str = include_str!("../assets/remote-history-lifecycle.sh");
@@ -334,6 +334,22 @@ pub(crate) fn merge_compatibility_usage(output: &str) -> Vec<UsagePoint> {
 }
 
 async fn install(server: &Server, password: Option<&str>, client_id: &str) -> Result<(), String> {
+    let script = build_install_script(server, client_id);
+    let output = run_remote_command(server, password, &script, Duration::from_secs(25)).await?;
+    if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_READY__") {
+        Ok(())
+    } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_STARTING__") {
+        Err("远端历史 daemon 正在启动，请稍后重试".into())
+    } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_CLEANUP_PENDING__") {
+        Err("旧版远端历史进程正在退出，等待清理完成后重试".into())
+    } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__") {
+        Err("远端系统没有可用的本地临时文件系统锁，远端历史 daemon 未启动".into())
+    } else {
+        Err("远端历史任务安装后未返回确认标记".into())
+    }
+}
+
+fn build_install_script(server: &Server, client_id: &str) -> String {
     // Windows checkouts may expose bundled shell assets as CRLF. Normalize before
     // sending them to Linux, where a trailing CR changes `set -e` into an invalid option.
     let collector_script = REMOTE_COLLECTOR_SCRIPT.replace("\r\n", "\n");
@@ -342,41 +358,86 @@ async fn install(server: &Server, password: Option<&str>, client_id: &str) -> Re
     let (state_data_path, client_component) = state_dir.rsplit_once("/instances/").expect("generated client state path");
     let endpoint = state_data_path.rsplit('/').next().expect("generated endpoint component");
     let daemon_lock_script = REMOTE_DAEMON_LOCK_SCRIPT.replace("\r\n", "\n");
+    let daemon_cleanup_script = REMOTE_DAEMON_CLEANUP_SCRIPT.replace("\r\n", "\n");
     let daemon_script = REMOTE_DAEMON_SCRIPT
         .replace("# RACKTOP_DAEMON_LOCK", &daemon_lock_script)
         .replace("\r\n", "\n");
     let lifecycle = lifecycle_script(&state_dir, "register");
     let encoded = STANDARD.encode(collector_script);
     let daemon_encoded = STANDARD.encode(daemon_script);
-    let script = format!(
+    format!(
         r#"set -e
 set -u
 state="{state_dir}"
 data_state="{data_state_dir}"
-export RACKTOP_HISTORY_ENDPOINT="{endpoint}"
+endpoint="{endpoint}"
+export RACKTOP_HISTORY_ENDPOINT="$endpoint"
 export RACKTOP_HISTORY_CLIENT="{client_component}"
 command -v flock >/dev/null 2>&1 || {{ printf '远端历史需要 util-linux 的 flock 命令' >&2; exit 1; }}
 command -v timeout >/dev/null 2>&1 || {{ printf '远端历史需要 timeout 命令' >&2; exit 1; }}
 {daemon_lock_script}
+{daemon_cleanup_script}
 unset RACKTOP_DAEMON_LOCK_DIR
-if racktop_acquire_daemon_lock; then
+if racktop_acquire_install_lock; then
   :
 else
   lock_status=$?
   if [ "$lock_status" -eq 1 ]; then
-    racktop_report_busy_daemon_status "$state/.daemon.sh" "$data_state/.daemon.sh" "$HOME/.racktop/remote-history/$endpoint/.daemon.sh"
+    printf '__RACKTOP_REMOTE_HISTORY_STARTING__\n'
   else
     printf '__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__\n'
   fi
   exit 0
 fi
-# Older releases used only PID and flock files on $HOME. Avoid adding another
-# daemon when one is still alive or stuck before it could update either file.
-if racktop_daemon_exists "$state/.daemon.sh" "$data_state/.daemon.sh" "$HOME/.racktop/remote-history/$endpoint/.daemon.sh"; then
-  printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
+if racktop_acquire_daemon_lock; then
+  :
+else
+  lock_status=$?
+  if [ "$lock_status" -eq 1 ]; then
+    if racktop_cleanup_legacy_daemons "$HOME/.racktop/.daemon.sh" "$HOME/.racktop/.collector.sh" \
+        "$data_state/.daemon.sh" "$data_state/.collector.sh" \
+        "$HOME/.racktop/remote-history-store/$endpoint/.daemon.sh" "$HOME/.racktop/remote-history-store/$endpoint/.collector.sh" \
+        "$HOME/.racktop/remote-history/$endpoint/.daemon.sh" "$HOME/.racktop/remote-history/$endpoint/.collector.sh"; then
+      if racktop_daemon_exists "$state/.daemon.sh" "" ""; then
+        printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
+        exit 0
+      fi
+      if racktop_acquire_daemon_lock; then
+        :
+      else
+        lock_status=$?
+        if [ "$lock_status" -eq 1 ]; then
+          printf '__RACKTOP_REMOTE_HISTORY_STARTING__\n'
+        else
+          printf '__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__\n'
+        fi
+        exit 0
+      fi
+    else
+      printf '__RACKTOP_REMOTE_HISTORY_CLEANUP_PENDING__\n'
+      exit 0
+    fi
+  else
+    printf '__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__\n'
+    exit 0
+  fi
+fi
+if racktop_cleanup_legacy_daemons "$HOME/.racktop/.daemon.sh" "$HOME/.racktop/.collector.sh" \
+  "$data_state/.daemon.sh" "$data_state/.collector.sh" \
+  "$HOME/.racktop/remote-history-store/$endpoint/.daemon.sh" "$HOME/.racktop/remote-history-store/$endpoint/.collector.sh" \
+  "$HOME/.racktop/remote-history/$endpoint/.daemon.sh" "$HOME/.racktop/remote-history/$endpoint/.collector.sh" \
+  "$state/.daemon.sh" "$state/.collector.sh"; then
+  :
+else
+  printf '__RACKTOP_REMOTE_HISTORY_CLEANUP_PENDING__\n'
   exit 0
 fi
+RACKTOP_LEGACY_ALLOW_STALE_LOCK_RECOVERY=1
 {lifecycle}
+if racktop_daemon_exists "$state/.daemon.sh" "" ""; then
+  printf '__RACKTOP_REMOTE_HISTORY_CLEANUP_PENDING__\n'
+  exit 0
+fi
 chmod 700 "$state"
 export RACKTOP_STATE_DIR="$data_state"
 export RACKTOP_CLIENT_STATE_DIR="$state"
@@ -391,9 +452,9 @@ touch "$data_state/.client-heartbeat"
 export RACKTOP_DAEMON_LOCK_HELD=1
 : > "$state/.daemon.log"
 if command -v setsid >/dev/null 2>&1; then
-  nohup setsid sh "$state/.daemon.sh" 6>&- 7>&- </dev/null >"$state/.daemon.log" 2>&1 &
+  nohup setsid sh "$state/.daemon.sh" 5>&- 6>&- 7>&- 9>&- </dev/null >"$state/.daemon.log" 2>&1 &
 else
-  nohup sh "$state/.daemon.sh" 6>&- 7>&- </dev/null >"$state/.daemon.log" 2>&1 &
+  nohup sh "$state/.daemon.sh" 5>&- 6>&- 7>&- 9>&- </dev/null >"$state/.daemon.log" 2>&1 &
 fi
 flock -u 6
 ready=0
@@ -402,22 +463,13 @@ for attempt in 1 2 3; do
   if racktop_daemon_exists "$state/.daemon.sh" "" ""; then ready=1; break; fi
 done
 if [ "$ready" -ne 1 ]; then
-  printf '远端历史常驻进程启动失败；未检测到存活的 daemon' >&2
-  exit 43
+  printf '__RACKTOP_REMOTE_HISTORY_STARTING__\n'
+  exit 0
 fi
+flock -u 5
 printf '__RACKTOP_REMOTE_HISTORY_READY__\n'
 "#,
-    );
-    let output = run_remote_command(server, password, &script, Duration::from_secs(25)).await?;
-    if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_READY__") {
-        Ok(())
-    } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_STARTING__") {
-        Err("远端历史 daemon 正在启动，请稍后重试".into())
-    } else if output.lines().any(|line| line.trim() == "__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__") {
-        Err("远端系统没有可用的本地临时文件系统锁，远端历史 daemon 未启动".into())
-    } else {
-        Err("远端历史任务安装后未返回确认标记".into())
-    }
+    )
 }
 
 #[cfg(test)]
@@ -448,22 +500,8 @@ async fn run_remote_command(
     script: &str,
     duration: Duration,
 ) -> Result<String, String> {
-    let (mut command, target) = configured_ssh_command(server, password)?;
-    command
-        .arg(target)
-        .arg(script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = timeout(duration, command.output())
-        .await
-        .map_err(|_| format!("连接 {} 同步历史超时", server.name))?
-        .map_err(|error| format!("无法启动系统 ssh：{error}"))?;
-    if !output.status.success() {
-        return Err(classify_ssh_error(
-            String::from_utf8_lossy(&output.stderr).trim(),
-        ));
-    }
+    let (command, target) = configured_ssh_command(server, password)?;
+    let output = run_ssh_script(command, &target, script, duration, &format!("连接 {} 同步历史超时", server.name)).await?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -473,22 +511,8 @@ async fn run_remote_cleanup_command(
     script: &str,
     duration: Duration,
 ) -> Result<String, String> {
-    let (mut command, target) = configured_ssh_command_without_control(server, password)?;
-    command
-        .arg(target)
-        .arg(script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = timeout(duration, command.output())
-        .await
-        .map_err(|_| format!("连接 {} 删除远端数据超时", server.name))?
-        .map_err(|error| format!("无法启动系统 ssh：{error}"))?;
-    if !output.status.success() {
-        return Err(classify_ssh_error(
-            String::from_utf8_lossy(&output.stderr).trim(),
-        ));
-    }
+    let (command, target) = configured_ssh_command_without_control(server, password)?;
+    let output = run_ssh_script(command, &target, script, duration, &format!("连接 {} 删除远端数据超时", server.name)).await?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -629,6 +653,541 @@ fn parse_usage_line(line: &str) -> Result<UsagePoint, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
+
+    #[cfg(unix)]
+    struct ChildProcessGuard(std::process::Child);
+
+    #[cfg(unix)]
+    impl Drop for ChildProcessGuard {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    // Process-table fixtures share the test runner's UID, so keep their ps snapshots isolated.
+    #[cfg(unix)]
+    static REMOTE_SCRIPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    fn remote_script_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        REMOTE_SCRIPT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_starts_a_managed_daemon_on_a_clean_host() {
+        let _script_guard = remote_script_test_guard();
+        use std::os::unix::fs::PermissionsExt;
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "upgrade-test", "name": "upgrade-test", "host": "example.com", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 5,
+            "historyRetentionDays": 90, "remoteHistoryEnabled": true,
+            "authMethod": "sshAgent", "status": "unknown"
+        })).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(root.join("lock-root")).unwrap();
+        let state = client_state_directory(&server, "upgrade-client").replace("$HOME", root.to_str().unwrap());
+        let daemon = format!("{state}/.daemon.sh");
+        for (name, body) in [
+            ("flock", "exit 0"),
+            ("stat", "case \"$*\" in *%T*) echo tmpfs ;; *%u*) id -u ;; *%a*) echo 700 ;; esac"),
+            ("timeout", "exit 0"),
+            ("ps", "case \"$*\" in *ppid=*) exit 0 ;; *) if [ -f \"$HOME/started\" ]; then printf '123 sh %s\\n' \"$TEST_DAEMON\"; fi ;; esac"),
+            ("nohup", "touch \"$HOME/started\""),
+        ] {
+            let file = bin.join(name);
+            fs::write(&file, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let script = build_install_script(&server, "upgrade-client")
+            .replace("/run/lock/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid")
+            .replace("/dev/shm/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid");
+        let output = std::process::Command::new("sh").arg("-c").arg(&script)
+            .env("HOME", root)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("TEST_DAEMON", &daemon)
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("__RACKTOP_REMOTE_HISTORY_READY__"), "stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(Path::new(&state).is_dir());
+        assert!(Path::new(&format!("{state}/.collector.sh")).is_file());
+        assert!(root.join("started").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_stops_the_legacy_store_process_tree_before_migrating_without_changing_history() {
+        let _script_guard = remote_script_test_guard();
+        use std::os::unix::fs::PermissionsExt;
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "upgrade-test", "name": "upgrade-test", "host": "example.com", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 5,
+            "historyRetentionDays": 90, "remoteHistoryEnabled": true,
+            "authMethod": "sshAgent", "status": "unknown"
+        })).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(root.join("lock-root")).unwrap();
+        let endpoint = endpoint_state_component(&server.host, server.port);
+        let data = format!("{}/.racktop/remote-history-store/{endpoint}", root.display());
+        fs::create_dir_all(&data).unwrap();
+        let legacy_daemon = format!("{data}/.daemon.sh");
+        fs::write(&legacy_daemon, "#!/bin/sh\nsleep 300 &\nchild=$!\nprintf '%s\\n' \"$child\" > \"$HOME/legacy-child-pid\"\nwait \"$child\"\n").unwrap();
+        let history = Path::new(&data).join(".history-v1.tsv");
+        let original_history = "v1|3600|10|20|0|GPU-a,30,40\n";
+        fs::write(&history, original_history).unwrap();
+
+        let mut legacy = ChildProcessGuard(std::process::Command::new("sh")
+            .arg(&legacy_daemon)
+            .env("HOME", root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn().unwrap());
+        for _ in 0..100 {
+            if root.join("legacy-child-pid").exists() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(root.join("legacy-child-pid").exists(), "legacy daemon fixture did not start");
+
+        let ps = if Path::new("/bin/ps").exists() { "/bin/ps" } else { "/usr/bin/ps" };
+        let ps_wrapper = format!(
+            "#!/bin/sh\n{ps} \"$@\"\nstatus=$?\ncase \"$*\" in *ppid=*) ;; *) if [ -f \"$HOME/started\" ]; then printf '999 sh %s\\n' \"$TEST_DAEMON\"; fi ;; esac\nexit \"$status\"\n"
+        );
+        for (name, body) in [
+            ("flock", "exit 0"),
+            ("stat", "case \"$*\" in *%T*) echo tmpfs ;; *%u*) id -u ;; *%a*) echo 700 ;; esac"),
+            ("timeout", "exit 0"),
+            ("ps", ps_wrapper.as_str()),
+            ("nohup", "touch \"$HOME/started\""),
+        ] {
+            let file = bin.join(name);
+            fs::write(&file, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let state = client_state_directory(&server, "upgrade-client").replace("$HOME", root.to_str().unwrap());
+        let script = build_install_script(&server, "upgrade-client")
+            .replace("/run/lock/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid")
+            .replace("/dev/shm/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid");
+        let output = std::process::Command::new("sh").arg("-c").arg(&script)
+            .env("HOME", root)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("TEST_DAEMON", format!("{state}/.daemon.sh"))
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("__RACKTOP_REMOTE_HISTORY_READY__"), "stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(legacy.0.try_wait().unwrap().is_some(), "legacy daemon still running after install");
+        assert_eq!(fs::read_to_string(&history).unwrap(), original_history);
+        assert!(root.join("started").exists(), "new managed daemon was not started; stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_force_kills_a_legacy_process_tree_that_ignores_term() {
+        let _script_guard = remote_script_test_guard();
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let legacy_dir = root.join(".racktop");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_daemon = legacy_dir.join(".daemon.sh");
+        fs::write(&legacy_daemon, "#!/bin/sh\ntrap '' TERM\nwhile :; do sleep 30; done\n").unwrap();
+        fs::set_permissions(&legacy_daemon, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut legacy = ChildProcessGuard(std::process::Command::new("sh")
+            .arg(&legacy_daemon)
+            .env("HOME", root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn().unwrap());
+        std::thread::sleep(Duration::from_millis(100));
+
+        let script = format!(
+            "{}\nracktop_cleanup_legacy_daemons \"$HOME/.racktop/.daemon.sh\" \"\"\n",
+            REMOTE_DAEMON_CLEANUP_SCRIPT.replace("\r\n", "\n")
+        );
+        let output = std::process::Command::new("sh").arg("-c").arg(script)
+            .env("HOME", root)
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(legacy.0.try_wait().unwrap().is_some(), "TERM-ignoring legacy daemon was not force-killed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_reacquires_a_legacy_daemon_lock_and_starts_in_the_same_attempt() {
+        let _script_guard = remote_script_test_guard();
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "upgrade-test", "name": "upgrade-test", "host": "example.com", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 5,
+            "historyRetentionDays": 90, "remoteHistoryEnabled": true,
+            "authMethod": "sshAgent", "status": "unknown"
+        })).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(root.join("lock-root")).unwrap();
+        let endpoint = endpoint_state_component(&server.host, server.port);
+        let client_component = format!("{:x}", Sha256::digest("upgrade-client".as_bytes()));
+        let uid = fs::metadata(root).unwrap().uid();
+        let lock_root = root.join(format!("lock-root/racktop-{uid}"));
+        fs::create_dir_all(&lock_root).unwrap();
+        let _daemon_lock = fs::File::create(lock_root.join(format!("{endpoint}-{client_component}.lock"))).unwrap();
+        fs::write(root.join("legacy-lock-held"), "held").unwrap();
+        fs::write(root.join("legacy-running"), "running").unwrap();
+        let legacy_daemon = root.join(".racktop/.daemon.sh");
+        fs::create_dir_all(legacy_daemon.parent().unwrap()).unwrap();
+        fs::write(&legacy_daemon, "#!/bin/sh\n").unwrap();
+        let state = client_state_directory(&server, "upgrade-client").replace("$HOME", root.to_str().unwrap());
+
+        let flock_wrapper = r#"#!/bin/sh
+case "$*" in
+  *"-n 8"*)
+    attempts="$(cat "$HOME/daemon-lock-attempts" 2>/dev/null || printf 0)"
+    attempts=$((attempts + 1))
+    printf '%s\n' "$attempts" > "$HOME/daemon-lock-attempts"
+    [ -e "$HOME/legacy-lock-held" ] && exit 1
+    ;;
+esac
+exit 0
+"#;
+        let ps_wrapper = r#"#!/bin/sh
+case "$*" in
+  *ppid=*)
+    if [ -f "$HOME/legacy-running" ]; then
+      printf '99999999 1 S sh %s\n' "$TEST_LEGACY_DAEMON"
+      rm -f "$HOME/legacy-running" "$HOME/legacy-lock-held"
+    fi
+    ;;
+  *)
+    if [ -f "$HOME/started" ]; then printf '99999999 sh %s\n' "$TEST_DAEMON"; fi
+    ;;
+esac
+"#;
+        for (name, body) in [
+            ("flock", flock_wrapper),
+            ("stat", "case \"$*\" in *%T*) echo tmpfs ;; *%u*) id -u ;; *%a*) echo 700 ;; esac"),
+            ("timeout", "exit 0"),
+            ("ps", ps_wrapper),
+            ("nohup", "touch \"$HOME/started\""),
+        ] {
+            let file = bin.join(name);
+            fs::write(&file, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let script = build_install_script(&server, "upgrade-client")
+            .replace("/run/lock/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid")
+            .replace("/dev/shm/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid");
+        let output = std::process::Command::new("sh").arg("-c").arg(&script)
+            .env("HOME", root)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("TEST_LEGACY_DAEMON", &legacy_daemon)
+            .env("TEST_DAEMON", format!("{state}/.daemon.sh"))
+            .output().unwrap();
+
+        assert!(output.status.success(), "stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("__RACKTOP_REMOTE_HISTORY_READY__"), "stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(root.join("started").exists(), "the replacement daemon must start without waiting for the periodic retry");
+        assert_eq!(fs::read_to_string(root.join("daemon-lock-attempts")).unwrap().trim(), "2");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_waits_for_legacy_cleanup_then_starts_on_a_later_retry() {
+        let _script_guard = remote_script_test_guard();
+        use std::os::unix::fs::PermissionsExt;
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "upgrade-test", "name": "upgrade-test", "host": "example.com", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 5,
+            "historyRetentionDays": 90, "remoteHistoryEnabled": true,
+            "authMethod": "sshAgent", "status": "unknown"
+        })).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(root.join("lock-root")).unwrap();
+        let legacy_root = root.join(".racktop");
+        fs::create_dir_all(legacy_root.join(".collect.lock")).unwrap();
+        let root_history = "v1|1800|11|21|0|GPU-root,31,41\n";
+        fs::write(legacy_root.join(".history-v1.tsv"), root_history).unwrap();
+        let data = remote_state_directory(&server).replace("$HOME", root.to_str().unwrap());
+        fs::create_dir_all(&data).unwrap();
+        let legacy_daemon = legacy_root.join(".daemon.sh");
+        fs::write(&legacy_daemon, "legacy daemon\n").unwrap();
+        for (name, body) in [
+            ("flock", "exit 0"),
+            ("stat", "case \"$*\" in *%T*) echo tmpfs ;; *%u*) id -u ;; *%a*) echo 700 ;; esac"),
+            ("timeout", "exit 0"),
+            ("ps", "case \"$*\" in *ppid=*) case \"$TEST_PS_MODE\" in fail) exit 1 ;; D) printf '99999999 1 D sh %s\\n' \"$TEST_LEGACY_DAEMON\" ;; esac ;; *) if [ -f \"$HOME/started\" ]; then printf '456 sh %s\\n' \"$TEST_DAEMON\"; fi ;; esac"),
+            ("nohup", "printf 'started\\n' >> \"$HOME/start-count\"; touch \"$HOME/started\""),
+        ] {
+            let file = bin.join(name);
+            fs::write(&file, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let script = build_install_script(&server, "upgrade-client")
+            .replace("/run/lock/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid")
+            .replace("/dev/shm/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid");
+        let state = client_state_directory(&server, "upgrade-client").replace("$HOME", root.to_str().unwrap());
+        for mode in ["D", "fail", "gone"] {
+            let output = std::process::Command::new("sh").arg("-c").arg(&script)
+                .env("HOME", root)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("TEST_LEGACY_DAEMON", &legacy_daemon)
+                .env("TEST_DAEMON", format!("{state}/.daemon.sh"))
+                .env("TEST_PS_MODE", mode)
+                .output().unwrap();
+            assert!(output.status.success(), "mode={mode}: {}", String::from_utf8_lossy(&output.stderr));
+            let marker = if mode == "gone" { "__RACKTOP_REMOTE_HISTORY_READY__" } else { "__RACKTOP_REMOTE_HISTORY_CLEANUP_PENDING__" };
+            assert!(String::from_utf8_lossy(&output.stdout).contains(marker), "mode={mode}: {}", String::from_utf8_lossy(&output.stdout));
+            assert_eq!(root.join("started").exists(), mode == "gone", "mode={mode}: unexpected replacement daemon state");
+            assert_eq!(legacy_root.join(".collect.lock").exists(), mode != "gone", "mode={mode}: unexpected legacy lock state");
+            if mode == "gone" {
+                let data = root.join(remote_state_directory(&server).strip_prefix("$HOME/").unwrap());
+                assert_eq!(fs::read_to_string(data.join("legacy-root/.history-v1.tsv")).unwrap(), root_history);
+            }
+        }
+        assert_eq!(fs::read_to_string(root.join("start-count")).unwrap().lines().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_reports_unconfirmed_new_daemon_as_retryable_starting_state() {
+        let _script_guard = remote_script_test_guard();
+        use std::os::unix::fs::PermissionsExt;
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "startup-test", "name": "startup-test", "host": "example.com", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 5,
+            "historyRetentionDays": 90, "remoteHistoryEnabled": true,
+            "authMethod": "sshAgent", "status": "unknown"
+        })).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(root.join("lock-root")).unwrap();
+        for (name, body) in [
+            ("flock", "case \"$*\" in *'-u 6'*) touch \"$HOME/launch-stage-reached\" ;; esac; exit 0"),
+            ("stat", "case \"$*\" in *%T*) echo tmpfs ;; *%u*) id -u ;; *%a*) echo 700 ;; esac"),
+            ("timeout", "exit 0"),
+            ("ps", "exit 0"),
+            ("sleep", "exit 0"),
+            ("nohup", "exit 0"),
+        ] {
+            let file = bin.join(name);
+            fs::write(&file, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let script = build_install_script(&server, "startup-client")
+            .replace("/run/lock/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid")
+            .replace("/dev/shm/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid");
+        let output = std::process::Command::new("sh").arg("-c").arg(&script)
+            .env("HOME", root)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output().unwrap();
+
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("__RACKTOP_REMOTE_HISTORY_STARTING__"), "stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let state = client_state_directory(&server, "startup-client").replace("$HOME", root.to_str().unwrap());
+        assert!(Path::new(&state).join(".daemon.sh").exists());
+        assert!(root.join("launch-stage-reached").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_migrates_legacy_directories_without_releasing_the_install_lock() {
+        let _script_guard = remote_script_test_guard();
+        use std::os::unix::fs::PermissionsExt;
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "upgrade-test", "name": "upgrade-test", "host": "example.com", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 5,
+            "historyRetentionDays": 90, "remoteHistoryEnabled": true,
+            "authMethod": "sshAgent", "status": "unknown"
+        })).unwrap();
+        let endpoint = endpoint_state_component(&server.host, server.port);
+        for layout in ["remote-history", "remote-history-store"] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path();
+            let bin = root.join("bin");
+            fs::create_dir(&bin).unwrap();
+            fs::create_dir(root.join("lock-root")).unwrap();
+            let legacy_root = root.join(".racktop");
+            fs::create_dir_all(legacy_root.join(".collect.lock")).unwrap();
+            let root_history = "v1|1800|11|21|0|GPU-root,31,41\n";
+            fs::write(legacy_root.join(".history-v1.tsv"), root_history).unwrap();
+            let legacy = root.join(format!(".racktop/{layout}/{endpoint}"));
+            fs::create_dir_all(&legacy).unwrap();
+            let history = "v1|3600|10|20|0|GPU-a,30,40\n";
+            let usage = "v1|3600|GPU-a|alice|60|100|60\n";
+            fs::write(legacy.join(".history-v1.tsv"), history).unwrap();
+            fs::write(legacy.join(".usage-v1.tsv"), usage).unwrap();
+
+            for (name, body) in [
+                ("flock", "#!/usr/bin/env python3\nimport fcntl, sys\nfd = int(sys.argv[-1])\nif '-u' in sys.argv: flags = fcntl.LOCK_UN\nelse: flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if '-n' in sys.argv else 0)\ntry: fcntl.flock(fd, flags)\nexcept BlockingIOError: sys.exit(1)\n"),
+                ("stat", "#!/bin/sh\ncase \"$*\" in *%T*) echo tmpfs ;; *%u*) id -u ;; *%a*) echo 700 ;; esac\n"),
+                ("timeout", "#!/bin/sh\nexit 0\n"),
+                ("ps", "#!/bin/sh\ncase \"$*\" in *ppid=*) exit 0 ;; *) if [ -f \"$HOME/started\" ]; then printf '123 sh %s\\n' \"$TEST_DAEMON\"; fi ;; esac\n"),
+                // The endpoint install lock must still be held after migration,
+                // but the spawned daemon must not inherit its descriptor.
+                ("nohup", "#!/usr/bin/env python3\nimport fcntl, os\nfrom pathlib import Path\ntry: os.fstat(5)\nexcept OSError: pass\nelse: raise RuntimeError('daemon inherited the endpoint install lock')\nlock_path = Path(os.environ['HOME'], 'lock-root', f'racktop-{os.getuid()}', os.environ['TEST_ENDPOINT'] + '.install.lock')\nwith lock_path.open('a') as lock:\n    try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)\n    except BlockingIOError: pass\n    else: raise RuntimeError('migration released the endpoint install lock')\nPath(os.environ['HOME'], 'started').touch()\n"),
+            ] {
+                let file = bin.join(name);
+                fs::write(&file, body).unwrap();
+                fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+
+            let script = build_install_script(&server, "upgrade-client")
+                .replace("/run/lock/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid")
+                .replace("/dev/shm/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid");
+            let state = client_state_directory(&server, "upgrade-client").replace("$HOME", root.to_str().unwrap());
+            let output = std::process::Command::new("sh").arg("-c").arg(&script)
+                .env("HOME", root)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("TEST_DAEMON", format!("{state}/.daemon.sh"))
+                .env("TEST_ENDPOINT", &endpoint)
+                .output().unwrap();
+            assert!(output.status.success(), "layout={layout}: stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("__RACKTOP_REMOTE_HISTORY_READY__"), "layout={layout}: {}", String::from_utf8_lossy(&output.stdout));
+            assert!(root.join("started").exists(), "layout={layout}: new daemon was not started");
+            let data = root.join(remote_state_directory(&server).strip_prefix("$HOME/").unwrap());
+            assert_eq!(fs::read_to_string(data.join(".history-v1.tsv")).unwrap(), history);
+            assert_eq!(fs::read_to_string(data.join(".usage-v1.tsv")).unwrap(), usage);
+            assert_eq!(fs::read_to_string(legacy.join(".history-v1.tsv")).unwrap(), history);
+            assert!(!legacy_root.join(".collect.lock").exists(), "empty orphan lock was not reclaimed");
+            assert_eq!(fs::read_to_string(data.join("legacy-root/.history-v1.tsv")).unwrap(), root_history);
+            assert!(data.join(".legacy-reference").exists());
+
+            fs::remove_file(root.join("started")).unwrap();
+            let retry = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .env("HOME", root)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("TEST_DAEMON", format!("{state}/.daemon.sh"))
+                .env("TEST_ENDPOINT", &endpoint)
+                .output()
+                .unwrap();
+            assert!(retry.status.success(), "retry layout={layout}: {}", String::from_utf8_lossy(&retry.stderr));
+            assert!(String::from_utf8_lossy(&retry.stdout).contains("__RACKTOP_REMOTE_HISTORY_READY__"), "retry layout={layout}: {}", String::from_utf8_lossy(&retry.stdout));
+            assert_eq!(fs::read_to_string(data.join(".history-v1.tsv")).unwrap(), history);
+            assert_eq!(fs::read_to_string(data.join(".usage-v1.tsv")).unwrap(), usage);
+            assert_eq!(fs::read_to_string(data.join("legacy-root/.history-v1.tsv")).unwrap(), root_history);
+            assert!(!legacy_root.join(".collect.lock").exists(), "retry left the legacy lock behind");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_snapshot_preserves_a_nonempty_collect_lock() {
+        let _script_guard = remote_script_test_guard();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let legacy_root = root.join(".racktop");
+        let collect_lock = legacy_root.join(".collect.lock");
+        fs::create_dir_all(&collect_lock).unwrap();
+        fs::write(collect_lock.join("writer-marker"), "preserve").unwrap();
+        let history = "v1|1800|11|21|0|GPU-root,31,41\n";
+        fs::write(legacy_root.join(".history-v1.tsv"), history).unwrap();
+
+        let script = format!(
+            "set -eu\n{}\nbase=\"$HOME/.racktop\"\ndata_state=\"$HOME/managed\"\nendpoint=test\nRACKTOP_LEGACY_ALLOW_STALE_LOCK_RECOVERY=1\n{}\n",
+            REMOTE_DAEMON_CLEANUP_SCRIPT.replace("\r\n", "\n"),
+            REMOTE_LEGACY_SCRIPT.replace("\r\n", "\n")
+        );
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", root)
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success());
+        assert_eq!(fs::read_to_string(collect_lock.join("writer-marker")).unwrap(), "preserve");
+        assert_eq!(fs::read_to_string(legacy_root.join(".history-v1.tsv")).unwrap(), history);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_install_retries_run_the_unmodified_script_and_start_one_daemon() {
+        let _script_guard = remote_script_test_guard();
+        use std::os::unix::fs::PermissionsExt;
+
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id": "concurrent-test", "name": "concurrent-test", "host": "example.com", "port": 22,
+            "username": "test", "tags": [], "samplingIntervalSeconds": 5,
+            "historyRetentionDays": 90, "remoteHistoryEnabled": true,
+            "authMethod": "sshAgent", "status": "unknown"
+        })).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(root.join("lock-root")).unwrap();
+
+        for (name, body) in [
+            ("flock", "#!/usr/bin/env python3\nimport fcntl, sys\nfd = int(sys.argv[-1])\nif '-u' in sys.argv: flags = fcntl.LOCK_UN\nelse: flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if '-n' in sys.argv else 0)\ntry: fcntl.flock(fd, flags)\nexcept BlockingIOError: sys.exit(1)\n"),
+            ("stat", "#!/bin/sh\ncase \"$*\" in *%T*) echo tmpfs ;; *%u*) id -u ;; *%a*) echo 700 ;; esac\n"),
+            ("timeout", "#!/bin/sh\nexit 0\n"),
+            ("ps", "#!/bin/sh\nif [ -f \"$HOME/started\" ]; then printf '123 sh %s\\n' \"$TEST_DAEMON\"; fi\n"),
+            ("nohup", "#!/bin/sh\nprintf 'started\\n' >> \"$HOME/start-count\"\ntouch \"$HOME/started\"\n"),
+        ] {
+            let file = bin.join(name);
+            fs::write(&file, body).unwrap();
+            fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        // This is the actual generated installer. A missing endpoint assignment
+        // fails under set -u before the daemon lock can be acquired.
+        let script = build_install_script(&server, "concurrent-client")
+            .replace("/run/lock/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid")
+            .replace("/dev/shm/racktop-$racktop_uid", "$HOME/lock-root/racktop-$racktop_uid");
+        let endpoint_init = script.find("\nendpoint=\"").expect("installer initializes endpoint");
+        let lock_acquire = script.find("if racktop_acquire_daemon_lock").expect("installer acquires daemon lock");
+        assert!(endpoint_init < lock_acquire, "endpoint must be initialized before lock checks that use it");
+        let daemon = client_state_directory(&server, "concurrent-client").replace("$HOME", root.to_str().unwrap());
+        let daemon = format!("{daemon}/.daemon.sh");
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+
+        let mut attempts = Vec::new();
+        for _ in 0..8 {
+            attempts.push(std::process::Command::new("sh")
+                .arg("-c").arg(&script)
+                .env("HOME", root)
+                .env("PATH", &path)
+                .env("TEST_DAEMON", &daemon)
+                .stdout(Stdio::piped()).stderr(Stdio::piped())
+                .spawn().unwrap());
+        }
+        for attempt in attempts {
+            let output = attempt.wait_with_output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("__RACKTOP_REMOTE_HISTORY_READY__")
+                    || stdout.contains("__RACKTOP_REMOTE_HISTORY_STARTING__"),
+                "unexpected install status: {stdout}"
+            );
+        }
+        assert_eq!(fs::read_to_string(root.join("start-count")).unwrap().lines().count(), 1);
+    }
 
     #[cfg(unix)]
     #[test]
@@ -946,6 +1505,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn daemon_collects_gpu_telemetry_after_client_heartbeat_expires() {
+        let _script_guard = remote_script_test_guard();
         use std::{
             os::unix::fs::PermissionsExt,
             thread,
@@ -1121,18 +1681,27 @@ mod tests {
         // Windows checkouts may use CRLF, while the source assertions below
         // intentionally match LF-delimited Rust snippets.
         let source = include_str!("remote_history.rs").replace("\r\n", "\n");
+        assert!(REMOTE_DAEMON_CLEANUP_SCRIPT.contains("ps -ww -u"));
+        assert!(REMOTE_DAEMON_CLEANUP_SCRIPT.contains("kill -TERM"));
+        assert!(REMOTE_DAEMON_CLEANUP_SCRIPT.contains("kill -KILL"));
+        assert!(REMOTE_DAEMON_CLEANUP_SCRIPT.contains("ends_with_path(args, daemon)"));
         assert!(source.contains("nohup setsid sh \"$state/.daemon.sh\""));
         assert!(source.contains("replace(\"\\r\\n\", \"\\n\")"));
         assert!(source.contains("$state/.daemon.log"));
         let install_start = source.find("async fn install(").unwrap();
         let install_end = source[install_start..].find("#[cfg(test)]\nfn build_disable_script").unwrap() + install_start;
         let install = &source[install_start..install_end];
+        let install_lock = install.find("if racktop_acquire_install_lock").unwrap();
         let lock = install.find("if racktop_acquire_daemon_lock").unwrap();
+        let cleanup = install.find("if racktop_cleanup_legacy_daemons").unwrap();
         let lifecycle = install.find("{lifecycle}").unwrap();
-        assert!(lock < lifecycle);
+        assert!(install_lock < lock && lock < cleanup && cleanup < lifecycle);
         assert!(install.contains("RACKTOP_DAEMON_LOCK_HELD=1"));
         assert!(install.contains("unset RACKTOP_DAEMON_LOCK_DIR"));
-        assert!(install.contains("racktop_report_busy_daemon_status \"$state/.daemon.sh\""));
+        assert!(install.contains("racktop_daemon_exists \"$state/.daemon.sh\" \"\" \"\""));
+        assert_eq!(install.matches("if racktop_acquire_daemon_lock").count(), 2);
+        assert!(install.contains("__RACKTOP_REMOTE_HISTORY_CLEANUP_PENDING__"));
+        assert!(install.contains("flock -u 5"));
         assert!(!install.contains("$state/.install.lock"));
         assert!(!install.contains("pid=\"$(cat \"$state/.daemon.pid\""));
     }
@@ -1140,6 +1709,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn daemon_lock_busy_reports_ready_only_after_confirming_daemon_process() {
+        let _script_guard = remote_script_test_guard();
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempfile::tempdir().unwrap();

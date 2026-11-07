@@ -1027,6 +1027,11 @@ fn parse_ssh_config(content: String) -> Result<Vec<ServerDraft>, String> {
 }
 
 #[tauri::command]
+fn read_config_transfer_file(path: String) -> Result<config_transfer::DroppedConfigFile, String> {
+    config_transfer::read_dropped_file(&PathBuf::from(path))
+}
+
+#[tauri::command]
 fn commit_server_config_import(
     app: AppHandle,
     database: State<'_, Database>,
@@ -1728,6 +1733,7 @@ pub fn run() {
             cancel_project_sync,
             import_ssh_config,
             parse_ssh_config,
+            read_config_transfer_file,
             export_server_config,
             prepare_server_config_import,
             commit_server_config_import,

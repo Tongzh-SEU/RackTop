@@ -596,6 +596,10 @@ export const api = {
     if (!isTauri) throw new Error('请在 RackTop 桌面版中导入 SSH Config')
     return invoke('parse_ssh_config', { content })
   },
+  async readConfigTransferFile(path: string): Promise<{ name: string; contents: string }> {
+    if (!isTauri) throw new Error('请在 RackTop 桌面版中导入配置')
+    return invoke('read_config_transfer_file', { path })
+  },
   async prepareServerConfigImport(packageContents: string, passphrase: string): Promise<ServerConfigImportPreview> {
     if (!isTauri) throw new Error('请在 RackTop 桌面版中导入配置')
     return invoke('prepare_server_config_import', { package: packageContents, passphrase })

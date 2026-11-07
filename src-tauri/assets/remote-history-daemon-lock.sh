@@ -1,7 +1,7 @@
 #!/bin/sh
 # Keep the daemon lock on node-local tmpfs. RackTop homes may live on Ceph/NFS,
 # where a stalled metadata operation must never be interpreted as a dead daemon.
-racktop_acquire_daemon_lock() {
+racktop_select_daemon_lock_root() {
   racktop_uid="$(id -u)"
   racktop_lock_override="${1:-${RACKTOP_DAEMON_LOCK_DIR:-}}"
   if [ -n "$racktop_lock_override" ]; then
@@ -31,6 +31,26 @@ racktop_acquire_daemon_lock() {
       return 2
     fi
   fi
+}
+
+racktop_acquire_install_lock() {
+  racktop_select_daemon_lock_root "${1:-}" || return $?
+  case "${RACKTOP_HISTORY_ENDPOINT:-}" in ''|*[!a-zA-Z0-9-]*) return 2 ;; esac
+  # History migration/collectors use fd 9; keep installation serialization on
+  # its own descriptor until the replacement daemon has been confirmed.
+  exec 5>"$racktop_lock_root/$RACKTOP_HISTORY_ENDPOINT.install.lock" || {
+    printf '__RACKTOP_REMOTE_HISTORY_LOCK_UNAVAILABLE__\n'
+    return 2
+  }
+  if ! flock -n 5; then
+    printf '__RACKTOP_REMOTE_HISTORY_LOCK_BUSY__\n'
+    return 1
+  fi
+  return 0
+}
+
+racktop_acquire_daemon_lock() {
+  racktop_select_daemon_lock_root "${1:-}" || return $?
   case "${RACKTOP_HISTORY_ENDPOINT:-}" in ''|*[!a-zA-Z0-9-]*) return 2 ;; esac
   case "${RACKTOP_HISTORY_CLIENT:-}" in ''|*[!a-f0-9]*) return 2 ;; esac
   racktop_lock_file="$racktop_lock_root/$RACKTOP_HISTORY_ENDPOINT-$RACKTOP_HISTORY_CLIENT.lock"

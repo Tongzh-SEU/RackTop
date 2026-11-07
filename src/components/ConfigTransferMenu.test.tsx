@@ -2,17 +2,29 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
+import { PhysicalPosition } from '@tauri-apps/api/dpi'
+import type { DragDropEvent } from '@tauri-apps/api/webview'
+import tauriConfig from '../../src-tauri/tauri.conf.json'
+import tauriLinuxConfig from '../../src-tauri/tauri.linux.conf.json'
+import tauriWindowsConfig from '../../src-tauri/tauri.windows.conf.json'
 import { ConfigTransferMenu } from './ConfigTransferMenu'
 import { api } from '../services/api'
 import type { Server, ServerDraft } from '../types/models'
 
-vi.mock('../services/api', () => ({ api: { listServers: vi.fn(), exportServerConfig: vi.fn(), prepareServerConfigImport: vi.fn(), commitServerConfigImport: vi.fn(), discardServerConfigImport: vi.fn().mockResolvedValue(undefined), saveServer: vi.fn(), parseSshConfig: vi.fn() } }))
+vi.mock('@tauri-apps/api/webview', () => ({ getCurrentWebview: vi.fn() }))
+vi.mock('../services/api', () => ({ api: { listServers: vi.fn(), exportServerConfig: vi.fn(), prepareServerConfigImport: vi.fn(), commitServerConfigImport: vi.fn(), discardServerConfigImport: vi.fn().mockResolvedValue(undefined), saveServer: vi.fn(), parseSshConfig: vi.fn(), readConfigTransferFile: vi.fn() } }))
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 let root: ReturnType<typeof createRoot>
 let container: HTMLDivElement
 const server: Server = { id: 'existing', name: 'Existing', host: '127.0.0.1', port: 22, username: 'tester', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'privateKey', identityFile: '/fixture/key', status: 'unknown' }
 const onNotice = vi.fn()
 const onImported = vi.fn().mockResolvedValue(undefined)
+let nativeDropHandler: ((event: { payload: DragDropEvent }) => void) | undefined
+const unlistenNativeDrop = vi.fn()
+function configuredDragDrop(config: unknown) {
+  return (config as { app: { windows: Array<{ dragDropEnabled?: boolean }> } }).app.windows[0].dragDropEnabled
+}
 
 function mount() {
   vi.mocked(api.discardServerConfigImport).mockResolvedValue(undefined)
@@ -34,21 +46,74 @@ function fill(input: HTMLInputElement, value: string) {
   })
 }
 
-async function dropFile(contents: string, name: string) {
+async function dropFile(contents: string, name: string, selector = '.transfer-dropzone') {
   const file = new File([contents], name)
   Object.defineProperty(file, 'text', { value: async () => contents })
   const event = new Event('drop', { bubbles: true, cancelable: true })
   Object.defineProperty(event, 'dataTransfer', { value: { files: [file] } })
-  await act(async () => document.querySelector('.transfer-dropzone')!.dispatchEvent(event))
+  await act(async () => document.querySelector(selector)!.dispatchEvent(event))
+  return event
 }
 
 afterEach(() => {
   if (root) act(() => root.unmount())
   container?.remove()
+  Reflect.deleteProperty(window, '__TAURI_INTERNALS__')
+  nativeDropHandler = undefined
   vi.resetAllMocks()
 })
 
 describe('configuration quick menu', () => {
+  it('keeps native macOS drag handling and disables it only on Windows and Linux', () => {
+    expect(configuredDragDrop(tauriConfig)).toBeUndefined()
+    expect(configuredDragDrop(tauriWindowsConfig)).toBe(false)
+    expect(configuredDragDrop(tauriLinuxConfig)).toBe(false)
+  })
+
+  it('loads a dropped configuration anywhere inside the import dialog', async () => {
+    mount()
+    click('导入 / 导出配置')
+    click('导入配置')
+
+    const event = await dropFile('encrypted-package', 'racktop-config.json', '.transfer-backdrop')
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(document.body.textContent).toContain('racktop-config.json')
+    expect(document.querySelector('input[type="password"]')).not.toBeNull()
+  })
+
+  it('loads a Mac native file drop through the Tauri path event', async () => {
+    Object.assign(window, { __TAURI_INTERNALS__: {} })
+    vi.mocked(api.readConfigTransferFile).mockResolvedValue({ name: 'racktop-config.json', contents: 'encrypted-package' })
+    vi.mocked(getCurrentWebview).mockReturnValue({
+      onDragDropEvent: vi.fn(async (handler: (event: { payload: DragDropEvent }) => void) => {
+        nativeDropHandler = handler
+        return unlistenNativeDrop
+      }),
+    } as unknown as ReturnType<typeof getCurrentWebview>)
+    mount()
+    await act(async () => { await Promise.resolve() })
+    expect(nativeDropHandler).toBeDefined()
+
+    await act(async () => {
+      nativeDropHandler!({ payload: { type: 'drop', paths: ['/Users/tester/Downloads/racktop-config.json'], position: new PhysicalPosition(10, 10) } })
+      await Promise.resolve()
+    })
+    expect(api.readConfigTransferFile).not.toHaveBeenCalled()
+
+    click('导入 / 导出配置')
+    click('导入配置')
+    await act(async () => {
+      nativeDropHandler!({ payload: { type: 'drop', paths: ['/Users/tester/Downloads/racktop-config.json'], position: new PhysicalPosition(10, 10) } })
+      await vi.waitFor(() => expect(api.readConfigTransferFile).toHaveBeenCalledWith('/Users/tester/Downloads/racktop-config.json'))
+    })
+    expect(document.body.textContent).toContain('racktop-config.json')
+    expect(document.querySelector('input[type="password"]')).not.toBeNull()
+
+    await act(async () => root.render(<></>))
+    expect(unlistenNativeDrop).toHaveBeenCalledOnce()
+  })
+
   it.each(['ssh', 'racktop'])('allows a resolved jump route in %s imports', async (kind) => {
     const routed: ServerDraft = { name: 'Routed', host: 'target.example', port: 22, username: 'tester', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'sshAgent', proxyJump: 'jump@jump.example:2222', sshHops: [{ host: 'jump.example', port: 2222, username: 'jump', authMethod: 'sshAgent' }] }
     vi.mocked(api.parseSshConfig).mockResolvedValue([routed])

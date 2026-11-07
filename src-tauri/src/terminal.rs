@@ -1,4 +1,4 @@
-use crate::{collector::{explicit_identity_file, visible_devices_variable}, models::Server};
+use crate::{collector::{explicit_identity_file, visible_devices_variable, HOST_KEY_CHECKING}, models::Server};
 use crate::ssh_keys::expand_identity_path;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -122,7 +122,7 @@ fn configured_ssh_command(server: &Server, password: Option<&str>) -> Result<Com
     // GUI processes may inherit TERM=dumb (or no TERM). SSH forwards this
     // value with the PTY request, so advertise the emulator we actually use.
     command.env("TERM", "xterm-256color");
-    command.args(["-tt", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=yes"]);
+    command.args(["-tt", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", HOST_KEY_CHECKING]);
     if server.auth_method == "password" {
         let password = password.ok_or("没有可用密码；请重新编辑服务器并输入密码")?;
         let executable = std::env::current_exe().map_err(|error| format!("无法定位 RackTop SSH_ASKPASS：{error}"))?;
