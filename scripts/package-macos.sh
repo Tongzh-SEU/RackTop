@@ -48,8 +48,9 @@ UPDATER_PATH="$TARGET_DIR/macos/RackTop_${APP_VERSION}_macos-${ARCH_LABEL}.app.t
 DMG_BACKGROUND_SVG="$ROOT_DIR/src-tauri/dmg-background.svg"
 DMG_BACKGROUND_RENDERER="$ROOT_DIR/scripts/render-dmg-background.swift"
 DMG_VOLUME_NAME="安装 RackTop ${APP_VERSION}"
-STAGE_DIR="$(mktemp -d /private/tmp/racktop-dmg.XXXXXX)"
+STAGE_DIR="$(mktemp -d /private/tmp/racktop-stage.XXXXXX)"
 MOUNT_DIR=""
+RW_DMG_DIR="$(mktemp -d /private/tmp/racktop-rw.XXXXXX)"
 RW_DMG_PATH=""
 
 cleanup() {
@@ -57,13 +58,13 @@ cleanup() {
     detach_dmg "$MOUNT_DIR" || true
   fi
   case "$STAGE_DIR" in
-    /private/tmp/racktop-dmg.*) rm -rf "$STAGE_DIR" ;;
+    /private/tmp/racktop-stage.*) rm -rf "$STAGE_DIR" ;;
   esac
   case "$MOUNT_DIR" in
     /private/tmp/racktop-mount.*) rmdir "$MOUNT_DIR" 2>/dev/null || true ;;
   esac
-  case "$RW_DMG_PATH" in
-    /private/tmp/racktop-dmg.*.dmg) rm -f "$RW_DMG_PATH" ;;
+  case "$RW_DMG_DIR" in
+    /private/tmp/racktop-rw.*) rm -rf "$RW_DMG_DIR" ;;
   esac
 }
 trap cleanup EXIT
@@ -117,8 +118,7 @@ swift "$DMG_BACKGROUND_RENDERER" "$DMG_BACKGROUND_SVG" "$STAGE_DIR/.background/b
 swift "$DMG_BACKGROUND_RENDERER" "$DMG_BACKGROUND_SVG" "$STAGE_DIR/.background/background@2x.png" 2
 chflags hidden "$STAGE_DIR/.background"
 mkdir -p "$(dirname "$DMG_PATH")"
-RW_DMG_PATH="$(mktemp /private/tmp/racktop-dmg.XXXXXX.dmg)"
-rm -f "$RW_DMG_PATH"
+RW_DMG_PATH="$RW_DMG_DIR/racktop-rw.dmg"
 hdiutil create -volname "$DMG_VOLUME_NAME" -srcfolder "$STAGE_DIR" -ov -format UDRW "$RW_DMG_PATH"
 MOUNT_DIR="/Volumes/$DMG_VOLUME_NAME"
 if [ -e "$MOUNT_DIR" ]; then
