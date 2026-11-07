@@ -432,6 +432,7 @@ else
   printf '__RACKTOP_REMOTE_HISTORY_CLEANUP_PENDING__\n'
   exit 0
 fi
+RACKTOP_LEGACY_ALLOW_STALE_LOCK_RECOVERY=1
 {lifecycle}
 if racktop_daemon_exists "$state/.daemon.sh" "" ""; then
   printf '__RACKTOP_REMOTE_HISTORY_CLEANUP_PENDING__\n'
@@ -667,9 +668,21 @@ mod tests {
         }
     }
 
+    // Process-table fixtures share the test runner's UID, so keep their ps snapshots isolated.
+    #[cfg(unix)]
+    static REMOTE_SCRIPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    fn remote_script_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        REMOTE_SCRIPT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[cfg(unix)]
     #[test]
     fn installer_starts_a_managed_daemon_on_a_clean_host() {
+        let _script_guard = remote_script_test_guard();
         use std::os::unix::fs::PermissionsExt;
         let server: Server = serde_json::from_value(serde_json::json!({
             "id": "upgrade-test", "name": "upgrade-test", "host": "example.com", "port": 22,
@@ -714,6 +727,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn installer_stops_the_legacy_store_process_tree_before_migrating_without_changing_history() {
+        let _script_guard = remote_script_test_guard();
         use std::os::unix::fs::PermissionsExt;
         let server: Server = serde_json::from_value(serde_json::json!({
             "id": "upgrade-test", "name": "upgrade-test", "host": "example.com", "port": 22,
@@ -782,6 +796,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cleanup_force_kills_a_legacy_process_tree_that_ignores_term() {
+        let _script_guard = remote_script_test_guard();
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
@@ -813,6 +828,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn installer_reacquires_a_legacy_daemon_lock_and_starts_in_the_same_attempt() {
+        let _script_guard = remote_script_test_guard();
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let server: Server = serde_json::from_value(serde_json::json!({
             "id": "upgrade-test", "name": "upgrade-test", "host": "example.com", "port": 22,
@@ -893,6 +909,7 @@ esac
     #[cfg(unix)]
     #[test]
     fn installer_waits_for_legacy_cleanup_then_starts_on_a_later_retry() {
+        let _script_guard = remote_script_test_guard();
         use std::os::unix::fs::PermissionsExt;
         let server: Server = serde_json::from_value(serde_json::json!({
             "id": "upgrade-test", "name": "upgrade-test", "host": "example.com", "port": 22,
@@ -905,15 +922,19 @@ esac
         let bin = root.join("bin");
         fs::create_dir(&bin).unwrap();
         fs::create_dir(root.join("lock-root")).unwrap();
+        let legacy_root = root.join(".racktop");
+        fs::create_dir_all(legacy_root.join(".collect.lock")).unwrap();
+        let root_history = "v1|1800|11|21|0|GPU-root,31,41\n";
+        fs::write(legacy_root.join(".history-v1.tsv"), root_history).unwrap();
         let data = remote_state_directory(&server).replace("$HOME", root.to_str().unwrap());
         fs::create_dir_all(&data).unwrap();
-        let legacy_daemon = format!("{data}/.daemon.sh");
+        let legacy_daemon = legacy_root.join(".daemon.sh");
         fs::write(&legacy_daemon, "legacy daemon\n").unwrap();
         for (name, body) in [
             ("flock", "exit 0"),
             ("stat", "case \"$*\" in *%T*) echo tmpfs ;; *%u*) id -u ;; *%a*) echo 700 ;; esac"),
             ("timeout", "exit 0"),
-            ("ps", "case \"$*\" in *ppid=*) case \"$TEST_PS_MODE\" in fail) exit 1 ;; D) printf '123 1 D sh %s\\n' \"$TEST_LEGACY_DAEMON\" ;; esac ;; *) if [ -f \"$HOME/started\" ]; then printf '456 sh %s\\n' \"$TEST_DAEMON\"; fi ;; esac"),
+            ("ps", "case \"$*\" in *ppid=*) case \"$TEST_PS_MODE\" in fail) exit 1 ;; D) printf '99999999 1 D sh %s\\n' \"$TEST_LEGACY_DAEMON\" ;; esac ;; *) if [ -f \"$HOME/started\" ]; then printf '456 sh %s\\n' \"$TEST_DAEMON\"; fi ;; esac"),
             ("nohup", "printf 'started\\n' >> \"$HOME/start-count\"; touch \"$HOME/started\""),
         ] {
             let file = bin.join(name);
@@ -937,6 +958,11 @@ esac
             let marker = if mode == "gone" { "__RACKTOP_REMOTE_HISTORY_READY__" } else { "__RACKTOP_REMOTE_HISTORY_CLEANUP_PENDING__" };
             assert!(String::from_utf8_lossy(&output.stdout).contains(marker), "mode={mode}: {}", String::from_utf8_lossy(&output.stdout));
             assert_eq!(root.join("started").exists(), mode == "gone", "mode={mode}: unexpected replacement daemon state");
+            assert_eq!(legacy_root.join(".collect.lock").exists(), mode != "gone", "mode={mode}: unexpected legacy lock state");
+            if mode == "gone" {
+                let data = root.join(remote_state_directory(&server).strip_prefix("$HOME/").unwrap());
+                assert_eq!(fs::read_to_string(data.join("legacy-root/.history-v1.tsv")).unwrap(), root_history);
+            }
         }
         assert_eq!(fs::read_to_string(root.join("start-count")).unwrap().lines().count(), 1);
     }
@@ -944,6 +970,7 @@ esac
     #[cfg(unix)]
     #[test]
     fn installer_reports_unconfirmed_new_daemon_as_retryable_starting_state() {
+        let _script_guard = remote_script_test_guard();
         use std::os::unix::fs::PermissionsExt;
         let server: Server = serde_json::from_value(serde_json::json!({
             "id": "startup-test", "name": "startup-test", "host": "example.com", "port": 22,
@@ -987,6 +1014,7 @@ esac
     #[cfg(unix)]
     #[test]
     fn installer_migrates_legacy_directories_without_releasing_the_install_lock() {
+        let _script_guard = remote_script_test_guard();
         use std::os::unix::fs::PermissionsExt;
         let server: Server = serde_json::from_value(serde_json::json!({
             "id": "upgrade-test", "name": "upgrade-test", "host": "example.com", "port": 22,
@@ -1001,6 +1029,10 @@ esac
             let bin = root.join("bin");
             fs::create_dir(&bin).unwrap();
             fs::create_dir(root.join("lock-root")).unwrap();
+            let legacy_root = root.join(".racktop");
+            fs::create_dir_all(legacy_root.join(".collect.lock")).unwrap();
+            let root_history = "v1|1800|11|21|0|GPU-root,31,41\n";
+            fs::write(legacy_root.join(".history-v1.tsv"), root_history).unwrap();
             let legacy = root.join(format!(".racktop/{layout}/{endpoint}"));
             fs::create_dir_all(&legacy).unwrap();
             let history = "v1|3600|10|20|0|GPU-a,30,40\n";
@@ -1039,13 +1071,63 @@ esac
             assert_eq!(fs::read_to_string(data.join(".history-v1.tsv")).unwrap(), history);
             assert_eq!(fs::read_to_string(data.join(".usage-v1.tsv")).unwrap(), usage);
             assert_eq!(fs::read_to_string(legacy.join(".history-v1.tsv")).unwrap(), history);
+            assert!(!legacy_root.join(".collect.lock").exists(), "empty orphan lock was not reclaimed");
+            assert_eq!(fs::read_to_string(data.join("legacy-root/.history-v1.tsv")).unwrap(), root_history);
             assert!(data.join(".legacy-reference").exists());
+
+            fs::remove_file(root.join("started")).unwrap();
+            let retry = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .env("HOME", root)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("TEST_DAEMON", format!("{state}/.daemon.sh"))
+                .env("TEST_ENDPOINT", &endpoint)
+                .output()
+                .unwrap();
+            assert!(retry.status.success(), "retry layout={layout}: {}", String::from_utf8_lossy(&retry.stderr));
+            assert!(String::from_utf8_lossy(&retry.stdout).contains("__RACKTOP_REMOTE_HISTORY_READY__"), "retry layout={layout}: {}", String::from_utf8_lossy(&retry.stdout));
+            assert_eq!(fs::read_to_string(data.join(".history-v1.tsv")).unwrap(), history);
+            assert_eq!(fs::read_to_string(data.join(".usage-v1.tsv")).unwrap(), usage);
+            assert_eq!(fs::read_to_string(data.join("legacy-root/.history-v1.tsv")).unwrap(), root_history);
+            assert!(!legacy_root.join(".collect.lock").exists(), "retry left the legacy lock behind");
         }
     }
 
     #[cfg(unix)]
     #[test]
+    fn legacy_snapshot_preserves_a_nonempty_collect_lock() {
+        let _script_guard = remote_script_test_guard();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let legacy_root = root.join(".racktop");
+        let collect_lock = legacy_root.join(".collect.lock");
+        fs::create_dir_all(&collect_lock).unwrap();
+        fs::write(collect_lock.join("writer-marker"), "preserve").unwrap();
+        let history = "v1|1800|11|21|0|GPU-root,31,41\n";
+        fs::write(legacy_root.join(".history-v1.tsv"), history).unwrap();
+
+        let script = format!(
+            "set -eu\n{}\nbase=\"$HOME/.racktop\"\ndata_state=\"$HOME/managed\"\nendpoint=test\nRACKTOP_LEGACY_ALLOW_STALE_LOCK_RECOVERY=1\n{}\n",
+            REMOTE_DAEMON_CLEANUP_SCRIPT.replace("\r\n", "\n"),
+            REMOTE_LEGACY_SCRIPT.replace("\r\n", "\n")
+        );
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", root)
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success());
+        assert_eq!(fs::read_to_string(collect_lock.join("writer-marker")).unwrap(), "preserve");
+        assert_eq!(fs::read_to_string(legacy_root.join(".history-v1.tsv")).unwrap(), history);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn concurrent_install_retries_run_the_unmodified_script_and_start_one_daemon() {
+        let _script_guard = remote_script_test_guard();
         use std::os::unix::fs::PermissionsExt;
 
         let server: Server = serde_json::from_value(serde_json::json!({
@@ -1423,6 +1505,7 @@ esac
     #[cfg(unix)]
     #[test]
     fn daemon_collects_gpu_telemetry_after_client_heartbeat_expires() {
+        let _script_guard = remote_script_test_guard();
         use std::{
             os::unix::fs::PermissionsExt,
             thread,
@@ -1626,6 +1709,7 @@ esac
     #[test]
     #[cfg(unix)]
     fn daemon_lock_busy_reports_ready_only_after_confirming_daemon_process() {
+        let _script_guard = remote_script_test_guard();
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempfile::tempdir().unwrap();
