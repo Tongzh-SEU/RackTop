@@ -3,6 +3,8 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import tauriConfig from '../../src-tauri/tauri.conf.json'
+import tauriLinuxConfig from '../../src-tauri/tauri.linux.conf.json'
+import tauriWindowsConfig from '../../src-tauri/tauri.windows.conf.json'
 import { ConfigTransferMenu } from './ConfigTransferMenu'
 import { api } from '../services/api'
 import type { Server, ServerDraft } from '../types/models'
@@ -14,6 +16,9 @@ let container: HTMLDivElement
 const server: Server = { id: 'existing', name: 'Existing', host: '127.0.0.1', port: 22, username: 'tester', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'privateKey', identityFile: '/fixture/key', status: 'unknown' }
 const onNotice = vi.fn()
 const onImported = vi.fn().mockResolvedValue(undefined)
+function configuredDragDrop(config: unknown) {
+  return (config as { app: { windows: Array<{ dragDropEnabled?: boolean }> } }).app.windows[0].dragDropEnabled
+}
 
 function mount() {
   vi.mocked(api.discardServerConfigImport).mockResolvedValue(undefined)
@@ -51,8 +56,10 @@ afterEach(() => {
 })
 
 describe('configuration quick menu', () => {
-  it('forwards native file drops to the webview import surface', () => {
-    expect(tauriConfig.app.windows[0].dragDropEnabled).toBe(false)
+  it('enables HTML5 file drops in platform-specific window configurations', () => {
+    expect(configuredDragDrop(tauriConfig)).toBeUndefined()
+    expect(configuredDragDrop(tauriWindowsConfig)).toBe(false)
+    expect(configuredDragDrop(tauriLinuxConfig)).toBe(false)
   })
 
   it('loads a dropped configuration anywhere inside the import dialog', async () => {
