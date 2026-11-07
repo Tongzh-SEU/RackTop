@@ -102,6 +102,11 @@ pub struct DroppedConfigFile {
 }
 
 pub fn read_dropped_file(path: &Path) -> Result<DroppedConfigFile, String> {
+    let path_metadata = fs::metadata(path).map_err(|error| format!("无法读取配置文件：{error}"))?;
+    if !path_metadata.is_file() {
+        return Err("请选择配置文件".into());
+    }
+
     let file = fs::File::open(path).map_err(|error| format!("无法读取配置文件：{error}"))?;
     let metadata = file.metadata().map_err(|error| format!("无法读取配置文件信息：{error}"))?;
     if !metadata.is_file() {
