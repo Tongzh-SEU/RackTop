@@ -2,6 +2,7 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import tauriConfig from '../../src-tauri/tauri.conf.json'
 import { ConfigTransferMenu } from './ConfigTransferMenu'
 import { api } from '../services/api'
 import type { Server, ServerDraft } from '../types/models'
@@ -34,12 +35,13 @@ function fill(input: HTMLInputElement, value: string) {
   })
 }
 
-async function dropFile(contents: string, name: string) {
+async function dropFile(contents: string, name: string, selector = '.transfer-dropzone') {
   const file = new File([contents], name)
   Object.defineProperty(file, 'text', { value: async () => contents })
   const event = new Event('drop', { bubbles: true, cancelable: true })
   Object.defineProperty(event, 'dataTransfer', { value: { files: [file] } })
-  await act(async () => document.querySelector('.transfer-dropzone')!.dispatchEvent(event))
+  await act(async () => document.querySelector(selector)!.dispatchEvent(event))
+  return event
 }
 
 afterEach(() => {
@@ -49,6 +51,22 @@ afterEach(() => {
 })
 
 describe('configuration quick menu', () => {
+  it('forwards native file drops to the webview import surface', () => {
+    expect(tauriConfig.app.windows[0].dragDropEnabled).toBe(false)
+  })
+
+  it('loads a dropped configuration anywhere inside the import dialog', async () => {
+    mount()
+    click('导入 / 导出配置')
+    click('导入配置')
+
+    const event = await dropFile('encrypted-package', 'racktop-config.json', '.transfer-backdrop')
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(document.body.textContent).toContain('racktop-config.json')
+    expect(document.querySelector('input[type="password"]')).not.toBeNull()
+  })
+
   it.each(['ssh', 'racktop'])('allows a resolved jump route in %s imports', async (kind) => {
     const routed: ServerDraft = { name: 'Routed', host: 'target.example', port: 22, username: 'tester', tags: [], samplingIntervalSeconds: 2, historyRetentionDays: 90, remoteHistoryEnabled: false, authMethod: 'sshAgent', proxyJump: 'jump@jump.example:2222', sshHops: [{ host: 'jump.example', port: 2222, username: 'jump', authMethod: 'sshAgent' }] }
     vi.mocked(api.parseSshConfig).mockResolvedValue([routed])

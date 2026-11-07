@@ -198,6 +198,21 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
     }
   }
 
+  function handleFileDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (!event.dataTransfer.types.includes('Files')) return
+    event.preventDefault()
+    if (!busy) setDraggingFile(true)
+  }
+
+  function handleFileDrop(event: React.DragEvent<HTMLDivElement>) {
+    const file = event.dataTransfer.files[0]
+    if (!file) return
+    event.preventDefault()
+    event.stopPropagation()
+    setDraggingFile(false)
+    void readPackage(file)
+  }
+
   async function verifyImport() {
     setBusy(true)
     setError(null)
@@ -274,7 +289,7 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
       <button role="menuitem" aria-label="导入 SSH Config" onClick={() => openImport('ssh')}><span className="config-transfer-menu-icon"><FileInput size={17} strokeWidth={1.6} /></span><span><strong>导入 SSH Config</strong></span></button>
     </div>, document.body)}
 
-    {dialog && createPortal(<div className="transfer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && closeDialog()}>
+    {dialog && createPortal(<div className="transfer-backdrop" onDragOver={handleFileDragOver} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingFile(false) }} onDrop={handleFileDrop} onMouseDown={(event) => event.target === event.currentTarget && closeDialog()}>
       <section ref={dialogRef} style={panelPosition} className="transfer-surface config-transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="config-transfer-title" aria-busy={busy}>
         <header className="transfer-header">
           <h2 id="config-transfer-title">{dialogTitle}</h2>
@@ -294,7 +309,7 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
               {importKind === 'ssh' ? <FileCode2 size={25} /> : <FileJson size={25} />}
               <div><strong title={filename}>{filename}</strong><small>{plainDrafts ? 'SSH Config' : '加密配置包'}</small></div>
               <button className="icon-button" disabled={busy} onClick={() => { resetImport(); setError(null) }} aria-label="移除已选文件"><X size={16} /></button>
-            </div> : <div className={`transfer-dropzone ${draggingFile ? 'is-dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); if (!busy) setDraggingFile(true) }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingFile(false) }} onDrop={(event) => { event.preventDefault(); setDraggingFile(false); void readPackage(event.dataTransfer.files[0]) }}>
+            </div> : <div className={`transfer-dropzone ${draggingFile ? 'is-dragging' : ''}`}>
               <span><ArrowUpFromLine size={23} /></span>
               <strong>把配置文件拖到这里</strong>
               <button data-transfer-focus className="button button--secondary" disabled={busy} onClick={() => fileInputRef.current?.click()}>{busy ? '正在读取…' : '选择文件'}</button>

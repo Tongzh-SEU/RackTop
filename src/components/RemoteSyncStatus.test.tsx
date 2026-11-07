@@ -15,7 +15,9 @@ describe('RemoteSyncStatus', () => {
   })
 
   it('renders quiet progress, success, and actionable failure states', () => {
-    expect(renderToStaticMarkup(<RemoteSyncStatus status={baseStatus} onOpenFailure={() => {}} />)).toContain('正在同步历史数据 · 2/4 台')
+    const syncing = renderToStaticMarkup(<RemoteSyncStatus status={baseStatus} onOpenFailure={() => {}} />)
+    expect(syncing).toContain('class="lucide lucide-refresh-cw spin"')
+    expect(syncing).toContain('正在同步历史数据 · 2/4 台')
     expect(renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'success', importedCount: 1_240 }} onOpenFailure={() => {}} />)).toContain('历史已同步 · 新增 1,240 条')
     const failure = renderToStaticMarkup(<RemoteSyncStatus status={{ ...baseStatus, phase: 'error', failedServerIds: ['a', 'b'] }} onOpenFailure={() => {}} />)
     expect(failure).toContain('<button')

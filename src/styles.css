@@ -1259,8 +1259,10 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
   .sheet, .toast { transform: none !important; }
   .project-target__action-button:active { transform: none; }
+  .spin { animation: spin 1.25s linear infinite !important; }
 }
 :root[data-reduce-motion="true"] *, :root[data-reduce-motion="true"] *::before, :root[data-reduce-motion="true"] *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+:root[data-reduce-motion="true"] .spin { animation: spin 1.25s linear infinite !important; }
 :root[data-reduce-motion="true"] .project-target__action-button:active { transform: none; }
 @media (prefers-reduced-transparency: reduce) { .sidebar, .topbar, .sheet__header, .sheet__footer { background: var(--surface-solid); backdrop-filter: none; -webkit-backdrop-filter: none; } }
 @media (prefers-contrast: more) { :root { --border: rgba(0,0,0,.35); --border-strong: rgba(0,0,0,.55); } .sidebar, .topbar, .panel, .metric-card { background: var(--surface-solid); } }
