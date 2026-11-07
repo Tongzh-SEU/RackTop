@@ -56,8 +56,8 @@ afterEach(() => {
 })
 
 describe('configuration quick menu', () => {
-  it('enables HTML5 file drops in platform-specific window configurations', () => {
-    expect(configuredDragDrop(tauriConfig)).toBeUndefined()
+  it('disables native drag handling so HTML5 file drops work on every platform', () => {
+    expect(configuredDragDrop(tauriConfig)).toBe(false)
     expect(configuredDragDrop(tauriWindowsConfig)).toBe(false)
     expect(configuredDragDrop(tauriLinuxConfig)).toBe(false)
   })
