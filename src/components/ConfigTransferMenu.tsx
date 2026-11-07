@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { ArrowLeftRight, ArrowUpFromLine, CheckCircle2, FileCode2, FileInput, FileJson, FileOutput, KeyRound, LockKeyhole, LoaderCircle, X } from 'lucide-react'
 import { api } from '../services/api'
 import type { Server, ServerConfigImportPreview, ServerDraft } from '../types/models'
@@ -94,6 +95,26 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
   }, [dialog])
 
   useEffect(() => {
+    if (dialog !== 'import' || typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
+    let active = true
+    let unlisten: (() => void) | undefined
+    void getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (payload.type === 'enter' || payload.type === 'over') {
+        setDraggingFile(true)
+        return
+      }
+      setDraggingFile(false)
+      if (payload.type === 'drop' && payload.paths[0]) void readPackageFromPath(payload.paths[0])
+    }).then((stop) => {
+      if (active) unlisten = stop
+      else stop()
+    }).catch((reason) => {
+      if (active) setError(`无法接收拖入文件：${String(reason)}`)
+    })
+    return () => { active = false; unlisten?.() }
+  }, [dialog, importKind])
+
+  useEffect(() => {
     if (!dialog) return
     dialogRef.current?.querySelector<HTMLElement>('[data-transfer-focus]')?.focus()
   }, [dialog, filename, preview, plainDrafts])
@@ -167,17 +188,14 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
     }
   }
 
-  async function readPackage(file?: File) {
-    if (!file || busy) return
+  async function loadPackage(readFile: () => Promise<{ name: string; contents: string }>) {
+    if (busy) return
     resetImport()
     setError(null)
-    if (file.size > 32 * 1024 * 1024) {
-      setError('配置包超过 32 MB，无法导入')
-      return
-    }
     setBusy(true)
     try {
-      const contents = await file.text()
+      const { name, contents } = await readFile()
+      if (new Blob([contents]).size > 32 * 1024 * 1024) throw new Error('配置包超过 32 MB，无法导入')
       if (importKind === 'ssh') {
         if (contents.trimStart().startsWith('{')) throw new Error('加密配置包请使用“导入配置”')
         // A selected file is not necessarily this device's ~/.ssh/config.
@@ -190,12 +208,26 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
       } else {
         setPackageContents(contents)
       }
-      setFilename(file.name)
+      setFilename(name)
     } catch (reason) {
       setError(`无法读取配置包：${String(reason)}`)
     } finally {
       setBusy(false)
     }
+  }
+
+  function readPackage(file?: File) {
+    if (!file) return
+    if (file.size > 32 * 1024 * 1024) {
+      resetImport()
+      setError('配置包超过 32 MB，无法导入')
+      return
+    }
+    void loadPackage(async () => ({ name: file.name, contents: await file.text() }))
+  }
+
+  async function readPackageFromPath(path: string) {
+    await loadPackage(() => api.readConfigTransferFile(path))
   }
 
   function handleFileDragOver(event: React.DragEvent<HTMLDivElement>) {
