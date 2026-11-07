@@ -56,8 +56,8 @@ afterEach(() => {
 })
 
 describe('configuration quick menu', () => {
-  it('disables native drag handling so HTML5 file drops work on every platform', () => {
-    expect(configuredDragDrop(tauriConfig)).toBe(false)
+  it('keeps native macOS drag handling and disables it only on Windows and Linux', () => {
+    expect(configuredDragDrop(tauriConfig)).toBeUndefined()
     expect(configuredDragDrop(tauriWindowsConfig)).toBe(false)
     expect(configuredDragDrop(tauriLinuxConfig)).toBe(false)
   })
