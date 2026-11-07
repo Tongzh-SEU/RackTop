@@ -92,11 +92,17 @@ describe('configuration quick menu', () => {
       }),
     } as unknown as ReturnType<typeof getCurrentWebview>)
     mount()
+    await act(async () => { await Promise.resolve() })
+    expect(nativeDropHandler).toBeDefined()
+
+    await act(async () => {
+      nativeDropHandler!({ payload: { type: 'drop', paths: ['/Users/tester/Downloads/racktop-config.json'], position: new PhysicalPosition(10, 10) } })
+      await Promise.resolve()
+    })
+    expect(api.readConfigTransferFile).not.toHaveBeenCalled()
+
     click('导入 / 导出配置')
     click('导入配置')
-    await act(async () => { await Promise.resolve() })
-
-    expect(nativeDropHandler).toBeDefined()
     await act(async () => {
       nativeDropHandler!({ payload: { type: 'drop', paths: ['/Users/tester/Downloads/racktop-config.json'], position: new PhysicalPosition(10, 10) } })
       await vi.waitFor(() => expect(api.readConfigTransferFile).toHaveBeenCalledWith('/Users/tester/Downloads/racktop-config.json'))

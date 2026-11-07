@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
+import type { DragDropEvent } from '@tauri-apps/api/webview'
 import { ArrowLeftRight, ArrowUpFromLine, CheckCircle2, FileCode2, FileInput, FileJson, FileOutput, KeyRound, LockKeyhole, LoaderCircle, X } from 'lucide-react'
 import { api } from '../services/api'
 import type { Server, ServerConfigImportPreview, ServerDraft } from '../types/models'
@@ -26,6 +27,7 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
   const menuRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const nativeDropHandlerRef = useRef<(event: { payload: DragDropEvent }) => void>(() => {})
   const [menuOpen, setMenuOpen] = useState(false)
   const [dialog, setDialog] = useState<Dialog>(null)
   const [panelPosition, setPanelPosition] = useState({ left: 12, bottom: 12, maxHeight: 'calc(100vh - 24px)' })
@@ -94,25 +96,28 @@ export function ConfigTransferMenu({ servers, onImported, onNotice }: ConfigTran
     return () => triggerRef.current?.focus()
   }, [dialog])
 
+  nativeDropHandlerRef.current = ({ payload }) => {
+    if (dialog !== 'import') return
+    if (payload.type === 'enter' || payload.type === 'over') {
+      setDraggingFile(true)
+      return
+    }
+    setDraggingFile(false)
+    if (payload.type === 'drop' && payload.paths[0]) void readPackageFromPath(payload.paths[0])
+  }
+
   useEffect(() => {
-    if (dialog !== 'import' || typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
     let active = true
     let unlisten: (() => void) | undefined
-    void getCurrentWebview().onDragDropEvent(({ payload }) => {
-      if (payload.type === 'enter' || payload.type === 'over') {
-        setDraggingFile(true)
-        return
-      }
-      setDraggingFile(false)
-      if (payload.type === 'drop' && payload.paths[0]) void readPackageFromPath(payload.paths[0])
-    }).then((stop) => {
+    void getCurrentWebview().onDragDropEvent((event) => nativeDropHandlerRef.current(event)).then((stop) => {
       if (active) unlisten = stop
       else stop()
     }).catch((reason) => {
       if (active) setError(`无法接收拖入文件：${String(reason)}`)
     })
     return () => { active = false; unlisten?.() }
-  }, [dialog, importKind])
+  }, [])
 
   useEffect(() => {
     if (!dialog) return
