@@ -2,6 +2,11 @@
 
 面向用户的简明更新说明，最新版本位于最上方。
 
+## 1.27.0
+
+- 切换到“指定 GPU”时清空自动推荐的选择，重复点击手动模式时保留已选 GPU。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #166](https://github.com/Tongzh-SEU/RackTop/pull/166)。
+- 修复启动任务资源未选齐时警告图标错误显示为绿色的问题。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #166](https://github.com/Tongzh-SEU/RackTop/pull/166)。
+
 ## 1.26.3
 
 - 通知中心新增系统 MEM 预警，显示内存用量、使用率与阈值，并计入铃铛提示和预警数量。
