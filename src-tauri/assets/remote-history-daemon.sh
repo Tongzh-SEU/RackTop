@@ -3,7 +3,15 @@ set -e
 set -u
 umask 077
 
-state_dir="${RACKTOP_STATE_DIR:-$HOME/.racktop}"
+# RACKTOP_DAEMON_LOCK
+if [ "${RACKTOP_DAEMON_LOCK_HELD:-0}" = 1 ]; then
+  ( : >&8 ) 2>/dev/null || { printf 'RackTop 本机 daemon 锁未被继承\n' >&2; exit 1; }
+else
+  racktop_acquire_daemon_lock || exit 0
+fi
+
+state_dir="${RACKTOP_CLIENT_STATE_DIR:-${RACKTOP_STATE_DIR:-$HOME/.racktop}}"
+data_state_dir="${RACKTOP_STATE_DIR:-$state_dir}"
 pid_file="$state_dir/.daemon.pid"
 collector="$state_dir/.collector.sh"
 heartbeat="$state_dir/.client-heartbeat"
@@ -16,14 +24,18 @@ fi
 
 printf '%s\n' "$$" > "$pid_file"
 cleanup() { rm -f "$pid_file"; }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 0' HUP INT TERM
 
 while :; do
   now="$(date +%s)"
   heartbeat_time="$(stat -c %Y "$heartbeat" 2>/dev/null || stat -f %m "$heartbeat" 2>/dev/null || printf 0)"
   case "$heartbeat_time" in *[!0-9]*|'') heartbeat_time=0 ;; esac
-  if [ $((now - heartbeat_time)) -gt 90 ]; then
-    sh "$collector" || printf '采集失败或超过 60 秒\n' >&2
+  # Instance collectors maintain a complete shared stream even while a client
+  # is online, so offline clients (including older releases) can backfill.
+  if [ -n "${RACKTOP_CLIENT_STATE_DIR:-}" ] || [ $((now - heartbeat_time)) -gt 90 ]; then
+    touch "$data_state_dir/.client-heartbeat"
+    RACKTOP_STATE_DIR="$data_state_dir" RACKTOP_CLIENT_STATE_DIR="$state_dir" sh "$collector" 8>&- || printf '采集失败或超过 60 秒\n' >&2
   fi
   sleep 60
 done

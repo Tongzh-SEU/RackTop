@@ -1,7 +1,7 @@
 use crate::models::GpuTelemetryRanges;
 use crate::disk_scan::{DiskScanState, MountScanStatus};
 use crate::models::{
-    AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Project, ProjectDraft,
+    AppSettings, HistoryHeatmapPoint, HistoryPoint, IdleReservation, Project, ProjectDraft, SshHop,
     ProjectTarget, Server, ServerDraft, ServerNotificationSettings, Snapshot, UsageDistribution,
     UsagePoint, UsageUserAggregate,
 };
@@ -25,6 +25,12 @@ pub struct RemoteCleanupTask {
     pub server: Server,
     pub expires_at: i64,
     pub managed_public_key: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CredentialReclaimTask {
+    identity_files: Vec<String>,
+    hops: Vec<SshHop>,
 }
 
 pub struct Database {
@@ -140,6 +146,142 @@ struct TrendHistoryBucket {
 
 fn hour_start(timestamp: i64) -> i64 {
     timestamp - timestamp.rem_euclid(3_600)
+}
+
+// Sources remain separate from the public hourly table so a later, fuller
+// rollup can replace its previous contribution instead of being added to it.
+// Kinds: 0 remote minute, 1 remote hour, 2 local minute, 3 opaque legacy
+// aggregate, 4 legacy aggregate known to contain only local samples.
+fn prepare_usage_reconciliation(connection: &Connection) -> Result<(), String> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS usage_sources (
+           server_id TEXT NOT NULL,timestamp INTEGER NOT NULL,hour INTEGER NOT NULL,
+           gpu_uuid TEXT NOT NULL,username TEXT NOT NULL,kind INTEGER NOT NULL,
+           active_seconds INTEGER NOT NULL,memory_mb_seconds REAL NOT NULL,coverage_seconds INTEGER NOT NULL,
+           PRIMARY KEY(server_id,timestamp,gpu_uuid,username,kind),
+           FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_usage_sources_hour ON usage_sources(server_id,hour);
+         CREATE TABLE IF NOT EXISTS usage_legacy_minutes (
+           server_id TEXT NOT NULL,timestamp INTEGER NOT NULL,PRIMARY KEY(server_id,timestamp),
+           FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+         );
+         CREATE TABLE IF NOT EXISTS usage_legacy_minute_sources (
+           server_id TEXT NOT NULL,timestamp INTEGER NOT NULL,gpu_uuid TEXT NOT NULL,username TEXT NOT NULL,
+           PRIMARY KEY(server_id,timestamp,gpu_uuid,username),
+           FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+         );
+         CREATE TABLE IF NOT EXISTS usage_reconciled (
+           server_id TEXT NOT NULL,timestamp INTEGER NOT NULL,gpu_uuid TEXT NOT NULL,username TEXT NOT NULL,
+           active_seconds INTEGER NOT NULL,memory_mb_seconds REAL NOT NULL,coverage_seconds INTEGER NOT NULL,
+           PRIMARY KEY(server_id,timestamp,gpu_uuid,username),
+           FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+         );"
+    ).map_err(|error| error.to_string())?;
+    // Previous builds wrote server-wide markers that cannot safely identify
+    // which GPU/user source was already included in a legacy aggregate.
+    connection.execute("DELETE FROM usage_legacy_minutes", []).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+// Preserve existing aggregates, including writes made by a downgraded binary.
+// Historical remote aggregates cannot be split back into individual minutes:
+// retain them as a coverage floor rather than guessing or adding them twice.
+fn capture_existing_usage(connection: &Connection, server_id: &str, hour: i64) -> Result<(), String> {
+    let changed = {
+        let mut statement = connection.prepare(
+            "SELECT u.gpu_uuid,u.username,u.active_seconds,u.memory_mb_seconds,u.coverage_seconds,
+               EXISTS(SELECT 1 FROM usage_sources s WHERE s.server_id=u.server_id AND s.hour=u.timestamp
+                 AND s.gpu_uuid=u.gpu_uuid AND s.username=u.username),
+               EXISTS(SELECT 1 FROM usage_sources s WHERE s.server_id=u.server_id AND s.hour=u.timestamp
+                 AND s.gpu_uuid=u.gpu_uuid AND s.username=u.username AND s.kind IN (1,3)),
+               EXISTS(SELECT 1 FROM remote_usage_hours h WHERE h.server_id=u.server_id AND h.timestamp=u.timestamp)
+             FROM usage_buckets u LEFT JOIN usage_reconciled r
+               USING(server_id,timestamp,gpu_uuid,username)
+             WHERE u.server_id=?1 AND u.timestamp=?2 AND (r.server_id IS NULL
+               OR u.active_seconds<>r.active_seconds OR u.memory_mb_seconds<>r.memory_mb_seconds
+               OR u.coverage_seconds<>r.coverage_seconds)",
+        ).map_err(|error| error.to_string())?;
+        statement.query_map(params![server_id,hour], |row| Ok((
+            row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,
+            row.get::<_,f64>(3)?,row.get::<_,i64>(4)?,row.get::<_,bool>(5)?,
+            row.get::<_,bool>(6)?,row.get::<_,bool>(7)?,
+        ))).map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>,_>>().map_err(|error| error.to_string())?
+    };
+    // Legacy writes have no provenance, but the public aggregate still tells us
+    // exactly which GPU/user changed. Rebase only that series and retain every
+    // untouched minute/hour source in the same hour.
+    for (gpu,user,active,memory,coverage,had_sources,had_hourly_source,has_legacy_hour_claim) in changed {
+        let kind = if had_hourly_source || (!had_sources && has_legacy_hour_claim) { 3 } else { 4 };
+        connection.execute(
+            "INSERT OR IGNORE INTO usage_legacy_minute_sources(server_id,timestamp,gpu_uuid,username)
+             SELECT server_id,timestamp,gpu_uuid,username FROM usage_sources
+             WHERE server_id=?1 AND hour=?2 AND gpu_uuid=?3 AND username=?4 AND kind=0",
+            params![server_id,hour,gpu,user],
+        ).map_err(|error| error.to_string())?;
+        connection.execute(
+            "DELETE FROM usage_sources WHERE server_id=?1 AND hour=?2 AND gpu_uuid=?3 AND username=?4",
+            params![server_id,hour,gpu,user],
+        ).map_err(|error| error.to_string())?;
+        connection.execute(
+            "INSERT INTO usage_sources(server_id,timestamp,hour,gpu_uuid,username,kind,active_seconds,memory_mb_seconds,coverage_seconds)
+             VALUES(?1,?2,?2,?3,?4,?5,?6,?7,?8)",
+            params![server_id,hour,gpu,user,kind,active,memory,coverage],
+        ).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn record_usage_source(connection: &Connection, server_id: &str, point: &UsagePoint, kind: i64) -> Result<(), String> {
+    connection.execute(
+        "INSERT INTO usage_sources(server_id,timestamp,hour,gpu_uuid,username,kind,active_seconds,memory_mb_seconds,coverage_seconds)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+         ON CONFLICT(server_id,timestamp,gpu_uuid,username,kind) DO UPDATE SET
+           active_seconds=excluded.active_seconds,memory_mb_seconds=excluded.memory_mb_seconds,coverage_seconds=excluded.coverage_seconds
+         WHERE excluded.coverage_seconds>usage_sources.coverage_seconds",
+        params![server_id,point.timestamp,hour_start(point.timestamp),point.gpu_uuid,point.username,kind,point.active_seconds,point.memory_mb_seconds,point.coverage_seconds],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn reconcile_usage_hour(connection: &Connection, server_id: &str, hour: i64) -> Result<usize, String> {
+    // Minutes (including a pre-ledger minute-only baseline) form one candidate.
+    // Hourly and opaque legacy totals are competing candidates, never additive.
+    let mut statement = connection.prepare(
+        "WITH candidates AS (
+           SELECT gpu_uuid,username,SUM(active_seconds) active,SUM(memory_mb_seconds) memory,SUM(coverage_seconds) coverage,0 priority
+           FROM usage_sources WHERE server_id=?1 AND hour=?2 AND kind IN (0,2,4) GROUP BY gpu_uuid,username
+           UNION ALL
+           SELECT gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds,CASE kind WHEN 3 THEN 2 ELSE 1 END
+           FROM usage_sources WHERE server_id=?1 AND hour=?2 AND kind IN (1,3)
+         ), ranked AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY gpu_uuid,username ORDER BY coverage DESC,priority DESC) rank FROM candidates)
+         SELECT gpu_uuid,username,active,memory,coverage FROM ranked WHERE rank=1"
+    ).map_err(|error| error.to_string())?;
+    let rows = statement.query_map(params![server_id,hour], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,row.get::<_,f64>(3)?,row.get::<_,i64>(4)?)))
+        .map_err(|error| error.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|error| error.to_string())?;
+    let mut changed = 0;
+    for (gpu,user,active,memory,coverage) in rows {
+        changed += connection.execute(
+            "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds) VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(server_id,timestamp,gpu_uuid,username) DO UPDATE SET active_seconds=excluded.active_seconds,memory_mb_seconds=excluded.memory_mb_seconds,coverage_seconds=excluded.coverage_seconds
+             WHERE usage_buckets.active_seconds<>excluded.active_seconds OR usage_buckets.memory_mb_seconds<>excluded.memory_mb_seconds OR usage_buckets.coverage_seconds<>excluded.coverage_seconds",
+            params![server_id,hour,gpu,user,active,memory,coverage],
+        ).map_err(|error| error.to_string())?;
+        connection.execute(
+            "INSERT INTO usage_reconciled(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds) VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(server_id,timestamp,gpu_uuid,username) DO UPDATE SET active_seconds=excluded.active_seconds,memory_mb_seconds=excluded.memory_mb_seconds,coverage_seconds=excluded.coverage_seconds",
+            params![server_id,hour,gpu,user,active,memory,coverage],
+        ).map_err(|error| error.to_string())?;
+    }
+    Ok(changed)
+}
+
+fn prune_usage_sources(connection: &Connection, server_id: &str, cutoff: i64) -> Result<(), String> {
+    for (table,time_column) in [("usage_sources","hour"),("usage_reconciled","timestamp"),("usage_legacy_minutes","timestamp"),("usage_legacy_minute_sources","timestamp")] {
+        connection.execute(&format!("DELETE FROM {table} WHERE server_id=?1 AND {time_column}<?2"), params![server_id,cutoff]).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn bucket_start(timestamp: i64, bucket_seconds: i64) -> i64 {
@@ -1416,6 +1558,7 @@ impl Database {
              );",
             )
             .map_err(|error| error.to_string())?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS credential_reclaim_queue (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()));").map_err(|error| error.to_string())?;
         let cleanup_columns = {
             let mut statement = connection
                 .prepare("PRAGMA table_info(remote_cleanup_queue)")
@@ -1482,6 +1625,48 @@ impl Database {
                 .map_err(|error| error.to_string())?;
             columns.filter_map(Result::ok).collect::<HashSet<_>>()
         };
+        if !server_columns.contains("ssh_hops_json") {
+            connection.execute("ALTER TABLE servers ADD COLUMN ssh_hops_json TEXT NOT NULL DEFAULT '[]'", []).map_err(|e| e.to_string())?;
+        }
+        if !server_columns.contains("ssh_route_revision") {
+            connection.execute("ALTER TABLE servers ADD COLUMN ssh_route_revision INTEGER NOT NULL DEFAULT 0", []).map_err(|e| e.to_string())?;
+        }
+        if !server_columns.contains("ssh_hops_valid") {
+            connection.execute("ALTER TABLE servers ADD COLUMN ssh_hops_valid INTEGER NOT NULL DEFAULT 1", []).map_err(|e| e.to_string())?;
+        }
+        let route_guard_applied: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM storage_migrations WHERE key='legacy-route-guard-v1')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+        if !route_guard_applied {
+            // Earlier development builds had no trigger. Imports from those
+            // builds stored a concrete chain in proxy_jump, so a mismatch on
+            // first upgrade is evidence of a later legacy edit. Retain the raw
+            // metadata, but give the edited legacy route precedence.
+            let transaction = connection.transaction().map_err(|e| e.to_string())?;
+            let mut query = transaction.prepare("SELECT id,proxy_jump,ssh_hops_json FROM servers WHERE ssh_hops_json<>'[]'").map_err(|e| e.to_string())?;
+            let rows = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?))).map_err(|e| e.to_string())?;
+            let mut stale = Vec::new();
+            for row in rows {
+                let (id, proxy, json) = row.map_err(|e| e.to_string())?;
+                let hops: Vec<SshHop> = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+                if !hops.is_empty() && proxy.as_deref().map(str::trim) != crate::ssh_routes::concrete_chain(&hops).as_deref() {
+                    stale.push(id);
+                }
+            }
+            drop(query);
+            for id in stale {
+                transaction.execute("UPDATE servers SET ssh_hops_valid=0 WHERE id=?1", [id]).map_err(|e| e.to_string())?;
+            }
+            transaction.execute("INSERT INTO storage_migrations(key,applied_at) VALUES('legacy-route-guard-v1',unixepoch())", []).map_err(|e| e.to_string())?;
+            transaction.commit().map_err(|e| e.to_string())?;
+        }
+        // Old binaries update only legacy columns. Keep the saved hop metadata
+        // for credential ownership, but never let it override a later old edit.
+        connection.execute_batch("CREATE TRIGGER IF NOT EXISTS invalidate_legacy_ssh_route
+            AFTER UPDATE OF host,port,username,ssh_alias,proxy_jump,auth_method,identity_file ON servers
+            WHEN NEW.ssh_route_revision = OLD.ssh_route_revision AND
+                 (NEW.host IS NOT OLD.host OR NEW.port IS NOT OLD.port OR NEW.username IS NOT OLD.username
+                  OR NEW.ssh_alias IS NOT OLD.ssh_alias OR NEW.proxy_jump IS NOT OLD.proxy_jump
+                  OR NEW.auth_method IS NOT OLD.auth_method OR NEW.identity_file IS NOT OLD.identity_file)
+            BEGIN UPDATE servers SET ssh_hops_valid=0 WHERE id=NEW.id; END;").map_err(|e| e.to_string())?;
         if !server_columns.contains("location") {
             connection
                 .execute("ALTER TABLE servers ADD COLUMN location TEXT", [])
@@ -1639,13 +1824,15 @@ impl Database {
                 connection.execute("UPDATE disk_scans SET payload_json=?2 WHERE server_id=?1", params![state.server_id, serde_json::to_string(&state).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
             }
         }
-        Ok(Self {
+        let database = Self {
             connection: Mutex::new(connection),
             session_passwords: Mutex::new(HashMap::new()),
             credential_errors: Mutex::new(HashMap::new()),
             path: path.to_path_buf(),
             maintenance: AtomicBool::new(false),
-        })
+        };
+        database.retry_credential_reclaims();
+        Ok(database)
     }
 
     pub fn set_maintenance(&self, value: bool) { self.maintenance.store(value, Ordering::Release); }
@@ -1682,6 +1869,7 @@ impl Database {
             }
         }
         migrate_usage_to_hourly(&mut connection)?;
+        prepare_usage_reconciliation(&connection)?;
         if !applied && !database_integrity_ok(&connection) {
             return Err("小时用量迁移后的数据库完整性校验失败，迁移前备份已保留".into());
         }
@@ -1748,7 +1936,7 @@ impl Database {
     pub fn list_servers(&self) -> Result<Vec<Server>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection
-            .prepare("SELECT id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,remote_history_last_sync_at,auth_method,status,last_error,last_seen_at,sort_order FROM servers ORDER BY sort_order,name COLLATE NOCASE")
+            .prepare("SELECT id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,remote_history_last_sync_at,auth_method,status,last_error,last_seen_at,sort_order,CASE WHEN ssh_hops_valid=1 THEN ssh_hops_json ELSE '[]' END FROM servers ORDER BY sort_order,name COLLATE NOCASE")
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], |row| {
@@ -1762,7 +1950,7 @@ impl Database {
                     username: row.get(5)?,
                     ssh_alias: row.get(6)?,
                     identity_file: row.get(7)?,
-                    proxy_jump: row.get(8)?,
+                    proxy_jump: row.get(8)?, ssh_hops: serde_json::from_str(&row.get::<_, String>(19)?).map_err(|e| rusqlite::Error::FromSqlConversionFailure(19, rusqlite::types::Type::Text, Box::new(e)))?,
                     tags: serde_json::from_str(&tags).unwrap_or_default(),
                     sampling_interval_seconds: row.get(10)?,
                     history_retention_days: row.get(11)?,
@@ -1860,7 +2048,81 @@ impl Database {
         Ok(settings)
     }
 
-    pub fn save_server(&self, draft: ServerDraft) -> Result<Server, String> {
+    pub fn save_server(&self, mut draft: ServerDraft) -> Result<Server, String> {
+        self.retry_credential_reclaims();
+        if let Some(id) = draft.id.as_deref() {
+            let old_key = self.connection.lock().map_err(|e| e.to_string())?
+                .query_row("SELECT identity_file FROM servers WHERE id=?1", [id], |row| row.get::<_, Option<String>>(0))
+                .optional().map_err(|e| e.to_string())?.flatten();
+            let old_hops = self.connection.lock().map_err(|e| e.to_string())?
+                .query_row("SELECT ssh_hops_json FROM servers WHERE id=?1", [id], |row| row.get::<_, String>(0))
+                .optional().map_err(|e| e.to_string())?.map(|s| serde_json::from_str::<Vec<SshHop>>(&s)).transpose().map_err(|e| e.to_string())?.unwrap_or_default();
+            self.enqueue_credential_reclaim(old_key.into_iter().collect(), old_hops)?;
+            let saved = self.save_server_inner(draft)?;
+            self.retry_credential_reclaims();
+            return Ok(saved);
+        }
+        if draft.auth_method == "password" && draft.password.as_deref().is_none_or(|p| p.trim().is_empty()) {
+            return Err("使用密码认证时必须输入 SSH 密码".into());
+        }
+        let id = Uuid::new_v4().to_string();
+        draft.id = Some(id.clone());
+        match self.save_server_inner(draft) {
+            Ok(server) => Ok(server),
+            Err(error) => {
+                // Credential persistence may fail after the new row was inserted.
+                self.delete_server_record(&id, true)
+                    .map_err(|cleanup| format!("{error}；撤销新记录失败：{cleanup}"))?;
+                Err(error)
+            }
+        }
+    }
+
+    fn enqueue_credential_reclaim(&self, identity_files: Vec<String>, hops: Vec<SshHop>) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|e| e.to_string())?;
+        Self::queue_credential_reclaim(&connection, identity_files, hops)
+    }
+
+    fn queue_credential_reclaim(connection: &Connection, identity_files: Vec<String>, hops: Vec<SshHop>) -> Result<(), String> {
+        let mut identity_files = identity_files;
+        identity_files.extend(hops.iter().filter_map(|hop| hop.identity_file.clone()));
+        identity_files.sort();
+        identity_files.dedup();
+        if identity_files.is_empty() && hops.iter().all(|hop| hop.credential_id.is_none()) { return Ok(()); }
+        let payload = serde_json::to_string(&CredentialReclaimTask { identity_files, hops }).map_err(|e| e.to_string())?;
+        connection.execute("INSERT INTO credential_reclaim_queue(id,payload_json) VALUES(?1,?2)", params![Uuid::new_v4().to_string(), payload]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn retry_credential_reclaims(&self) {
+        let tasks = (|| -> Result<Vec<(String, CredentialReclaimTask)>, String> {
+            let connection = self.connection.lock().map_err(|e| e.to_string())?;
+            let mut statement = connection.prepare("SELECT id,payload_json FROM credential_reclaim_queue ORDER BY created_at").map_err(|e| e.to_string())?;
+            let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|e| e.to_string())?;
+            rows.map(|row| {
+                let (id, json) = row.map_err(|e| e.to_string())?;
+                Ok((id, serde_json::from_str(&json).map_err(|e| e.to_string())?))
+            }).collect()
+        })();
+        let Ok(tasks) = tasks else { return; };
+        for (id, task) in tasks {
+            let result = (|| -> Result<(), String> {
+                for path in &task.identity_files { self.reclaim_imported_key(Some(path))?; }
+                self.reclaim_hops(&task.hops)?;
+                Ok(())
+            })();
+            if result.is_ok() {
+                if let Ok(connection) = self.connection.lock() {
+                    let _ = connection.execute("DELETE FROM credential_reclaim_queue WHERE id=?1", [id]);
+                }
+            } else {
+                eprintln!("旧私钥或跳板凭证暂未回收；数据库操作已完成，将在下次操作或启动时重试。");
+            }
+        }
+    }
+
+    fn save_server_inner(&self, draft: ServerDraft) -> Result<Server, String> {
+        crate::ssh_routes::validate(&draft.ssh_hops)?;
         if draft.host.trim().is_empty() || draft.username.trim().is_empty() {
             return Err("主机地址和用户名不能为空".into());
         }
@@ -1904,10 +2166,10 @@ impl Database {
             ));
         }
         connection.execute(
-            "INSERT INTO servers (id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,auth_method,status,sort_order)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'unknown',COALESCE((SELECT MAX(sort_order)+1 FROM servers),0))
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name,location=excluded.location,host=excluded.host,port=excluded.port,username=excluded.username,ssh_alias=excluded.ssh_alias,identity_file=excluded.identity_file,proxy_jump=excluded.proxy_jump,tags_json=excluded.tags_json,sampling_interval_seconds=excluded.sampling_interval_seconds,history_retention_days=excluded.history_retention_days,remote_history_enabled=excluded.remote_history_enabled,auth_method=excluded.auth_method",
-            params![id, name, blank_to_none(draft.location), draft.host.trim(), draft.port, draft.username.trim(), blank_to_none(draft.ssh_alias), blank_to_none(draft.identity_file), blank_to_none(draft.proxy_jump), tags, draft.sampling_interval_seconds.max(2), draft.history_retention_days.max(1), draft.remote_history_enabled, draft.auth_method],
+            "INSERT INTO servers (id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,auth_method,status,sort_order,ssh_hops_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'unknown',COALESCE((SELECT MAX(sort_order)+1 FROM servers),0),?15)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name,location=excluded.location,host=excluded.host,port=excluded.port,username=excluded.username,ssh_alias=excluded.ssh_alias,identity_file=excluded.identity_file,proxy_jump=excluded.proxy_jump,tags_json=excluded.tags_json,sampling_interval_seconds=excluded.sampling_interval_seconds,history_retention_days=excluded.history_retention_days,remote_history_enabled=excluded.remote_history_enabled,auth_method=excluded.auth_method,ssh_hops_json=excluded.ssh_hops_json,ssh_route_revision=servers.ssh_route_revision+1,ssh_hops_valid=1",
+            params![id, name, blank_to_none(draft.location), draft.host.trim(), draft.port, draft.username.trim(), blank_to_none(draft.ssh_alias), blank_to_none(draft.identity_file), blank_to_none(draft.proxy_jump), tags, draft.sampling_interval_seconds.max(2), draft.history_retention_days.max(1), draft.remote_history_enabled, draft.auth_method, serde_json::to_string(&draft.ssh_hops).map_err(|e| e.to_string())?],
         ).map_err(|error| error.to_string())?;
         drop(connection);
 
@@ -1968,6 +2230,10 @@ impl Database {
 
     pub fn delete_server_record(&self, id: &str, delete_credential: bool) -> Result<(), String> {
         let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let imported_key = connection.query_row("SELECT identity_file FROM servers WHERE id=?1", [id], |row| row.get::<_, Option<String>>(0))
+            .optional().map_err(|error| error.to_string())?.flatten();
+        let old_hops = connection.query_row("SELECT ssh_hops_json FROM servers WHERE id=?1", [id], |row| row.get::<_, String>(0))
+            .optional().map_err(|e| e.to_string())?.map(|s| serde_json::from_str::<Vec<SshHop>>(&s)).transpose().map_err(|e| e.to_string())?.unwrap_or_default();
         let auth_method = connection
             .query_row("SELECT auth_method FROM servers WHERE id=?1", [id], |row| {
                 row.get::<_, String>(0)
@@ -2007,6 +2273,7 @@ impl Database {
                 ).map_err(|error| error.to_string())?;
             }
         }
+        Self::queue_credential_reclaim(&transaction, imported_key.into_iter().collect(), old_hops)?;
         transaction
             .execute("DELETE FROM servers WHERE id=?1", [id])
             .map_err(|error| error.to_string())?;
@@ -2018,15 +2285,10 @@ impl Database {
             }
         }
         if delete_credential {
-            self.session_passwords
-                .lock()
-                .map_err(|error| error.to_string())?
-                .remove(id);
-            self.credential_errors
-                .lock()
-                .map_err(|error| error.to_string())?
-                .remove(id);
+            if let Ok(mut passwords) = self.session_passwords.lock() { passwords.remove(id); }
+            if let Ok(mut errors) = self.credential_errors.lock() { errors.remove(id); }
         }
+        self.retry_credential_reclaims();
         Ok(())
     }
 
@@ -2086,28 +2348,109 @@ impl Database {
         server_id: &str,
         delete_credential: bool,
     ) -> Result<(), String> {
-        let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        connection
+        let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let old_server = transaction.query_row("SELECT server_json FROM remote_cleanup_queue WHERE server_id=?1", [server_id], |row| row.get::<_, String>(0))
+            .optional().map_err(|error| error.to_string())?
+            .map(|json| serde_json::from_str::<Server>(&json)).transpose().map_err(|error| error.to_string())?;
+        if let Some(server) = old_server {
+            Self::queue_credential_reclaim(&transaction, server.identity_file.into_iter().collect(), server.ssh_hops)?;
+        }
+        transaction
             .execute(
                 "DELETE FROM remote_cleanup_queue WHERE server_id=?1",
                 [server_id],
             )
             .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
         drop(connection);
         if delete_credential {
             if let Ok(entry) = keyring::Entry::new("com.racktop.desktop", server_id) {
                 let _ = entry.delete_credential();
             }
         }
-        self.session_passwords
-            .lock()
-            .map_err(|error| error.to_string())?
-            .remove(server_id);
-        self.credential_errors
-            .lock()
-            .map_err(|error| error.to_string())?
-            .remove(server_id);
+        if let Ok(mut passwords) = self.session_passwords.lock() { passwords.remove(server_id); }
+        if let Ok(mut errors) = self.credential_errors.lock() { errors.remove(server_id); }
+        self.retry_credential_reclaims();
         Ok(())
+    }
+
+    fn reclaim_hops(&self, hops: &[SshHop]) -> Result<(), String> {
+        for hop in hops {
+            self.reclaim_imported_key(hop.identity_file.as_deref())?;
+            let Some(id) = hop.credential_id.as_deref().filter(|id| id.strip_prefix("racktop-hop-").is_some_and(|s| Uuid::parse_str(s).is_ok())) else { continue };
+            let mut references: Vec<SshHop> = Vec::new();
+            let connection = self.connection.lock().map_err(|e| e.to_string())?;
+            let mut routes = connection.prepare("SELECT ssh_hops_json FROM servers").map_err(|e| e.to_string())?;
+            let rows = routes.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+            for row in rows {
+                references.extend(serde_json::from_str::<Vec<SshHop>>(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?);
+            }
+            let mut statement = connection.prepare("SELECT server_json FROM remote_cleanup_queue").map_err(|e| e.to_string())?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+            for row in rows {
+                references.extend(serde_json::from_str::<Server>(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?.ssh_hops);
+            }
+            if !references.iter().any(|hop| hop.credential_id.as_deref() == Some(id)) {
+                let entry = keyring::Entry::new("com.racktop.desktop", id).map_err(|_| "无法访问待回收跳板凭证".to_string())?;
+                match entry.delete_credential() {
+                    Ok(()) | Err(keyring::Error::NoEntry) => {},
+                    Err(_) => return Err("跳板凭证回收失败，将稍后重试".into()),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn reclaim_imported_key(&self, candidate: Option<&str>) -> Result<(), String> {
+        let Some(candidate) = candidate else { return Ok(()) };
+        let expanded = crate::ssh_keys::expand_identity_path(candidate);
+        let path = match expanded.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err("暂时无法访问待回收私钥，将稍后重试".into()),
+        };
+        let directory = self.path.parent().unwrap_or(Path::new(".")).join("ssh-keys");
+        let directory = match directory.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err("暂时无法访问私钥存储目录，将稍后重试".into()),
+        };
+        // Only UUID copies created inside this application's private key store.
+        if path.parent() != Some(directory.as_path())
+            || path.extension().and_then(|s| s.to_str()) != Some("key")
+            || path.file_stem().and_then(|s| s.to_str()).and_then(|s| Uuid::parse_str(s).ok()).is_none() {
+            return Ok(());
+        }
+        let connection = self.connection.lock().map_err(|e| e.to_string())?;
+        // A missing/inaccessible/unexpanded reference is not proof that this
+        // file is unused. Keep it until every reference can be resolved.
+        let keeps_key = |reference: &str| {
+            crate::ssh_keys::expand_identity_path(reference).canonicalize()
+                .map(|reference| reference == path).unwrap_or(true)
+        };
+        let mut statement = connection.prepare("SELECT identity_file FROM servers WHERE identity_file IS NOT NULL").map_err(|e| e.to_string())?;
+        let references = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        for reference in references {
+            if keeps_key(&reference.map_err(|e| e.to_string())?) { return Ok(()) }
+        }
+        let mut statement = connection.prepare("SELECT ssh_hops_json FROM servers").map_err(|e| e.to_string())?;
+        let routes = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        for route in routes {
+            let hops: Vec<SshHop> = serde_json::from_str(&route.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            if hops.iter().any(|hop| hop.identity_file.as_deref().is_some_and(keeps_key)) { return Ok(()); }
+        }
+        let mut statement = connection.prepare("SELECT server_json FROM remote_cleanup_queue").map_err(|e| e.to_string())?;
+        let references = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        for reference in references {
+            let server: Server = serde_json::from_str(&reference.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            if server.identity_file.as_deref().is_some_and(keeps_key) || server.ssh_hops.iter().any(|hop| hop.identity_file.as_deref().is_some_and(keeps_key)) { return Ok(()) }
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("无法回收导入的私钥：{e}")),
+        }
     }
 
     pub fn get_password(&self, id: &str, allow_prompt: bool) -> Result<Option<String>, String> {
@@ -2372,6 +2715,7 @@ impl Database {
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
+        prepare_usage_reconciliation(&transaction)?;
         transaction
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS remote_history_quarantine (
@@ -2527,6 +2871,18 @@ impl Database {
                     params![server_id, timestamp, gpu_uuid, username],
                 )
                 .map_err(|error| error.to_string())?;
+            transaction.execute(
+                "DELETE FROM usage_sources WHERE server_id=?1 AND hour=?2 AND gpu_uuid=?3 AND username=?4",
+                params![server_id,timestamp,gpu_uuid,username],
+            ).map_err(|error| error.to_string())?;
+            transaction.execute(
+                "DELETE FROM usage_reconciled WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid=?3 AND username=?4",
+                params![server_id,timestamp,gpu_uuid,username],
+            ).map_err(|error| error.to_string())?;
+            transaction.execute(
+                "DELETE FROM usage_legacy_minute_sources WHERE server_id=?1 AND timestamp>=?2 AND timestamp<?2+3600 AND gpu_uuid=?3 AND username=?4",
+                params![server_id,timestamp,gpu_uuid,username],
+            ).map_err(|error| error.to_string())?;
             quarantined += 1;
         }
         if removed_snapshots {
@@ -2655,56 +3011,38 @@ impl Database {
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
-        let mut imported = 0usize;
-        let mut buckets: BTreeMap<(i64, i64), Vec<&UsagePoint>> = BTreeMap::new();
+        prepare_usage_reconciliation(&transaction)?;
+        let mut hours = HashSet::new();
         for point in points.iter().filter(|point| {
             point.timestamp >= cutoff
                 && point.timestamp <= now + 300
                 && matches!(point.bucket_seconds, 60 | 3_600)
                 && (point.bucket_seconds == 60 || point.timestamp < completed_hour_end)
         }) {
-            buckets.entry((point.timestamp, point.bucket_seconds)).or_default().push(point);
+            hours.insert(hour_start(point.timestamp));
         }
-        {
-            let mut claim_minute = transaction.prepare(
-                "INSERT OR IGNORE INTO remote_usage_minutes(server_id,timestamp)
-                 SELECT ?1,?2 WHERE NOT EXISTS (SELECT 1 FROM local_usage_minutes WHERE server_id=?1 AND timestamp=?2)"
-            ).map_err(|error| error.to_string())?;
-            let mut claim_hour = transaction.prepare(
-                "INSERT OR IGNORE INTO remote_usage_hours(server_id,timestamp) VALUES(?1,?2)"
-            ).map_err(|error| error.to_string())?;
-            let mut statement = transaction.prepare(
-                "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7)
-                 ON CONFLICT(server_id,timestamp,gpu_uuid,username) DO UPDATE SET
-                   active_seconds=usage_buckets.active_seconds+excluded.active_seconds,
-                   memory_mb_seconds=usage_buckets.memory_mb_seconds+excluded.memory_mb_seconds,
-                   coverage_seconds=usage_buckets.coverage_seconds+excluded.coverage_seconds"
-            ).map_err(|error| error.to_string())?;
-            for ((timestamp, bucket_seconds), bucket_points) in buckets {
-                let claimed = if bucket_seconds == 3_600 {
-                    claim_hour.execute(params![server_id, hour_start(timestamp)])
-                } else {
-                    claim_minute.execute(params![server_id, timestamp])
-                }.map_err(|error| error.to_string())?;
-                if claimed == 0 {
-                    continue;
-                }
-                for point in bucket_points {
-                    imported += statement
-                        .execute(params![
-                            server_id,
-                            hour_start(timestamp),
-                            point.gpu_uuid,
-                            point.username,
-                            point.active_seconds,
-                            point.memory_mb_seconds,
-                            point.coverage_seconds
-                        ])
-                        .map_err(|error| error.to_string())?;
-                }
+        for &hour in &hours { capture_existing_usage(&transaction, server_id, hour)?; }
+        for point in points.iter().filter(|point| {
+            point.timestamp >= cutoff && point.timestamp <= now + 300
+                && matches!(point.bucket_seconds, 60 | 3_600)
+                && (point.bucket_seconds == 60 || point.timestamp < completed_hour_end)
+        }) {
+            if point.bucket_seconds == 60 {
+                let already_local_or_legacy: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM local_usage_minutes WHERE server_id=?1 AND timestamp=?2)
+                       OR EXISTS(SELECT 1 FROM usage_legacy_minute_sources WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid=?3 AND username=?4)",
+                    params![server_id,point.timestamp,point.gpu_uuid,point.username], |row| row.get(0),
+                ).map_err(|error| error.to_string())?;
+                if already_local_or_legacy { continue; }
+                transaction.execute("INSERT OR IGNORE INTO remote_usage_minutes VALUES(?1,?2)", params![server_id,point.timestamp]).map_err(|error| error.to_string())?;
+            } else {
+                transaction.execute("INSERT OR IGNORE INTO remote_usage_hours VALUES(?1,?2)", params![server_id,hour_start(point.timestamp)]).map_err(|error| error.to_string())?;
             }
+            record_usage_source(&transaction, server_id, point, if point.bucket_seconds == 60 { 0 } else { 1 })?;
         }
+        let mut imported = 0;
+        for hour in hours { imported += reconcile_usage_hour(&transaction, server_id, hour)?; }
+        prune_usage_sources(&transaction, server_id, cutoff)?;
         transaction
             .execute(
                 "DELETE FROM usage_buckets WHERE server_id=?1 AND timestamp < ?2",
@@ -2738,6 +3076,7 @@ impl Database {
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
+        prepare_usage_reconciliation(&transaction)?;
         let remote_claimed: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM remote_usage_minutes WHERE server_id=?1 AND timestamp=?2)",
             params![snapshot.server_id, timestamp], |row| row.get(0),
@@ -2756,6 +3095,7 @@ impl Database {
             transaction.commit().map_err(|error| error.to_string())?;
             return Ok(0);
         }
+        capture_existing_usage(&transaction, &snapshot.server_id, hour_start(timestamp))?;
 
         let gpu_uuids: HashSet<&str> = snapshot.gpus.iter().map(|gpu| gpu.uuid.as_str()).collect();
         let mut memory_by_user: HashMap<(&str, &str), f64> = HashMap::new();
@@ -2770,15 +3110,14 @@ impl Database {
         let mut inserted = 0usize;
         {
             let mut statement = transaction.prepare(
-                "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds)
-                 VALUES(?1,?2,?3,?4,?5,?6,60)
-                 ON CONFLICT(server_id,timestamp,gpu_uuid,username) DO UPDATE SET active_seconds=usage_buckets.active_seconds+excluded.active_seconds,memory_mb_seconds=usage_buckets.memory_mb_seconds+excluded.memory_mb_seconds,coverage_seconds=usage_buckets.coverage_seconds+excluded.coverage_seconds"
+                "INSERT INTO usage_sources(server_id,timestamp,hour,gpu_uuid,username,kind,active_seconds,memory_mb_seconds,coverage_seconds)
+                 VALUES(?1,?2,?2-?2%3600,?3,?4,2,?5,?6,60)"
             ).map_err(|error| error.to_string())?;
             for gpu in &snapshot.gpus {
                 inserted += statement
                     .execute(params![
                         snapshot.server_id,
-                        hour_start(timestamp),
+                        timestamp,
                         gpu.uuid,
                         USAGE_COVERAGE_USER,
                         0,
@@ -2790,7 +3129,7 @@ impl Database {
                 inserted += statement
                     .execute(params![
                         snapshot.server_id,
-                        hour_start(timestamp),
+                        timestamp,
                         gpu_uuid,
                         username,
                         60,
@@ -2799,6 +3138,8 @@ impl Database {
                     .map_err(|error| error.to_string())?;
             }
         }
+        reconcile_usage_hour(&transaction, &snapshot.server_id, hour_start(timestamp))?;
+        prune_usage_sources(&transaction, &snapshot.server_id, cutoff)?;
         transaction
             .execute(
                 "DELETE FROM usage_buckets WHERE server_id=?1 AND timestamp < ?2",
@@ -3898,6 +4239,401 @@ mod tests {
     use crate::models::{AppSettings, GpuMetric, ProcessMetric, SystemMetric};
 
     #[test]
+    fn deleting_records_and_finishing_remote_cleanup_queue_failed_key_reclaims_atomically() {
+        for finish_remote in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let db_path = directory.path().join("reclaim.sqlite");
+            let database = Database::open(&db_path).unwrap();
+            let keys = directory.path().join("ssh-keys");
+            std::fs::create_dir(&keys).unwrap();
+            let key = keys.join(format!("{}.key", Uuid::new_v4()));
+            let hop_key = keys.join(format!("{}.key", Uuid::new_v4()));
+            std::fs::write(&key, b"server fixture").unwrap();
+            std::fs::write(&hop_key, b"hop fixture").unwrap();
+            let mut initial = draft("Delete recovery", 90);
+            initial.auth_method = "privateKey".into();
+            initial.identity_file = Some(key.to_string_lossy().into_owned());
+            initial.ssh_hops = vec![SshHop {
+                host: "jump.example".into(), port: 22, username: "test".into(),
+                auth_method: "privateKey".into(), identity_file: Some(hop_key.to_string_lossy().into_owned()), credential_id: None,
+            }];
+            let server = database.save_server(initial).unwrap();
+            if finish_remote {
+                database.enqueue_remote_cleanup(&server, 0, "fixture", None).unwrap();
+                database.delete_server_record(&server.id, false).unwrap();
+                assert!(key.exists());
+                assert!(hop_key.exists());
+            }
+            // Deterministic remove_file fault on all platforms, without relying
+            // on the test runner's UID or modifying real user key permissions.
+            std::fs::remove_file(&key).unwrap();
+            std::fs::create_dir(&key).unwrap();
+            if finish_remote { database.finish_remote_cleanup(&server.id, true).unwrap(); }
+            else { database.delete_server(&server.id).unwrap(); }
+            assert!(database.list_servers().unwrap().is_empty());
+            assert!(database.list_remote_cleanup_tasks().unwrap().is_empty());
+            let pending: i64 = database.connection.lock().unwrap().query_row(
+                "SELECT COUNT(*) FROM credential_reclaim_queue", [], |row| row.get(0)).unwrap();
+            assert_eq!(pending, 1);
+            drop(database);
+            std::fs::remove_dir(&key).unwrap();
+            std::fs::write(&key, b"server fixture").unwrap();
+            let reopened = Database::open(&db_path).unwrap();
+            assert!(!key.exists());
+            assert!(!hop_key.exists());
+            let pending: i64 = reopened.connection.lock().unwrap().query_row(
+                "SELECT COUNT(*) FROM credential_reclaim_queue", [], |row| row.get(0)).unwrap();
+            assert_eq!(pending, 0);
+        }
+    }
+
+    #[test]
+    fn reclaim_queue_failure_rolls_back_server_and_remote_task_deletion() {
+        for finish_remote in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let database = Database::open(&directory.path().join("rollback.sqlite")).unwrap();
+            let mut initial = draft("Deletion rollback", 90);
+            initial.identity_file = Some("/unmodified/user-owned-key".into());
+            let server = database.save_server(initial).unwrap();
+            if finish_remote {
+                database.enqueue_remote_cleanup(&server, 0, "fixture", None).unwrap();
+                database.delete_server_record(&server.id, false).unwrap();
+            }
+            database.connection.lock().unwrap().execute_batch(
+                "CREATE TRIGGER fail_reclaim BEFORE INSERT ON credential_reclaim_queue BEGIN SELECT RAISE(ABORT,'fixture'); END;"
+            ).unwrap();
+            if finish_remote {
+                assert!(database.finish_remote_cleanup(&server.id, true).is_err());
+                assert_eq!(database.list_remote_cleanup_tasks().unwrap().len(), 1);
+            } else {
+                assert!(database.delete_server(&server.id).is_err());
+                assert!(database.get_server(&server.id).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_usage_merge_and_database_import_keep_other_series_and_full_hours_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("mixed-usage.sqlite")).unwrap();
+        let server = database.save_server(draft("Mixed usage", 90)).unwrap();
+        let usage = crate::remote_history::merge_compatibility_usage(
+            "v1|3600|GPU-a|alice|60|100|60\nv2|3600|GPU-b|bob|3600|900|3600\nv2|3600|GPU-a|alice|3600|700|3600\nv1|3660|GPU-a|carol|60|200|60\n"
+        );
+        assert_eq!(database.import_remote_usage(&server.id, &usage, 10800).unwrap(), 3);
+        assert_eq!(database.import_remote_usage(&server.id, &usage, 10800).unwrap(), 0);
+        let connection = database.connection.lock().unwrap();
+        for (gpu, user, active) in [("GPU-b", "bob", 3600), ("GPU-a", "alice", 3600), ("GPU-a", "carol", 60)] {
+            let total: i64 = connection.query_row(
+                "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid=?2 AND username=?3",
+                params![server.id, gpu, user], |row| row.get(0)).unwrap();
+            assert_eq!(total, active);
+        }
+    }
+
+    #[test]
+    fn remote_usage_reconciles_repeated_minutes_and_later_full_rollups_across_syncs() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("usage-reconcile.sqlite")).unwrap();
+        let server = database.save_server(draft("Usage reconciliation", 90)).unwrap();
+        let point = |coverage: i64, bucket_seconds: i64, active_seconds: i64| UsagePoint {
+            timestamp: 3_600,
+            bucket_seconds,
+            gpu_uuid: "GPU-a".into(),
+            username: "alice".into(),
+            active_seconds,
+            memory_mb_seconds: active_seconds as f64 * 100.0,
+            coverage_seconds: coverage,
+        };
+        let total = || {
+            database.connection.lock().unwrap().query_row(
+                "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid='GPU-a' AND username='alice'",
+                [&server.id], |row| row.get::<_, i64>(0),
+            ).unwrap()
+        };
+
+        let full_hour = point(3_600, 3_600, 3_600);
+        assert_eq!(database.import_remote_usage(&server.id, &[full_hour], 10_800).unwrap(), 1);
+        assert_eq!(database.import_remote_usage(&server.id, &[point(60, 60, 60)], 10_800).unwrap(), 0);
+        assert_eq!(total(), 3_600, "re-reading the final minute must not add it to the hour");
+        database.connection.lock().unwrap().execute(
+            "UPDATE usage_buckets SET active_seconds=active_seconds+60,memory_mb_seconds=memory_mb_seconds+6000,coverage_seconds=coverage_seconds+60 WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid='GPU-a' AND username='alice'",
+            [&server.id],
+        ).unwrap();
+        assert_eq!(database.import_remote_usage(&server.id, &[point(3_600, 3_600, 3_600)], 10_800).unwrap(), 0);
+        assert_eq!(total(), 3_660, "a downgraded writer's aggregate must remain as a baseline");
+
+        let mut other_draft = draft("Later rollup", 90);
+        other_draft.host = "10.0.0.2".into();
+        let other_server = database.save_server(other_draft).unwrap();
+        assert_eq!(database.import_remote_usage(&other_server.id, &[point(60, 3_600, 60)], 10_800).unwrap(), 1);
+        assert_eq!(database.import_remote_usage(&other_server.id, &[point(3_600, 3_600, 3_600)], 10_800).unwrap(), 1);
+        let upgraded_total: i64 = database.connection.lock().unwrap().query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid='GPU-a' AND username='alice'",
+            [&other_server.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(upgraded_total, 3_600, "a fuller rollup must replace a partial contribution");
+    }
+
+    #[test]
+    fn legacy_rebase_is_scoped_to_the_changed_gpu_user_series() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("series-rebase.sqlite")).unwrap();
+        let server = database.save_server(draft("Series rebase", 90)).unwrap();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let hour = hour_start(now - 7_200);
+        let point = |timestamp, gpu: &str, user: &str, bucket_seconds, coverage, active| UsagePoint {
+            timestamp, bucket_seconds, gpu_uuid: gpu.into(), username: user.into(),
+            active_seconds: active, memory_mb_seconds: (active * 100) as f64,
+            coverage_seconds: coverage,
+        };
+        let initial = [
+            point(hour + 60, "GPU-a", "alice", 60, 60, 60),
+            point(hour, "GPU-b", "bob", 3_600, 600, 600),
+        ];
+        assert_eq!(database.import_remote_usage(&server.id, &initial, now).unwrap(), 2);
+        database.connection.lock().unwrap().execute(
+            "UPDATE usage_buckets SET active_seconds=active_seconds+60,memory_mb_seconds=memory_mb_seconds+6000,coverage_seconds=coverage_seconds+60 WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid='GPU-b' AND username='bob'",
+            params![server.id,hour],
+        ).unwrap();
+
+        let next_minute = point(hour + 120, "GPU-a", "alice", 60, 60, 60);
+        database.import_remote_usage(&server.id, &[next_minute], now).unwrap();
+        let connection = database.connection.lock().unwrap();
+        let alice: i64 = connection.query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid='GPU-a' AND username='alice'",
+            params![server.id,hour], |row| row.get(0),
+        ).unwrap();
+        let bob: i64 = connection.query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid='GPU-b' AND username='bob'",
+            params![server.id,hour], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(alice, 120, "untouched minute sources must keep accumulating");
+        assert_eq!(bob, 660, "the changed series must retain the legacy-written aggregate");
+        let alice_sources: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_sources WHERE server_id=?1 AND hour=?2 AND gpu_uuid='GPU-a' AND username='alice' AND kind=0",
+            params![server.id,hour], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(alice_sources, 2);
+    }
+
+    #[test]
+    fn quarantining_foreign_minute_sources_cannot_resurrect_on_same_hour_reconcile() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("quarantine-usage.sqlite")).unwrap();
+        let server = database.save_server(draft("Usage quarantine", 90)).unwrap();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let hour = hour_start(now - 7_200);
+        let point = |timestamp, gpu: &str, user: &str| UsagePoint {
+            timestamp, bucket_seconds: 60, gpu_uuid: gpu.into(), username: user.into(),
+            active_seconds: 60, memory_mb_seconds: 6_000.0, coverage_seconds: 60,
+        };
+        database.import_remote_usage(&server.id, &[point(hour + 60, "GPU-foreign", "bob")], now).unwrap();
+        let foreign = HashSet::from(["GPU-foreign".to_string()]);
+        assert_eq!(database.quarantine_foreign_remote_history(&server.id, &foreign).unwrap(), 1);
+        database.import_remote_usage(&server.id, &[point(hour + 120, "GPU-own", "alice")], now).unwrap();
+        assert_eq!(database.quarantine_foreign_remote_history(&server.id, &foreign).unwrap(), 0);
+
+        let connection = database.connection.lock().unwrap();
+        let foreign_rows: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_buckets WHERE server_id=?1 AND gpu_uuid='GPU-foreign'",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        let foreign_sources: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_sources WHERE server_id=?1 AND hour=?2 AND gpu_uuid='GPU-foreign'",
+            params![server.id,hour], |row| row.get(0),
+        ).unwrap();
+        let own_total: i64 = connection.query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=?2 AND gpu_uuid='GPU-own' AND username='alice'",
+            params![server.id,hour], |row| row.get(0),
+        ).unwrap();
+        let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
+        assert_eq!(foreign_rows, 0);
+        assert_eq!(foreign_sources, 0);
+        assert_eq!(own_total, 60);
+        assert_eq!(integrity, "ok");
+    }
+
+    #[test]
+    fn same_remote_minute_can_gain_additional_gpu_and_user_series_on_later_sync() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("late-series.sqlite")).unwrap();
+        let server = database.save_server(draft("Late minute series", 90)).unwrap();
+        let minute = 3_660;
+        let point = |gpu: &str, user: &str| UsagePoint {
+            timestamp: minute, bucket_seconds: 60, gpu_uuid: gpu.into(), username: user.into(),
+            active_seconds: 60, memory_mb_seconds: 6_000.0, coverage_seconds: 60,
+        };
+        assert_eq!(database.import_remote_usage(&server.id, &[point("GPU-a", "alice")], 10_800).unwrap(), 1);
+        // Simulate the server-wide false marker left by the previous PR build.
+        database.connection.lock().unwrap().execute(
+            "INSERT INTO usage_legacy_minutes(server_id,timestamp) VALUES(?1,?2)",
+            params![server.id,minute],
+        ).unwrap();
+        assert_eq!(database.import_remote_usage(&server.id, &[
+            point("GPU-a", "alice"),
+            point("GPU-a", "bob"),
+            point("GPU-b", "carol"),
+        ], 10_800).unwrap(), 2);
+
+        let connection = database.connection.lock().unwrap();
+        let total: i64 = connection.query_row(
+            "SELECT SUM(active_seconds) FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND username<>'__racktop_coverage__'",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        let series_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_sources WHERE server_id=?1 AND hour=3600 AND kind=0",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        let false_markers: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_legacy_minute_sources WHERE server_id=?1",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(total, 180);
+        assert_eq!(series_count, 3);
+        assert_eq!(false_markers, 0);
+    }
+
+    #[test]
+    fn stale_server_wide_marker_is_not_assigned_to_unrelated_legacy_series() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("stale-marker.sqlite")).unwrap();
+        let server = database.save_server(draft("Stale marker", 90)).unwrap();
+        let minute = 3_660;
+        let point = |gpu: &str, user: &str| UsagePoint {
+            timestamp: minute, bucket_seconds: 60, gpu_uuid: gpu.into(), username: user.into(),
+            active_seconds: 60, memory_mb_seconds: 6_000.0, coverage_seconds: 60,
+        };
+        database.import_remote_usage(&server.id, &[point("GPU-a", "alice")], 10_800).unwrap();
+        {
+            let connection = database.connection.lock().unwrap();
+            connection.execute(
+                "INSERT INTO usage_legacy_minutes(server_id,timestamp) VALUES(?1,?2)",
+                params![server.id,minute],
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO usage_sources(server_id,timestamp,hour,gpu_uuid,username,kind,active_seconds,memory_mb_seconds,coverage_seconds) VALUES(?1,3600,3600,'GPU-b','bob',4,30,3000,60)",
+                [&server.id],
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO usage_buckets(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds) VALUES(?1,3600,'GPU-b','bob',30,3000,60)",
+                [&server.id],
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO usage_reconciled(server_id,timestamp,gpu_uuid,username,active_seconds,memory_mb_seconds,coverage_seconds) VALUES(?1,3600,'GPU-b','bob',30,3000,60)",
+                [&server.id],
+            ).unwrap();
+        }
+        database.import_remote_usage(&server.id, &[point("GPU-c", "carol")], 10_800).unwrap();
+        let connection = database.connection.lock().unwrap();
+        let carol: i64 = connection.query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid='GPU-c' AND username='carol'",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        let false_marker_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM usage_legacy_minute_sources WHERE server_id=?1 AND gpu_uuid<>'GPU-a'",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(carol, 60);
+        assert_eq!(false_marker_count, 0);
+    }
+
+    #[test]
+    fn later_complete_minute_series_replace_partial_hour_candidate() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("late-hour-completion.sqlite")).unwrap();
+        let server = database.save_server(draft("Late hour completion", 90)).unwrap();
+        let point = |timestamp, bucket_seconds, gpu: &str, user: &str, coverage, active| UsagePoint {
+            timestamp, bucket_seconds, gpu_uuid: gpu.into(), username: user.into(),
+            active_seconds: active, memory_mb_seconds: (active * 100) as f64,
+            coverage_seconds: coverage,
+        };
+        let first = [
+            point(3_600, 3_600, "GPU-a", "alice", 120, 120),
+            point(3_660, 60, "GPU-b", "bob", 60, 60),
+        ];
+        assert_eq!(database.import_remote_usage(&server.id, &first, 10_800).unwrap(), 2);
+        let completion = [
+            point(3_660, 60, "GPU-a", "alice", 60, 60),
+            point(3_720, 60, "GPU-a", "alice", 60, 60),
+            point(3_780, 60, "GPU-a", "alice", 60, 60),
+        ];
+        assert_eq!(database.import_remote_usage(&server.id, &completion, 10_800).unwrap(), 1);
+
+        let connection = database.connection.lock().unwrap();
+        let alice: i64 = connection.query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid='GPU-a' AND username='alice'",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        let bob: i64 = connection.query_row(
+            "SELECT active_seconds FROM usage_buckets WHERE server_id=?1 AND timestamp=3600 AND gpu_uuid='GPU-b' AND username='bob'",
+            [&server.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(alice, 180);
+        assert_eq!(bob, 60, "the existing other-series minute must be preserved");
+    }
+
+    #[test]
+    fn first_upgrade_detects_a_legacy_route_edit_from_before_guard_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pre-guard.sqlite");
+        let database = Database::open(&path).unwrap();
+        let mut initial = draft("Previous dev route", 90);
+        initial.proxy_jump = Some("test@old.example:22".into());
+        initial.ssh_hops = vec![SshHop {
+            host: "old.example".into(), port: 22, username: "test".into(),
+            auth_method: "sshAgent".into(), identity_file: None, credential_id: None,
+        }];
+        let server = database.save_server(initial).unwrap();
+        drop(database);
+        let previous = Connection::open(&path).unwrap();
+        previous.execute_batch("DROP TRIGGER invalidate_legacy_ssh_route; DELETE FROM storage_migrations WHERE key='legacy-route-guard-v1';").unwrap();
+        previous.execute("UPDATE servers SET proxy_jump='replacement.example' WHERE id=?1", [&server.id]).unwrap();
+        let upgraded = Database::open(&path).unwrap();
+        let edited = upgraded.get_server(&server.id).unwrap();
+        assert!(edited.ssh_hops.is_empty());
+        assert_eq!(edited.proxy_jump.as_deref(), Some("replacement.example"));
+        drop(upgraded);
+        assert!(Database::open(&path).unwrap().get_server(&server.id).unwrap().ssh_hops.is_empty());
+    }
+
+    #[test]
+    fn downgrade_edit_invalidates_hops_without_discarding_metadata_or_other_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("downgrade.sqlite");
+        let database = Database::open(&path).unwrap();
+        let mut initial = draft("Route", 90);
+        initial.proxy_jump = Some("old-jump.example".into());
+        initial.ssh_hops = vec![SshHop {
+            host: "old-jump.example".into(), port: 22, username: "test".into(),
+            auth_method: "sshAgent".into(), identity_file: None, credential_id: None,
+        }];
+        let server = database.save_server(initial).unwrap();
+        assert_eq!(database.get_server(&server.id).unwrap().ssh_hops.len(), 1);
+        // An old binary knows only the original columns, retaining new ones.
+        let old = Connection::open(&path).unwrap();
+        old.execute("UPDATE servers SET proxy_jump='new-jump.example' WHERE id=?1", [&server.id]).unwrap();
+        drop(database);
+        let upgraded = Database::open(&path).unwrap();
+        let edited = upgraded.get_server(&server.id).unwrap();
+        assert_eq!(edited.proxy_jump.as_deref(), Some("new-jump.example"));
+        assert!(edited.ssh_hops.is_empty());
+        let raw: String = old.query_row("SELECT ssh_hops_json FROM servers WHERE id=?1", [&server.id], |row| row.get(0)).unwrap();
+        assert!(raw.contains("old-jump.example"));
+        let mut new_edit = draft("Route after upgrade", 90);
+        new_edit.id = Some(server.id.clone());
+        new_edit.proxy_jump = Some("new-jump.example".into());
+        new_edit.ssh_hops = vec![SshHop {
+            host: "new-jump.example".into(), port: 22, username: "test".into(),
+            auth_method: "sshAgent".into(), identity_file: None, credential_id: None,
+        }];
+        upgraded.save_server(new_edit).unwrap();
+        assert_eq!(upgraded.get_server(&server.id).unwrap().ssh_hops[0].host, "new-jump.example");
+        let integrity: String = old.query_row("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
+        assert_eq!(integrity, "ok");
+    }
+
+    #[test]
     fn app_notification_preference_persists_across_database_reads() {
         let directory = tempfile::tempdir().unwrap();
         let database = Database::open(&directory.path().join("settings.sqlite")).unwrap();
@@ -3910,6 +4646,39 @@ mod tests {
         assert!(!restored.idle_notifications_enabled);
     }
 
+    #[test]
+    fn server_edit_succeeds_when_key_reclaim_fails_and_retries_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("credentials.sqlite");
+        let database = Database::open(&db_path).unwrap();
+        let key_dir = directory.path().join("ssh-keys");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        let key_path = key_dir.join(format!("{}.key", Uuid::new_v4()));
+        std::fs::write(&key_path, b"old key").unwrap();
+        let mut initial = draft("Before", 30);
+        initial.identity_file = Some(key_path.to_string_lossy().into_owned());
+        initial.auth_method = "privateKey".into();
+        let saved = database.save_server(initial).unwrap();
+
+        std::fs::remove_file(&key_path).unwrap();
+        std::fs::create_dir(&key_path).unwrap();
+        let mut edit = draft("After", 30);
+        edit.id = Some(saved.id.clone());
+        let updated = database.save_server(edit).unwrap();
+        assert_eq!(updated.name, "After");
+        let queued: i64 = database.connection.lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM credential_reclaim_queue", [], |row| row.get(0)).unwrap();
+        assert_eq!(queued, 1);
+
+        std::fs::remove_dir(&key_path).unwrap();
+        drop(database);
+        let reopened = Database::open(&db_path).unwrap();
+        let queued: i64 = reopened.connection.lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM credential_reclaim_queue", [], |row| row.get(0)).unwrap();
+        assert_eq!(queued, 0);
+        assert_eq!(reopened.get_server(&saved.id).unwrap().name, "After");
+    }
+
     fn draft(name: &str, retention_days: u32) -> ServerDraft {
         ServerDraft {
             id: None,
@@ -3920,7 +4689,7 @@ mod tests {
             username: "test".into(),
             ssh_alias: None,
             identity_file: None,
-            proxy_jump: None,
+            proxy_jump: None, ssh_hops: Vec::new(),
             tags: vec!["lab".into()],
             sampling_interval_seconds: 2,
             history_retention_days: retention_days,

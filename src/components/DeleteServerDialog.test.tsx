@@ -21,7 +21,7 @@ describe('DeleteServerDialog', () => {
   it('offers exact SSH access revocation for the RackTop managed key', () => {
     const markup = renderToStaticMarkup(<DeleteServerDialog server={{ ...server, identityFile: '~/.ssh/racktop_ed25519' }} onClose={vi.fn()} onDelete={vi.fn()} />)
     expect(markup).toContain('同时撤销 RackTop 配置的免密登录')
-    expect(markup).toContain('authorized_keys')
+    expect(markup).toContain('使用同一密钥的其他电脑也会失去此项登录授权。')
     expect(markup).toContain('type="checkbox"')
     expect(markup).not.toContain('checked=""')
   })

@@ -155,9 +155,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .workspace__scroll--terminal > .detail-page--terminal { flex: 0 0 auto; height: auto; margin-bottom: 14px; }
 .terminal-workspace { display: grid; flex: 1 1 0; min-width: 0; min-height: 0; width: min(1180px, calc(100% - 52px)); margin: 0 auto 26px; }
 .terminal-workspace[hidden] { display: none; }
+:is(.server-list, .workspace__scroll) { --scrollbar-thumb: color-mix(in srgb, var(--text-tertiary) 20%, transparent); }
+.server-list { scrollbar-color: var(--scrollbar-thumb) transparent; }
 .workspace__scroll::-webkit-scrollbar { width: 9px; }
 .workspace__scroll::-webkit-scrollbar-track { background: transparent; }
 .workspace__scroll::-webkit-scrollbar-thumb { min-height: 44px; border: 3px solid transparent; border-radius: 999px; background: color-mix(in srgb, var(--text-tertiary) 20%, transparent); background-clip: padding-box; }
+/* Native macOS overlay visibility stays untouched; Windows and Linux hide only
+   the inactive thumb and reserve a stable gutter for overflowing content. */
+:root:is([data-platform="windows"], [data-platform="linux"]) :is(.server-list, .workspace__scroll) { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
+:root:is([data-platform="windows"], [data-platform="linux"]) .server-list::-webkit-scrollbar { width: 9px; }
+:root:is([data-platform="windows"], [data-platform="linux"]) .server-list::-webkit-scrollbar-track { background: transparent; }
+:root:is([data-platform="windows"], [data-platform="linux"]) .server-list::-webkit-scrollbar-thumb,
+:root:is([data-platform="windows"], [data-platform="linux"]) .workspace__scroll::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); }
+:root:is([data-platform="windows"], [data-platform="linux"]) .server-list::-webkit-scrollbar-thumb { min-height: 44px; border: 3px solid transparent; border-radius: 999px; background-clip: padding-box; }
+:root:is([data-platform="windows"], [data-platform="linux"]) :is(.server-list, .workspace__scroll)::-webkit-scrollbar-button { display: none; }
+:root:is([data-platform="windows"], [data-platform="linux"]) :is(.server-list, .workspace__scroll):not([data-scrollbar-active]) { --scrollbar-thumb: transparent; }
 .topbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; min-height: 78px; padding: 14px 26px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); background: var(--bg); }
 .topbar__title { flex: 1; min-width: 0; }
 .topbar__title, .topbar__title *, .refresh-label, .refresh-label * { pointer-events: none; }
@@ -193,6 +205,9 @@ button.remote-sync-status--error:focus-visible { border-color: var(--orange); ou
 .notification-dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border: 1.5px solid var(--surface-solid); border-radius: 50%; background: var(--red); }
 .reservation-row--warning { border-color: var(--border); background: transparent; }
 .reservation-row--warning .reservation-row__content em { color: color-mix(in srgb, var(--orange) 78%, var(--text-secondary)); background: color-mix(in srgb, var(--orange) 7%, var(--surface-solid)); }
+.reservation-warning-open { display: inline-flex; align-items: center; min-width: 0; gap: 4px; padding: 0; border: 0; color: inherit; background: transparent; font: inherit; text-align: left; }
+.reservation-warning-open svg { flex: 0 0 auto; color: var(--text-tertiary); }
+.reservation-warning-open:focus-visible { border-radius: 3px; outline: 2px solid var(--blue); outline-offset: 3px; }
 .activity-log-sheet { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(940px, calc(100vw - 32px)); max-height: min(86vh, 820px); overflow: hidden; }
 .activity-log-body { min-height: 360px; overflow: auto; }
 .activity-log-totals { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; padding: 15px 20px 16px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); }
@@ -544,7 +559,8 @@ button.gpu-card:active { transform: scale(.99); }
 .segmented-control { display: grid; grid-template-columns: repeat(2, 44px); padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-subtle); }
 .segmented-control button { min-height: 24px; padding: 0; border: 0; border-radius: 5px; color: var(--text-tertiary); background: transparent; font-size: calc(9px + var(--font-adjust, 0px)); font-weight: 700; }
 .segmented-control button[aria-pressed="true"] { color: var(--text); background: var(--surface-solid); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-.history-heatmap__scroll { overflow-x: auto; overflow-y: hidden; padding: 1px 0 5px; scrollbar-color: color-mix(in srgb, var(--text-tertiary) 20%, transparent) transparent; scrollbar-width: thin; }
+/* Reserve classic scrollbar space on first layout. */
+.history-heatmap__scroll { overflow-x: scroll; overflow-y: hidden; padding: 1px 0 5px; scrollbar-color: color-mix(in srgb, var(--text-tertiary) 20%, transparent) transparent; scrollbar-width: thin; }
 .history-heatmap__grid { display: grid; align-items: center; gap: 2px; width: 100%; }
 .history-heatmap__day { overflow: visible; color: var(--text-tertiary); font-size: calc(8px + var(--font-adjust, 0px)); line-height: 12px; white-space: nowrap; }
 .history-heatmap__time { position: sticky; inset-inline-start: 0; z-index: 2; padding: 0 2px 0 0; color: var(--text-tertiary); background: var(--surface); font-size: calc(8px + var(--font-adjust, 0px)); line-height: 12px; text-align: left; font-variant-numeric: tabular-nums; }
@@ -1035,11 +1051,11 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
 .managed-profile-template > header > div:first-child span { flex: 0 0 auto; padding: 2px 6px; border-radius: 5px; color: var(--text-tertiary); background: var(--surface-subtle); font-size: calc(8px + var(--font-adjust, 0px)); }
 .managed-profile-template > header > div:last-child { display: flex; align-items: center; gap: 4px; }
 .managed-profile-template > code { overflow: hidden; color: var(--text-tertiary); font-size: calc(9px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }
-.managed-profile-parameters { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; min-height: 24px; }
-.managed-profile-parameters > span { display: inline-flex; align-items: center; gap: 5px; max-width: 220px; min-height: 23px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-secondary); background: var(--surface-subtle); }
-.managed-profile-parameters > span code, .managed-profile-parameters > span em { overflow: hidden; font-size: calc(9px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }
+.managed-profile-parameters { position: relative; display: flex; flex-wrap: nowrap; align-items: center; gap: 5px; height: 24px; min-width: 0; overflow: hidden; }
+.managed-profile-parameters > span { width: max-content; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; max-width: 220px; min-height: 23px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-secondary); background: var(--surface-subtle); }
+.managed-profile-parameters > span code, .managed-profile-parameters > span em { flex: 0 0 auto; min-width: 0; overflow: hidden; font-size: calc(9px + var(--font-adjust, 0px)); text-overflow: ellipsis; white-space: nowrap; }
 .managed-profile-parameters > span em { color: var(--text); font-style: normal; font-weight: 600; }
-.managed-profile-parameters > small { color: var(--text-tertiary); font-size: calc(9px + var(--font-adjust, 0px)); }
+.managed-profile-parameters > small { flex: 0 0 auto; white-space: nowrap; color: var(--text-tertiary); font-size: calc(9px + var(--font-adjust, 0px)); }
 .managed-profile-template > dl { display: grid; grid-template-columns: minmax(190px, 1.25fr) minmax(150px, 1fr) minmax(100px, .65fr); gap: 14px; margin: 0; padding-top: 9px; border-top: 1px solid var(--border); }
 .managed-profile-template > dl > div { min-width: 0; }
 .managed-profile-template dt { margin-bottom: 3px; color: var(--text-tertiary); font-size: calc(8px + var(--font-adjust, 0px)); }
@@ -1113,8 +1129,8 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .workspace__scroll:hover { scrollbar-color: color-mix(in srgb, var(--text-tertiary) 34%, transparent) transparent; }
-  .workspace__scroll:hover::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--text-tertiary) 34%, transparent); }
+  .workspace__scroll:hover { scrollbar-color: var(--scrollbar-thumb) transparent; }
+  .workspace__scroll:hover::-webkit-scrollbar-thumb { background-color: var(--scrollbar-thumb); }
   .settings-body:hover { scrollbar-color: color-mix(in srgb, var(--text-tertiary) 34%, transparent) transparent; }
   .settings-body:hover::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--text-tertiary) 34%, transparent); }
   .server-form__body:hover { scrollbar-color: color-mix(in srgb, var(--text-tertiary) 34%, transparent) transparent; }
@@ -1243,8 +1259,10 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; } legend { margin-bot
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
   .sheet, .toast { transform: none !important; }
   .project-target__action-button:active { transform: none; }
+  .spin { animation: spin 1.25s linear infinite !important; }
 }
 :root[data-reduce-motion="true"] *, :root[data-reduce-motion="true"] *::before, :root[data-reduce-motion="true"] *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+:root[data-reduce-motion="true"] .spin { animation: spin 1.25s linear infinite !important; }
 :root[data-reduce-motion="true"] .project-target__action-button:active { transform: none; }
 @media (prefers-reduced-transparency: reduce) { .sidebar, .topbar, .sheet__header, .sheet__footer { background: var(--surface-solid); backdrop-filter: none; -webkit-backdrop-filter: none; } }
 @media (prefers-contrast: more) { :root { --border: rgba(0,0,0,.35); --border-strong: rgba(0,0,0,.55); } .sidebar, .topbar, .panel, .metric-card { background: var(--surface-solid); } }

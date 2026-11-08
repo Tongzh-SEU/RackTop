@@ -70,6 +70,8 @@ describe('ProjectView inspection feedback', () => {
     await act(async () => root?.render(<ProjectView projects={[project]} servers={[source]} busyTargets={new Set()} syncProgress={[]} preparingProjectIds={new Set()} onAdd={vi.fn()} onEdit={vi.fn()} onDelete={vi.fn()} onInspect={onInspect} onSync={vi.fn()} onCancel={vi.fn()} onSyncAll={vi.fn()} />))
     const inspectButton = [...container.querySelectorAll('button')].find((button) => button.textContent === '检查状态')
 
+    expect(inspectButton?.closest('.project-card__source-actions')).not.toBeNull()
+
     await act(async () => inspectButton?.click())
     expect(onInspect).toHaveBeenCalledWith(project)
     expect(inspectButton?.textContent).toBe('检查中')

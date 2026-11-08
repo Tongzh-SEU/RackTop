@@ -41,14 +41,19 @@ async fn known_key_changed(server: &Server, scanned: &HostKeyInfo) -> Result<boo
     command.creation_flags(0x08000000);
     let output = command.args(["-F", &lookup, "-f", &path.to_string_lossy()]).output().await.map_err(|error| format!("无法核对现有 Host Key：{error}"))?;
     if !output.status.success() || output.stdout.is_empty() { return Ok(false); }
-    let scanned_fields: Vec<&str> = scanned.key_line.split_whitespace().collect();
     let known_output = String::from_utf8_lossy(&output.stdout);
-    let known_lines: Vec<&str> = known_output.lines().filter(|line| !line.starts_with('#')).collect();
-    let same_key = known_lines.iter().any(|line| {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        fields.len() >= 3 && scanned_fields.len() >= 3 && fields[1] == scanned_fields[1] && fields[2] == scanned_fields[2]
-    });
-    Ok(!known_lines.is_empty() && !same_key)
+    Ok(known_key_changed_from_output(&scanned.key_line, &known_output))
+}
+
+fn known_key_changed_from_output(scanned_key_line: &str, known_output: &str) -> bool {
+    let scanned_fields: Vec<&str> = scanned_key_line.split_whitespace().collect();
+    if scanned_fields.len() < 3 { return false; }
+    let matching_algorithm_keys: Vec<Vec<&str>> = known_output.lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| line.split_whitespace().collect())
+        .filter(|fields: &Vec<&str>| fields.len() >= 3 && fields[1] == scanned_fields[1])
+        .collect();
+    !matching_algorithm_keys.is_empty() && !matching_algorithm_keys.iter().any(|fields| fields[2] == scanned_fields[2])
 }
 
 fn algorithm_priority(line: &str) -> u8 {
@@ -108,9 +113,29 @@ mod tests {
 
     #[test]
     fn refuses_to_overwrite_a_changed_host_key() {
-        let server = Server { id: "id".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22, username: "user".into(), ssh_alias: None, identity_file: None, proxy_jump: None, tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 30, remote_history_enabled: false, remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(), status: "unknown".into(), last_error: None, last_seen_at: None };
+        let server = Server { id: "id".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22, username: "user".into(), ssh_alias: None, identity_file: None, proxy_jump: None, ssh_hops: Vec::new(), tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 30, remote_history_enabled: false, remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(), status: "unknown".into(), last_error: None, last_seen_at: None };
         let mut info = parse_line("id", "example.com", "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEr7NxQ0wNIrsiOqW1FrpSGbP/2Y8cDrn2NQHQkM8p4Y").unwrap();
         info.changed = true;
         assert!(trust(&server, &info).unwrap_err().contains("不会覆盖"));
+    }
+
+    #[test]
+    fn a_new_host_key_algorithm_is_not_mistaken_for_a_changed_key() {
+        assert!(!known_key_changed_from_output(
+            "example.com ssh-ed25519 AAAA-new",
+            "example.com ssh-rsa AAAA-existing\n",
+        ));
+    }
+
+    #[test]
+    fn only_a_different_key_for_the_scanned_algorithm_is_reported_as_changed() {
+        assert!(known_key_changed_from_output(
+            "example.com ssh-ed25519 AAAA-new",
+            "example.com ssh-ed25519 AAAA-old\nexample.com ssh-rsa AAAA-existing\n",
+        ));
+        assert!(!known_key_changed_from_output(
+            "example.com ssh-ed25519 AAAA-new",
+            "example.com ssh-ed25519 AAAA-old\nexample.com ssh-ed25519 AAAA-new\n",
+        ));
     }
 }

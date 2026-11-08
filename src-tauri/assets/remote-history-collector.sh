@@ -9,6 +9,11 @@ fi
 state_dir="${RACKTOP_STATE_DIR:-$HOME/.racktop}"
 history_file="$state_dir/.history-v1.tsv"
 usage_file="$state_dir/.usage-v1.tsv"
+if [ -n "${RACKTOP_HISTORY_LOCK:-}" ]; then
+  exec 6>"$RACKTOP_HISTORY_LOCK"
+  flock -w 10 6 || exit 1
+  [ -d "${RACKTOP_CLIENT_STATE_DIR:?}" ] || exit 0
+fi
 mkdir -p "$state_dir"
 # Kernel locks are released even after SIGKILL or a reboot. Ignore the legacy directory lock.
 exec 9>"$state_dir/.usage.lock"
@@ -16,6 +21,15 @@ flock -n 9 || exit 1
 
 now="$(date +%s)"
 bucket=$((now - now % 60))
+# Keep new shared hours in minute form. Older clients already honor this file,
+# avoiding overlap between an online client's local minutes and hourly backfill.
+if [ -n "${RACKTOP_CLIENT_STATE_DIR:-}" ]; then
+  protected_hour=$((bucket - bucket % 3600))
+  grep -qx "$protected_hour" "$state_dir/.usage-minute-hours" 2>/dev/null || printf '%s\n' "$protected_hour" >> "$state_dir/.usage-minute-hours"
+fi
+# Different installations share one legacy-compatible minute stream.
+# Check under the existing writer lock, including samples written by older apps.
+if [ -r "$history_file" ] && awk -F '|' -v bucket="$bucket" '$2 == bucket { found=1 } END { exit !found }' "$history_file"; then exit 0; fi
 cpu_first="$(head -n 1 /proc/stat)"
 sleep 0.25
 cpu_second="$(head -n 1 /proc/stat)"

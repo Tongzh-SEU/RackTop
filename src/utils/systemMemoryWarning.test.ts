@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import type { Snapshot } from '../types/models'
-import { hasSystemMemoryWarning, systemMemoryPercent, systemMemoryThreshold } from './systemMemoryWarning'
+import type { Server, Snapshot } from '../types/models'
+import { deriveSystemMemoryWarnings, hasSystemMemoryWarning, systemMemoryPercent, systemMemoryThreshold } from './systemMemoryWarning'
 const sample = (used: number, total = 1000) => ({system:{memoryUsedBytes:used,memoryTotalBytes:total}} as Snapshot)
 describe('system memory threshold', () => {
+  it('derives only active server warnings using the configured threshold and ignore state', () => {
+    const servers = ['high', 'ignored', 'boundary', 'invalid', 'missing'].map((id) => ({ id, name: id } as Server))
+    const snapshots = { high: sample(960), ignored: sample(990), boundary: sample(950), invalid: sample(NaN), removed: sample(990) }
+    const warnings = deriveSystemMemoryWarnings(servers, snapshots, 95, new Set(['ignored']))
+    expect(warnings).toEqual([{ serverId: 'high', serverName: 'high', memoryUsedBytes: 960, memoryTotalBytes: 1000, percent: 96, threshold: 95 }])
+    expect(deriveSystemMemoryWarnings(servers, snapshots, 100, new Set())).toEqual([])
+  })
   it('defaults to 90 and supports the full 80–100 interval', () => {
     expect(systemMemoryThreshold(undefined)).toBe(90)
     for (const threshold of [80,90,100]) {

@@ -1,4 +1,4 @@
-import { hasSystemMemoryWarning, systemMemoryPercent, systemMemoryThreshold, loadIgnoredSystemMemoryWarnings, IGNORED_SYSTEM_MEMORY_KEY } from './utils/systemMemoryWarning'
+import { deriveSystemMemoryWarnings, hasSystemMemoryWarning, systemMemoryPercent, systemMemoryThreshold, loadIgnoredSystemMemoryWarnings, IGNORED_SYSTEM_MEMORY_KEY, type SystemMemoryWarning } from './utils/systemMemoryWarning'
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { flushSync } from 'react-dom'
 import { listen } from '@tauri-apps/api/event'
@@ -67,16 +67,18 @@ import { popupServerContextMenu } from './services/serverContextMenu'
 import type { AppSettings, DetailTab, GpuMemoryStallWarning, HistoryHeatmapPoint, HistoryPoint, HostKeyInfo, IdleReservation, IdleReservationFilters, InteractionLogSummary, LinkedProjectResourcePlan, Project, ProjectDraft, ProjectSyncProgress, RemoteHistorySyncResult, Server, ServerDraft, ServerNotificationCategory, ServerNotificationSettings, Snapshot } from './types/models'
 import { isRackTopManagedIdentity } from './utils/sshSetup'
 import { DeleteServerDialog } from './components/DeleteServerDialog'
+import { ConfigTransferMenu } from './components/ConfigTransferMenu'
 import { AppUpdateDialog, AppUpdateProgressButton, AppUpdateTriggerButton } from './components/AppUpdateDialog'
 import { HistoryHeatmaps } from './components/HistoryHeatmap'
 import { StorageSection } from './components/StorageSection'
 import { MetricBar } from './components/MetricBar'
+import { WarningDialog } from './components/WarningDialog'
 import { ManagedProcessView, type ManagedLaunchIntent } from './components/ManagedProcessView'
 import { OnboardingChecklist, type OnboardingStep } from './components/OnboardingChecklist'
 import { ProcessBlocks, type ProcessTerminationTarget } from './components/ProcessBlocks'
 import { ProjectForm } from './components/ProjectForm'
 import { ProjectConflictDialog, ProjectDeleteDialog, ProjectView, syncableProjectTargets } from './components/ProjectView'
-import { isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
+import { isRemoteHistoryCleanupPendingError, isRemoteHistoryRetryableError, isRemoteHistoryStartingError, isRemoteSyncFresh, RemoteSyncCoordinator, RemoteSyncStatus, REMOTE_SYNC_FEEDBACK_DELAY_MS, REMOTE_SYNC_RETRY_INITIAL_MS, REMOTE_SYNC_RETRY_MAX_MS, REMOTE_SYNC_SUCCESS_DURATION_MS, shouldRetryRemoteSyncAfterRecovery, shouldShowRemoteSyncImmediately, type RemoteSyncStatusState } from './components/RemoteSyncStatus'
 import { ResourceTrend } from './components/ResourceTrend'
 import { ServerForm } from './components/ServerForm'
 import { SshTerminal } from './components/SshTerminal'
@@ -102,6 +104,7 @@ import { clearTrendHistoryCache } from './utils/trendHistoryCache'
 import { gpuContextName, serverDisplayName } from './utils/serverName'
 import { loadLaunchProfiles, loadManagedRuns } from './utils/managedRuns'
 import { detectAppPlatform } from './utils/platform'
+import { enableAutoHideScrollbars } from './utils/autoHideScrollbars'
 import { acceleratorDeviceName, acceleratorDriverLabel, acceleratorLabel } from './utils/accelerator'
 import { allowsServerNotification, defaultServerNotificationSettings, normalizeServerNotificationSettings, SERVER_NOTIFICATION_CATEGORY_ITEMS } from './utils/serverNotifications'
 import { isNewerVersion, loadCachedUpdate, loadIgnoredUpdateVersion, saveCachedUpdate, saveIgnoredUpdateVersion, shouldShowUpdateBadge, UPDATE_CHECK_INTERVAL_MS, type ReleaseInfo } from './utils/updateCheck'
@@ -399,6 +402,22 @@ function App() {
   const [serverNotificationSettings, setServerNotificationSettings] = useState<Record<string, ServerNotificationSettings>>({})
   const [gpuMemoryStallWarnings, setGpuMemoryStallWarnings] = useState<GpuMemoryStallWarning[]>([])
   const [showReservationCenter, setShowReservationCenter] = useState(false)
+  const [systemMemoryWarningServerId, setSystemMemoryWarningServerId] = useState<string | null>(null)
+  const systemMemoryWarningTrigger = useRef<HTMLElement | null>(null)
+  const systemMemoryWarnings = useMemo(() => deriveSystemMemoryWarnings(servers, snapshots, settings?.systemMemoryThresholdPercent, ignoredSystemMemoryWarnings), [servers, snapshots, settings?.systemMemoryThresholdPercent, ignoredSystemMemoryWarnings])
+  const activeSystemMemoryWarning = systemMemoryWarnings.find((warning) => warning.serverId === systemMemoryWarningServerId)
+  const openSystemMemoryWarning = useCallback((serverId: string) => {
+    systemMemoryWarningTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setSystemMemoryWarningServerId(serverId)
+  }, [])
+  const closeSystemMemoryWarning = useCallback(() => {
+    const trigger = systemMemoryWarningTrigger.current
+    setSystemMemoryWarningServerId(null)
+    requestAnimationFrame(() => trigger?.focus())
+  }, [])
+  useEffect(() => {
+    if (systemMemoryWarningServerId && !activeSystemMemoryWarning) closeSystemMemoryWarning()
+  }, [systemMemoryWarningServerId, activeSystemMemoryWarning, closeSystemMemoryWarning])
   const [reservationEditor, setReservationEditor] = useState<{ filters: IdleReservationFilters; reservation?: IdleReservation } | null>(null)
   const [quickTerminal, setQuickTerminal] = useState<{ server: Server; gpu?: Snapshot['gpus'][number] } | null>(null)
   const [busy, setBusy] = useState<Set<string>>(new Set())
@@ -477,6 +496,7 @@ function App() {
   const remoteHistoryServerKey = servers.filter((server) => server.remoteHistoryEnabled).map((server) => server.id).sort().join('\n')
 
   useEffect(() => { remoteHistoryServersRef.current = servers }, [servers])
+  useEffect(() => enableAutoHideScrollbars(appPlatform), [])
   useEffect(() => { remoteSyncStatusRef.current = remoteSyncStatus }, [remoteSyncStatus])
   useEffect(() => { projectsRef.current = projects }, [projects])
   useEffect(() => { busyProjectTargetsRef.current = busyProjectTargets }, [busyProjectTargets])
@@ -587,9 +607,10 @@ function App() {
           ? `大文件同步期间采集暂时延迟 · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试`
           : `${message} · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试`,
       } : server))
-      if (message.includes('主机指纹')) {
+      if (!quiet && message.includes('主机指纹')) {
         try {
-          setPendingHostKey(await api.scanHostKey(serverId))
+          const info = await api.scanHostKey(serverId)
+          if (info.changed) setPendingHostKey(info)
         } catch (scanError) {
           if (!quiet) setToast(String(scanError))
         }
@@ -862,17 +883,22 @@ function App() {
     let cancelled = false
     let feedbackTimer: number | null = null
     let successTimer: number | null = null
-    const syncAllRemoteHistory = async (initial: boolean) => remoteSyncCoordinator.current.run(async () => {
+    let remoteHistoryRetryTimer: number | null = null
+    let remoteHistoryRetryDelayMs = REMOTE_SYNC_RETRY_INITIAL_MS
+    const syncAllRemoteHistory = async (initial: boolean, onlyRetryServerIds?: Set<string>) => remoteSyncCoordinator.current.run(async () => {
       if (cancelled) return
       const allEnabledServers = remoteHistoryServersRef.current.filter((server) => server.remoteHistoryEnabled)
       const nowSeconds = Math.floor(Date.now() / 1000)
-      const freshServerCount = initial ? allEnabledServers.filter((server) => isRemoteSyncFresh(server, nowSeconds)).length : 0
-      const enabledServers = allEnabledServers.filter((server) => (!initial || !isRemoteSyncFresh(server, nowSeconds)) && !remoteSyncInFlight.current.has(server.id))
+      const freshServerCount = initial ? allEnabledServers.filter((server) => isRemoteSyncFresh(server, nowSeconds) && !remoteSyncRecoveryQueued.current.has(server.id)).length : 0
+      const enabledServers = allEnabledServers.filter((server) => (!initial || !isRemoteSyncFresh(server, nowSeconds) || remoteSyncRecoveryQueued.current.has(server.id)) && (!onlyRetryServerIds || onlyRetryServerIds.has(server.id)) && !remoteSyncInFlight.current.has(server.id))
       if (enabledServers.length === 0) return
       let completed = freshServerCount
       const total = allEnabledServers.length
       let importedCount = 0
       const failedServerIds: string[] = []
+      const failedServerErrors: Record<string, string> = {}
+      const startingServerIds: string[] = []
+      const cleanupPendingServerIds: string[] = []
       const recoveryRetry = enabledServers.some((server) => remoteSyncRecoveryQueued.current.has(server.id))
       let visible = recoveryRetry || (initial && shouldShowRemoteSyncImmediately(allEnabledServers, nowSeconds))
       const syncingState = (): RemoteSyncStatusState => ({ phase: 'syncing', completed, total, importedCount, failedServerIds: [] })
@@ -898,17 +924,29 @@ function App() {
               break
             } catch (reason) {
               lastError = reason
+              if (isRemoteHistoryCleanupPendingError(reason)) {
+                cleanupPendingServerIds.push(server.id)
+                lastError = null
+                break
+              }
+              if (isRemoteHistoryStartingError(reason)) {
+                startingServerIds.push(server.id)
+                lastError = null
+                break
+              }
             }
           }
-          if (lastError || !result) throw lastError ?? new Error('历史同步未返回结果')
+          if (lastError) throw lastError
+          if (!result) return
           remoteSyncRecoveryQueued.current.delete(server.id)
           importedCount += result.importedCount
           if (!cancelled && result.importedCount > 0) notifyHistoryImported(server.id)
           if (!cancelled && result.latestTimestamp) {
             setServers((current) => current.map((item) => item.id === server.id && item.remoteHistoryLastSyncAt !== result.latestTimestamp ? { ...item, remoteHistoryLastSyncAt: result.latestTimestamp } : item))
           }
-        } catch {
+        } catch (error) {
           failedServerIds.push(server.id)
+          failedServerErrors[server.id] = error instanceof Error ? error.message : String(error)
         } finally {
           completed += 1
           remoteSyncInFlight.current.delete(server.id)
@@ -920,8 +958,31 @@ function App() {
         feedbackTimer = null
       }
       if (cancelled) return
+      const retryableFailureServerIds = failedServerIds.filter((serverId) => isRemoteHistoryRetryableError(failedServerErrors[serverId]))
+      const retryServerIds = new Set([...cleanupPendingServerIds, ...startingServerIds, ...retryableFailureServerIds])
+      const retryDelaySeconds = retryServerIds.size > 0 ? Math.ceil(remoteHistoryRetryDelayMs / 1000) : undefined
+      if (remoteHistoryRetryTimer !== null) {
+        window.clearTimeout(remoteHistoryRetryTimer)
+        remoteHistoryRetryTimer = null
+      }
+      if (retryServerIds.size > 0) {
+        for (const serverId of retryServerIds) remoteSyncRecoveryQueued.current.add(serverId)
+        const retryDelay = remoteHistoryRetryDelayMs
+        remoteHistoryRetryDelayMs = Math.min(remoteHistoryRetryDelayMs * 2, REMOTE_SYNC_RETRY_MAX_MS)
+        remoteHistoryRetryTimer = window.setTimeout(() => {
+          remoteHistoryRetryTimer = null
+          void syncAllRemoteHistory(false, retryServerIds)
+        }, retryDelay)
+      } else {
+        remoteHistoryRetryDelayMs = REMOTE_SYNC_RETRY_INITIAL_MS
+        for (const server of enabledServers) remoteSyncRecoveryQueued.current.delete(server.id)
+      }
       if (failedServerIds.length > 0) {
-        setRemoteSyncStatus({ phase: 'error', completed, total, importedCount, failedServerIds })
+        setRemoteSyncStatus({ phase: 'error', completed, total, importedCount, failedServerIds, failedServerErrors, cleanupPendingServerIds, retryDelaySeconds })
+      } else if (cleanupPendingServerIds.length > 0) {
+        setRemoteSyncStatus({ phase: 'cleanupPending', completed, total, importedCount, failedServerIds: [], cleanupPendingServerIds, retryDelaySeconds })
+      } else if (startingServerIds.length > 0) {
+        setRemoteSyncStatus({ phase: 'starting', completed, total, importedCount, failedServerIds: [], startingServerIds, retryDelaySeconds })
       } else if (initial && visible) {
         setRemoteSyncStatus({ phase: 'success', completed, total, importedCount, failedServerIds: [] })
         successTimer = window.setTimeout(() => setRemoteSyncStatus(null), REMOTE_SYNC_SUCCESS_DURATION_MS)
@@ -937,6 +998,7 @@ function App() {
       window.clearInterval(interval)
       if (feedbackTimer !== null) window.clearTimeout(feedbackTimer)
       if (successTimer !== null) window.clearTimeout(successTimer)
+      if (remoteHistoryRetryTimer !== null) window.clearTimeout(remoteHistoryRetryTimer)
     }
   }, [remoteHistoryServerKey, remoteSyncRetryRevision, initialCollectionComplete])
 
@@ -1323,15 +1385,32 @@ function App() {
       let sync: RemoteHistorySyncResult | null = null
       if (saved.remoteHistoryEnabled) {
         let configurationError: unknown = null
+        let configurationStarting = false
+        let configurationCleanupPending = false
         for (const delay of [0, 900, 1800]) {
           if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay))
           try {
             await api.configureRemoteHistory(saved.id)
             configurationError = null
             break
-          } catch (reason) { configurationError = reason }
+          } catch (reason) {
+            configurationError = reason
+            if (isRemoteHistoryCleanupPendingError(reason)) {
+              configurationCleanupPending = true
+              break
+            }
+            if (isRemoteHistoryStartingError(reason)) {
+              configurationStarting = true
+              break
+            }
+          }
         }
-        if (configurationError) setToast(`服务器已保存；远端历史将在连接稳定后重试：${String(configurationError)}`)
+        if (configurationCleanupPending || configurationStarting || (configurationError && isRemoteHistoryRetryableError(configurationError))) {
+          remoteSyncRecoveryQueued.current.add(saved.id)
+          setRemoteSyncRetryRevision((revision) => revision + 1)
+        } else if (configurationError) {
+          setToast(`服务器已保存；远端历史将在连接稳定后重试：${String(configurationError)}`)
+        }
         else {
           try { sync = await api.syncRemoteHistory(saved.id) }
           catch (reason) { setToast(`服务器已保存，远端历史首次同步失败：${String(reason)}`) }
@@ -1756,7 +1835,7 @@ function App() {
         </div>
         <div className="sidebar__footer">
           <button onClick={() => { setEditingServer(null); setShowServerForm(true) }}><Plus size={16} />添加服务器</button>
-          <button onClick={importConfig} disabled={importingConfig}><Download size={16} />{importingConfig ? '正在读取 SSH Config…' : '导入 SSH Config'}</button>
+          <ConfigTransferMenu servers={servers} onImported={async (count) => { setServers(await api.listServers()); setToast(`已导入 ${count} 台服务器配置`) }} onNotice={setToast} />
           <button onClick={() => setShowActivityLog(true)}><ScrollText size={16} />日志</button>
           <button onClick={() => setShowSettings(true)}><Settings size={16} />设置</button>
         </div>
@@ -1776,10 +1855,12 @@ function App() {
               setSelectedGpuUuid(null)
               setSelectedTab('connection')
               setMainView('server')
+              const reason = remoteSyncStatus.failedServerErrors?.[serverId]
+              if (reason) setToast(`历史同步失败：${reason}`)
             }} />}</span>}
             <span className={`refresh-label ${paused ? 'is-paused' : ''}`}><Clock3 size={14} />{paused ? '采集已暂停' : mainView === 'server' && selectedServer ? relativeTime(selectedServer.lastSeenAt) : totals.latestRefresh ? relativeTime(totals.latestRefresh) : `${settings?.defaultSamplingIntervalSeconds ?? 2} 秒采样`}</span>
             <button className="button button--secondary" onClick={() => void runManualRefreshAll()} disabled={manualRefreshingAll}><RefreshCw size={16} className={manualRefreshingAll ? 'spin' : ''} />刷新全部</button>
-            <button className="icon-button" aria-label="预约与通知" onClick={() => setShowReservationCenter(true)}><Bell size={18} />{(totals.hot > 0 || activeIdleReservationCount > 0 || gpuMemoryStallWarnings.length > 0) && <span className="notification-dot" />}</button>
+            <button className="icon-button" aria-label="预约与通知" onClick={() => setShowReservationCenter(true)}><Bell size={18} />{(totals.hot > 0 || activeIdleReservationCount > 0 || gpuMemoryStallWarnings.length > 0 || systemMemoryWarnings.length > 0) && <span className="notification-dot" />}</button>
             <DesktopWindowControls />
           </div>
         </header>
@@ -1796,7 +1877,7 @@ function App() {
           ) : mainView === 'mine' ? (
             <ManagedProcessView servers={servers} snapshots={snapshots} projects={projects} launchIntent={managedLaunchIntent} onLaunchIntentConsumed={() => setManagedLaunchIntent(null)} onOpenTerminal={(serverId) => { const server = servers.find((item) => item.id === serverId); if (server) setQuickTerminal({ server }) }} onNotice={setToast} onRefreshServer={(serverId) => refreshServer(serverId)} />
           ) : mainView === 'fleet' ? (
-            <FleetOverview onboarding={<OnboardingChecklist steps={onboardingSteps} previewStep={onboardingPreviewStep} collapsed={onboardingCollapsed} dismissed={onboardingDismissed} useActualState={onboardingUseActualState} showPreviewControls={!api.isDesktop} onPreviewStepChange={setOnboardingPreviewStep} onCollapsedChange={setOnboardingCollapsed} onDismiss={() => { localStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true'); setOnboardingDismissed(true); setToast('已隐藏新手引导，可在“设置 → 通用”中重新显示') }} onUseActualStateChange={setOnboardingUseActualState} />} servers={servers} snapshots={snapshots} ignoredNvidiaWarnings={ignoredNvidiaWarnings} ignoredSystemMemoryWarnings={ignoredSystemMemoryWarnings} settings={settings} totals={totals} sort={fleetSort} descending={fleetDescending} onSort={(next) => { setFleetSortMode('manual'); setFleetSort(next) }} onToggleOrder={() => { setFleetSortMode('manual'); setFleetDescending((value) => !value) }} onSelect={(serverId, tab, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid ?? null); setSelectedTab(tab); setMainView('server') }} onContextMenu={openServerContextMenu} />
+            <FleetOverview onboarding={<OnboardingChecklist steps={onboardingSteps} previewStep={onboardingPreviewStep} collapsed={onboardingCollapsed} dismissed={onboardingDismissed} useActualState={onboardingUseActualState} showPreviewControls={!api.isDesktop} onPreviewStepChange={setOnboardingPreviewStep} onCollapsedChange={setOnboardingCollapsed} onDismiss={() => { localStorage.setItem(ONBOARDING_DISMISSED_KEY, 'true'); setOnboardingDismissed(true); setToast('已隐藏新手引导，可在“设置 → 通用”中重新显示') }} onUseActualStateChange={setOnboardingUseActualState} />} servers={servers} snapshots={snapshots} ignoredNvidiaWarnings={ignoredNvidiaWarnings} systemMemoryWarnings={systemMemoryWarnings} onOpenSystemMemoryWarning={openSystemMemoryWarning} settings={settings} totals={totals} sort={fleetSort} descending={fleetDescending} onSort={(next) => { setFleetSortMode('manual'); setFleetSort(next) }} onToggleOrder={() => { setFleetSortMode('manual'); setFleetDescending((value) => !value) }} onSelect={(serverId, tab, gpuUuid) => { setSelectedServerId(serverId); setSelectedGpuUuid(gpuUuid ?? null); setSelectedTab(tab); setMainView('server') }} onContextMenu={openServerContextMenu} />
           ) : selectedServer && selectedSnapshot && canDisplayServerDetails(selectedServer.status, true) ? (
             <ServerDetail
               server={selectedServer}
@@ -1815,6 +1896,8 @@ function App() {
               systemMemoryWarningIgnored={ignoredSystemMemoryWarnings.has(selectedServer.id)}
               onIgnoreSystemMemoryWarning={() => setSystemMemoryIgnored(selectedServer.id, true)}
               onRestoreSystemMemoryWarning={() => setSystemMemoryIgnored(selectedServer.id, false)}
+              systemMemoryWarning={systemMemoryWarnings.find((warning) => warning.serverId === selectedServer.id)}
+              onOpenSystemMemoryWarning={() => openSystemMemoryWarning(selectedServer.id)}
               nvidiaWarningIgnored={ignoredNvidiaWarnings.has(selectedServer.id)}
               onIgnoreNvidiaWarning={() => setNvidiaWarningIgnored(selectedServer.id, true)}
               onRestoreNvidiaWarning={() => setNvidiaWarningIgnored(selectedServer.id, false)}
@@ -1858,7 +1941,8 @@ function App() {
       {serverPendingDelete && <DeleteServerDialog server={serverPendingDelete} onClose={() => setServerPendingDelete(null)} onDelete={(revokeSshAccess) => removeServer(serverPendingDelete, revokeSshAccess)} />}
       {processPendingTermination && <TerminateProcessDialog target={processPendingTermination} onClose={() => setProcessPendingTermination(null)} onTerminate={() => { const target = processPendingTermination; setProcessPendingTermination(null); setTerminatingProcess({ serverId: target.serverId, pid: target.process.pid }); void api.terminateProcess(target.serverId, target.process.pid).then(async (result) => { setToast(result); await refreshServer(target.serverId) }).catch((reason) => setToast(`结束 PID ${target.process.pid} 失败：${String(reason)}`)).finally(() => setTerminatingProcess(null)) }} />}
       {reservationEditor && <IdleReservationSheet reservation={reservationEditor.reservation} filters={reservationEditor.filters} availableGpuKeys={reservationEditorItems.filter((item) => item.available).map(({ server, gpu }) => idleReservationGpuKey(server.id, gpu.uuid))} onClose={() => setReservationEditor(null)} onSave={saveIdleReservation} />}
-      {showReservationCenter && <IdleReservationCenter reservations={idleReservations} warnings={gpuMemoryStallWarnings} onClose={() => setShowReservationCenter(false)} onEdit={(reservation) => { setShowReservationCenter(false); setReservationEditor({ filters: reservation.filters, reservation }) }} onStatusChange={setIdleReservationStatus} onClearPending={clearReservationPending} onDelete={removeIdleReservation} onIgnoreWarning={ignoreGpuMemoryStallWarning} />}
+      {showReservationCenter && <IdleReservationCenter reservations={idleReservations} warnings={gpuMemoryStallWarnings} systemMemoryWarnings={systemMemoryWarnings} onOpenSystemMemoryWarning={openSystemMemoryWarning} onIgnoreSystemMemoryWarning={(serverId) => setSystemMemoryIgnored(serverId, true)} onClose={() => setShowReservationCenter(false)} onEdit={(reservation) => { setShowReservationCenter(false); setReservationEditor({ filters: reservation.filters, reservation }) }} onStatusChange={setIdleReservationStatus} onClearPending={clearReservationPending} onDelete={removeIdleReservation} onIgnoreWarning={ignoreGpuMemoryStallWarning} />}
+      {activeSystemMemoryWarning && <SystemMemoryWarningDialog warning={activeSystemMemoryWarning} onClose={closeSystemMemoryWarning} />}
       {quickTerminal && (() => { const accelerator = snapshots[quickTerminal.server.id] ? acceleratorLabel(snapshots[quickTerminal.server.id]) : 'GPU'; return <div className="scrim quick-terminal-scrim" onMouseDown={(event) => event.target === event.currentTarget && setQuickTerminal(null)}><section className="sheet quick-terminal-sheet" role="dialog" aria-modal="true" aria-label={`${quickTerminal.server.name}${quickTerminal.gpu ? ` ${accelerator} ${quickTerminal.gpu.index}` : ''} 终端`}><header className="sheet__header"><div><p className="eyebrow">{quickTerminal.gpu ? `${accelerator} 固定终端` : 'SSH 终端'}</p><h2>{quickTerminal.server.name}{quickTerminal.gpu ? ` · ${accelerator} ${quickTerminal.gpu.index}` : ''}</h2></div><button className="icon-button" onClick={() => setQuickTerminal(null)} aria-label="关闭"><X size={18} /></button></header><SshTerminal serverId={quickTerminal.server.id} serverName={quickTerminal.server.name} gpuIndex={quickTerminal.gpu?.index} acceleratorVendor={snapshots[quickTerminal.server.id]?.acceleratorVendor} onNotice={setToast} /></section></div> })()}
       {toast && <div className="toast" role="status"><AlertCircle size={17} /><span>{toast}</span><button onClick={() => setToast(null)} aria-label="关闭"><X size={14} /></button></div>}
       {zoomNotice !== null && api.isDesktop && <div className="zoom-pill" role="status" aria-live="polite"><span>{Math.round(zoomNotice * 100)}%</span><button type="button" onClick={() => zoomAdjustRef.current(-0.05)} aria-label="缩小">−</button><button type="button" onClick={() => zoomAdjustRef.current(0.05)} aria-label="放大">+</button><button type="button" onClick={() => { zoomAdjustRef.current(1 - zoomNotice) }} aria-label="重置缩放">重置</button></div>}
@@ -1910,6 +1994,8 @@ interface ServerDetailProps {
   systemMemoryWarningIgnored: boolean
   onIgnoreSystemMemoryWarning: () => void
   onRestoreSystemMemoryWarning: () => void
+  systemMemoryWarning?: SystemMemoryWarning
+  onOpenSystemMemoryWarning: () => void
   nvidiaWarningIgnored: boolean
   onIgnoreNvidiaWarning: () => void
   onRestoreNvidiaWarning: () => void
@@ -1924,7 +2010,7 @@ interface ServerDetailProps {
   onNotificationMenuRequestHandled: () => void
 }
 
-function ServerDetail({ server, snapshot, points, settings, systemMemoryWarningIgnored, onIgnoreSystemMemoryWarning, onRestoreSystemMemoryWarning, tab, selectedGpuUuid, onTab, onSelectGpu, onRefresh, onDelete, onEdit, onRequestTerminate, terminatingPid, nvidiaWarningIgnored, onIgnoreNvidiaWarning, onRestoreNvidiaWarning, isRefreshing, animateCharts, gpuMemoryWarnings, ignoredGpuMemoryStallWarningIds, onRestoreGpuMemoryStallWarning, notificationSettings, onNotificationSettingsChange, notificationMenuRequested, onNotificationMenuRequestHandled }: ServerDetailProps) {
+function ServerDetail({ server, snapshot, points, settings, systemMemoryWarningIgnored, onIgnoreSystemMemoryWarning, onRestoreSystemMemoryWarning, systemMemoryWarning, onOpenSystemMemoryWarning, tab, selectedGpuUuid, onTab, onSelectGpu, onRefresh, onDelete, onEdit, onRequestTerminate, terminatingPid, nvidiaWarningIgnored, onIgnoreNvidiaWarning, onRestoreNvidiaWarning, isRefreshing, animateCharts, gpuMemoryWarnings, ignoredGpuMemoryStallWarningIds, onRestoreGpuMemoryStallWarning, notificationSettings, onNotificationSettingsChange, notificationMenuRequested, onNotificationMenuRequestHandled }: ServerDetailProps) {
   const [showLogs, setShowLogs] = useState(false)
   const [historyContentReady, setHistoryContentReady] = useState(false)
   const isReconnecting = isRefreshing || server.status === 'connecting'
@@ -1951,9 +2037,9 @@ function ServerDetail({ server, snapshot, points, settings, systemMemoryWarningI
         {tabs.map((item) => <button key={item.value} role="tab" aria-selected={tab === item.value} className={tab === item.value ? 'is-active' : ''} onClick={() => selectTab(item.value)}>{item.value === 'gpu' ? acceleratorLabel(snapshot) : item.label}</button>)}
       </div>
       <div className="detail-content">
-        {hasSystemMemoryWarning(snapshot, settings?.systemMemoryThresholdPercent) && !systemMemoryWarningIgnored && <section className="nvidia-warning" role="alert"><AlertCircle size={20} /><div><strong>系统 MEM 告警</strong><p>系统内存已使用 {systemMemoryPercent(snapshot)!.toFixed(1)}%，超过 {systemMemoryThreshold(settings?.systemMemoryThresholdPercent)}% 阈值。内存紧张可能影响 SSH 与其他服务，请及时检查。</p><div className="nvidia-warning__actions"><button className="button button--secondary button--small" onClick={onIgnoreSystemMemoryWarning}><BellOff size={13} />忽略系统 MEM 告警</button></div></div></section>}
+        {systemMemoryWarning && <section className="nvidia-warning" role="alert"><AlertCircle size={20} /><div><strong>系统 MEM 告警</strong><p>系统内存已使用 {systemMemoryWarning.percent.toFixed(1)}%，超过 {systemMemoryWarning.threshold}% 阈值。内存紧张可能影响 SSH 与其他服务，请及时检查。</p><div className="nvidia-warning__actions"><button className="button button--secondary button--small" onClick={onIgnoreSystemMemoryWarning}><BellOff size={13} />忽略系统 MEM 告警</button></div></div></section>}
         {(snapshot.acceleratorVendor ?? 'nvidia') === 'nvidia' && snapshot.nvidiaSmi !== 'available' && !nvidiaWarningIgnored && <NvidiaWarning snapshot={snapshot} onRefresh={onRefresh} onIgnore={onIgnoreNvidiaWarning} />}
-        {tab === 'overview' && <ServerOverview snapshot={snapshot} points={points} idleThreshold={settings?.idleGpuThreshold ?? 10} onSelectGpu={onSelectGpu} onOpenCpu={() => selectTab('cpu')} onRequestTerminate={onRequestTerminate} terminatingPid={terminatingPid} animateCharts={animateCharts} gpuMemoryWarnings={gpuMemoryWarnings} isRefreshing={isRefreshing} />}
+        {tab === 'overview' && <ServerOverview snapshot={snapshot} points={points} idleThreshold={settings?.idleGpuThreshold ?? 10} onSelectGpu={onSelectGpu} onOpenCpu={() => selectTab('cpu')} onRequestTerminate={onRequestTerminate} terminatingPid={terminatingPid} animateCharts={animateCharts} gpuMemoryWarnings={gpuMemoryWarnings} systemMemoryWarning={systemMemoryWarning} onOpenSystemMemoryWarning={onOpenSystemMemoryWarning} isRefreshing={isRefreshing} />}
         {tab === 'gpu' && <GpuDetail snapshot={snapshot} points={points} selectedGpuUuid={selectedGpuUuid} onSelectGpu={onSelectGpu} animateChart={animateCharts} />}
         {tab === 'cpu' && <CpuDetail snapshot={snapshot} points={points} animateChart={animateCharts} />}
         {tab === 'processes' && <ProcessBlocks snapshot={snapshot} terminatingPid={terminatingPid} onRequestTerminate={onRequestTerminate} loading={isRefreshing} />}
@@ -1986,7 +2072,7 @@ function TelemetryGrid({ items, compact = false }: { items: Array<TelemetryItem 
   </div>
 }
 
-function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCpu, onRequestTerminate, terminatingPid, animateCharts, gpuMemoryWarnings, isRefreshing }: { snapshot: Snapshot; points: HistoryPoint[]; idleThreshold: number; onSelectGpu: (gpuUuid: string) => void; onOpenCpu: () => void; onRequestTerminate: (target: ProcessTerminationTarget) => void; terminatingPid?: number; animateCharts: boolean; gpuMemoryWarnings: GpuMemoryStallWarning[]; isRefreshing: boolean }) {
+function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCpu, onRequestTerminate, terminatingPid, animateCharts, gpuMemoryWarnings, systemMemoryWarning, onOpenSystemMemoryWarning, isRefreshing }: { snapshot: Snapshot; points: HistoryPoint[]; idleThreshold: number; onSelectGpu: (gpuUuid: string) => void; onOpenCpu: () => void; onRequestTerminate: (target: ProcessTerminationTarget) => void; terminatingPid?: number; animateCharts: boolean; gpuMemoryWarnings: GpuMemoryStallWarning[]; systemMemoryWarning?: SystemMemoryWarning; onOpenSystemMemoryWarning: () => void; isRefreshing: boolean }) {
   const accelerator = acceleratorLabel(snapshot)
   const readableGpus = snapshot.gpus.filter(isGpuAvailable)
   const totalMemoryMb = readableGpus.reduce((sum, gpu) => sum + Math.max(0, gpu.memoryTotalMb), 0)
@@ -2003,7 +2089,7 @@ function ServerOverview({ snapshot, points, idleThreshold, onSelectGpu, onOpenCp
     </section>,
     resources: <section className="overview-section" aria-labelledby="overview-resource-title">
       <div className="overview-section__header"><Gauge size={17} /><div><h2 id="overview-resource-title">{accelerator} 与 CPU 状态</h2><p>{accelerator} 显存优先，CPU 资源并列概览</p></div></div>
-      <div className="gpu-grid">{snapshot.gpus.map((gpu) => <GpuCard key={gpu.uuid} gpu={gpu} accelerator={accelerator} processes={snapshot.processes.filter((process) => process.gpuUuid === gpu.uuid)} warning={gpuMemoryWarnings.find((warning) => warning.gpuUuid === gpu.uuid)} onOpen={() => onSelectGpu(gpu.uuid)} />)}<CpuOverviewCard snapshot={snapshot} memoryPercent={systemMemoryPercent} onOpen={onOpenCpu} /></div>
+      <div className="gpu-grid">{snapshot.gpus.map((gpu) => <GpuCard key={gpu.uuid} gpu={gpu} accelerator={accelerator} processes={snapshot.processes.filter((process) => process.gpuUuid === gpu.uuid)} warning={gpuMemoryWarnings.find((warning) => warning.gpuUuid === gpu.uuid)} onOpen={() => onSelectGpu(gpu.uuid)} />)}<CpuOverviewCard snapshot={snapshot} memoryPercent={systemMemoryPercent} warning={systemMemoryWarning} onShowWarning={onOpenSystemMemoryWarning} onOpen={onOpenCpu} /></div>
     </section>,
     trends: <section className="overview-section" aria-labelledby="overview-trends-title">
       <div className="overview-section__header"><Activity size={17} /><div><h2 id="overview-trends-title">实时趋势</h2><p>CPU、{accelerator} 显存、系统内存与 Swap、{accelerator} 核心利用率</p></div>{isRefreshing && <span className="section-loading-state" role="status"><LoaderCircle className="spin" size={14} />正在更新趋势</span>}</div>
@@ -2059,43 +2145,41 @@ function GpuCard({ gpu, accelerator, processes, warning, onOpen }: { gpu: Snapsh
 }
 
 function GpuMemoryWarningDialog({ warning, accelerator, onClose }: { warning: GpuMemoryStallWarning; accelerator: string; onClose: () => void }) {
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [onClose])
   const durationHours = Math.floor(warning.durationSeconds / 3600)
   const durationMinutes = Math.max(1, Math.floor(warning.durationSeconds / 60))
   const duration = durationHours > 0 ? `${durationHours} 小时` : `${durationMinutes} 分钟`
   const hasDefunctProcesses = warning.defunctProcesses.length > 0
   return (
-    <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="sheet gpu-warning-sheet" role="dialog" aria-modal="true" aria-labelledby="gpu-warning-title">
-        <header className="sheet__header"><div><p className="eyebrow">{accelerator} 异常</p><h2 id="gpu-warning-title">{warning.serverName} · {accelerator} {warning.gpuIndex} · {acceleratorDeviceName(warning.gpuName)}</h2></div><button autoFocus className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
-        <div className="gpu-warning-body">
-          <span className="gpu-warning-body__icon"><AlertCircle size={23} /></span>
-          <div><strong>{hasDefunctProcesses ? '检测到僵尸进程占用显存' : `显存持续占用，但 ${accelerator} 利用率为 0`}</strong><p>{hasDefunctProcesses ? '进程已经退出但仍残留显存占用，建议检查并清理对应父进程。' : '任务可能正在等待数据、排队或已经停止计算，请核对进程状态。'}</p></div>
-          <dl>
-            <div><dt>{accelerator}</dt><dd>{acceleratorDeviceName(warning.gpuName)}</dd></div>
-            <div><dt>显存</dt><dd>{(warning.memoryUsedMb / 1024).toFixed(1)} / {(warning.memoryTotalMb / 1024).toFixed(1)} GB</dd></div>
-            <div><dt>持续时间</dt><dd>{duration}</dd></div>
-            <div><dt>涉及用户</dt><dd>{warning.usernames.length ? warning.usernames.join('、') : '未识别'}</dd></div>
-          </dl>
-          {hasDefunctProcesses && <div className="gpu-warning-processes"><strong>僵尸进程</strong>{warning.defunctProcesses.map((process) => <span key={process.pid}><code>PID {process.pid}</code><small>{process.username}</small></span>)}</div>}
-        </div>
-        <footer className="sheet__footer"><button className="button button--primary" onClick={onClose}>完成</button></footer>
-      </section>
-    </div>
+    <WarningDialog eyebrow={`${accelerator} 异常`} title={`${warning.serverName} · ${accelerator} ${warning.gpuIndex} · ${acceleratorDeviceName(warning.gpuName)}`} summary={hasDefunctProcesses ? '检测到僵尸进程占用显存' : `显存持续占用，但 ${accelerator} 利用率为 0`} description={hasDefunctProcesses ? '进程已经退出但仍残留显存占用，建议检查并清理对应父进程。' : '任务可能正在等待数据、排队或已经停止计算，请核对进程状态。'} onClose={onClose}>
+      <dl>
+        <div><dt>{accelerator}</dt><dd>{acceleratorDeviceName(warning.gpuName)}</dd></div>
+        <div><dt>显存</dt><dd>{(warning.memoryUsedMb / 1024).toFixed(1)} / {(warning.memoryTotalMb / 1024).toFixed(1)} GB</dd></div>
+        <div><dt>持续时间</dt><dd>{duration}</dd></div>
+        <div><dt>涉及用户</dt><dd>{warning.usernames.length ? warning.usernames.join('、') : '未识别'}</dd></div>
+      </dl>
+      {hasDefunctProcesses && <div className="gpu-warning-processes"><strong>僵尸进程</strong>{warning.defunctProcesses.map((process) => <span key={process.pid}><code>PID {process.pid}</code><small>{process.username}</small></span>)}</div>}
+    </WarningDialog>
   )
 }
 
-export function CpuOverviewCard({ snapshot, memoryPercent, onOpen }: { snapshot: Snapshot; memoryPercent: number; onOpen: () => void }) {
+function SystemMemoryWarningDialog({ warning, onClose }: { warning: SystemMemoryWarning; onClose: () => void }) {
+  return <WarningDialog eyebrow="系统 MEM 异常" title={`${warning.serverName} · 系统 MEM`} summary={`系统内存使用率 ${warning.percent.toFixed(1)}%，超过 ${warning.threshold}% 阈值`} description="内存紧张可能影响 SSH 与其他服务，请检查系统内存和进程状态。" onClose={onClose}>
+    <dl>
+      <div><dt>系统内存</dt><dd>{formatBytes(warning.memoryUsedBytes)} / {formatBytes(warning.memoryTotalBytes)}</dd></div>
+      <div><dt>使用率</dt><dd>{warning.percent.toFixed(1)}%</dd></div>
+      <div><dt>告警阈值</dt><dd>{warning.threshold}%</dd></div>
+    </dl>
+  </WarningDialog>
+}
+
+export function CpuOverviewCard({ snapshot, memoryPercent, warning, onShowWarning, onOpen }: { snapshot: Snapshot; memoryPercent: number; warning?: SystemMemoryWarning; onShowWarning?: () => void; onOpen: () => void }) {
   const logicalCores = snapshot.system.cpuLogicalCores
   const normalizedLoad = logicalCores ? snapshot.system.load1 / logicalCores * 100 : null
   const currentUserCpuUtilization = visibleCurrentUserCpuUtilization(snapshot)
   return (
-    <button className="panel gpu-card cpu-overview-card" onClick={onOpen}>
-      <PanelHeader title="CPU" subtitle={snapshot.system.cpuModel || 'CPU'} action={<ChevronRight size={16} />} />
+    <article className={`panel gpu-card cpu-overview-card${warning ? ' gpu-card--warning' : ''}`}>
+      <button type="button" className="gpu-card__open" onClick={onOpen} aria-label="查看 CPU 详情" />
+      <PanelHeader title="CPU" subtitle={snapshot.system.cpuModel || 'CPU'} action={<span className="gpu-card__header-actions">{warning && <button type="button" className="gpu-card__warning" aria-label="查看系统 MEM 异常详情" title="查看具体问题" onClick={onShowWarning}><AlertCircle size={17} /></button>}<ChevronRight size={16} aria-hidden="true" /></span>} />
       <MetricBar label="系统 MEM" value={memoryPercent} detail={`${formatBytes(snapshot.system.memoryUsedBytes)} / ${formatBytes(snapshot.system.memoryTotalBytes)}`} accent="purple" currentUserValue={snapshot.system.memoryTotalBytes > 0 && (snapshot.system.currentUserMemoryUsedBytes ?? 0) >= 2 * 1024 ** 3 ? snapshot.system.currentUserMemoryUsedBytes! / snapshot.system.memoryTotalBytes * 100 : 0} currentUserDetail={snapshot.system.currentUserMemoryUsedBytes != null ? formatBytes(snapshot.system.currentUserMemoryUsedBytes) : undefined} />
       <MetricBar label="CPU UTL" value={snapshot.system.cpuUtilization} currentUserValue={currentUserCpuUtilization} currentUserDetail={`${currentUserCpuUtilization.toFixed(1)}%`} />
       <TelemetryGrid compact items={[
@@ -2108,7 +2192,7 @@ export function CpuOverviewCard({ snapshot, memoryPercent, onOpen }: { snapshot:
         snapshot.system.cpuIoWaitPercent !== undefined && { label: 'IO Wait', value: `${snapshot.system.cpuIoWaitPercent.toFixed(1)}%`, tone: snapshot.system.cpuIoWaitPercent >= 10 ? 'warning' : 'normal' },
         { label: 'Swap', value: formatBytes(snapshot.system.swapUsedBytes) },
       ]} />
-    </button>
+    </article>
   )
 }
 
@@ -2273,7 +2357,7 @@ export function HistoryView({ server, snapshot }: { server: Server; snapshot: Sn
     <section className="history-section"><header className="history-page__header"><div><History size={18} /><span><h2>资源热力图</h2><p>每列 1 天，每格汇总连续 3 小时的平均使用率</p></span></div><small>最近 {Math.min(90, Math.max(1, server.historyRetentionDays))} 天</small></header>{heatmapError ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />资源历史读取失败：{heatmapError}</div> : heatmapPoints.length === 0 ? <div className="history-page__state" role="status"><LoaderCircle className="spin" size={16} />正在读取资源趋势…</div> : <HistoryHeatmaps snapshot={snapshot} points={heatmapPoints} retentionDays={server.historyRetentionDays} />}</section>
     <section className="history-section"><header className="history-page__header"><div><History size={18} /><span><h2>{accelerator} 使用分布</h2><p>按 Unix 用户聚合活跃时间与显存积分</p></span></div><div className="usage-range" aria-label="使用分布时间范围">{([7, 15, 30, 90] as const).map((days) => <button key={days} aria-pressed={usageDays === days} onClick={() => setUsageDays(days)}>{days === 7 ? '1 周' : days === 15 ? '半个月' : days === 30 ? '1 个月' : '3 个月'}</button>)}</div></header>{usageError ? <div className="history-page__state history-page__state--error"><AlertCircle size={16} />使用分布读取失败：{usageError}</div> : usage === null ? <div className="history-page__state" role="status"><LoaderCircle className="spin" size={16} />正在统计使用分布…</div> : <UsageDistribution snapshot={snapshot} data={displayedUsage} />}</section>
     <StorageSection key={server.id} serverId={server.id} disks={snapshot.disks ?? []} />
-    <section className="data-retention"><Database size={18} /><div><strong>{server.remoteHistoryEnabled ? '在线本地采样 · 离线远端补档' : '仅在线本地采样'}</strong><p>{server.remoteHistoryEnabled ? 'RackTop 在线时写入本机时间桶；远端隐藏进程仅在 App 离线后接管，重新打开时增量补齐缺口。' : 'RackTop 运行时在本机生成使用分布；App 离线期间不补零，缺失时段保持灰色。'}不会保存 PID、进程命令、路径或终端输入输出。</p></div></section>
+    <section className="data-retention"><Database size={18} /><div><strong>{server.remoteHistoryEnabled ? '本地采样 · 共享远端补档' : '仅在线本地采样'}</strong><p>{server.remoteHistoryEnabled ? '本机记录实时采样；远端每分钟保留共享历史，各电脑独立补齐缺口。' : 'RackTop 运行时在本机生成使用分布；App 离线期间不补零，缺失时段保持灰色。'}不会保存 PID、进程命令、路径或终端输入输出。</p></div></section>
   </div>
 }
 
@@ -2363,7 +2447,7 @@ function ConnectionView({ server, snapshot, systemMemoryWarningIgnored, onRestor
   const canRestoreNvidiaWarning = nvidiaWarningIgnored && snapshot.nvidiaSmi !== 'available'
   const ignoredMemoryWarnings = ignoredGpuMemoryStallGpus(server.id, snapshot, ignoredGpuMemoryStallWarningIds)
   const ignoredCount = ignoredMemoryWarnings.length + (canRestoreNvidiaWarning ? 1 : 0) + (systemMemoryWarningIgnored ? 1 : 0)
-  return <div className="content-stack"><section className="panel connection-panel"><PanelHeader icon={<KeyRound />} title="SSH 连接" subtitle="认证信息仅在本机使用" /><dl className="definition-list"><div><dt>物理位置</dt><dd>{server.location || '未填写'}</dd></div><div><dt>连接地址</dt><dd className="mono">{server.username}@{server.host}:{server.port}</dd></div><div><dt>认证</dt><dd>{isRackTopManagedIdentity(server.identityFile) ? 'RackTop 专用密钥' : server.authMethod === 'sshAgent' ? 'SSH Agent / 默认密钥' : server.authMethod === 'privateKey' ? '指定私钥' : server.authMethod === 'sshConfig' ? 'SSH Config' : '系统钥匙串密码'}</dd></div><div><dt>SSH Config</dt><dd>{server.sshAlias || '未使用别名'}</dd></div><div><dt>私钥</dt><dd className="mono">{server.identityFile || '由 OpenSSH 自动选择'}</dd></div><div><dt>ProxyJump</dt><dd className="mono">{server.proxyJump || '无'}</dd></div><div><dt>远端历史</dt><dd>{server.remoteHistoryEnabled ? `已启用 · ${server.remoteHistoryLastSyncAt ? `同步于 ${relativeTime(server.remoteHistoryLastSyncAt)}` : '等待首次同步'}` : '未启用'}</dd></div></dl><div className="panel__actions"><button className="button button--primary" onClick={onRefresh} disabled={isRefreshing}><RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />测试并重新连接</button><button className="button button--secondary" onClick={onEdit}><Settings size={16} />编辑配置</button></div></section>{ignoredCount > 0 && <section className="panel ignored-warning-list"><PanelHeader icon={<BellOff />} title="已忽略的提醒" subtitle={`${ignoredCount} 项提醒仅在此处保留`} /><div>{systemMemoryWarningIgnored && <div className="ignored-warning-row"><div><strong>系统 MEM 告警</strong><p>当前系统内存使用率 {systemMemoryPercent(snapshot)!.toFixed(1)}%。</p></div><button className="button button--secondary button--small" onClick={onRestoreSystemMemoryWarning}><Bell size={14} />恢复提醒</button></div>}{canRestoreNvidiaWarning && <div className="ignored-warning-row"><div><strong>GPU 读取异常</strong><p>不可读取的显卡仍会显示，但服务器状态暂按在线处理。</p></div><button className="button button--secondary button--small" onClick={onRestoreNvidiaWarning}><Bell size={14} />恢复提醒</button></div>}{ignoredMemoryWarnings.map((gpu) => <div className="ignored-warning-row" key={gpu.uuid}><div><strong>{accelerator} {gpu.index} · {gpu.name.replace(/^NVIDIA\s+/i, '')} 显存占用预警</strong><p>当前占用 {(gpu.memoryUsedMb / 1024).toFixed(1)} / {(gpu.memoryTotalMb / 1024).toFixed(1)} GB，UTL {clampPercent(gpu.utilization).toFixed(0)}%。</p></div><button className="button button--secondary button--small" onClick={() => onRestoreGpuMemoryStallWarning(`gpu-memory-stall:${server.id}:${gpu.uuid}`)}><Bell size={14} />恢复提醒</button></div>)}</div></section>}<ServerNotificationSettingsMenu settings={notificationSettings} onChange={onNotificationSettingsChange} openRequested={notificationMenuRequested} onOpenRequestHandled={onNotificationMenuRequestHandled} /><section className="panel danger-zone"><div><strong>删除服务器</strong><p>删除本机记录、历史数据、远端采集进程和服务器用户目录中的 RackTop 数据。</p></div><button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除</button></section></div>
+  return <div className="content-stack"><section className="panel connection-panel"><PanelHeader icon={<KeyRound />} title="SSH 连接" subtitle="认证信息仅在本机使用" /><dl className="definition-list"><div><dt>物理位置</dt><dd>{server.location || '未填写'}</dd></div><div><dt>连接地址</dt><dd className="mono">{server.username}@{server.host}:{server.port}</dd></div><div><dt>认证</dt><dd>{isRackTopManagedIdentity(server.identityFile) ? 'RackTop 专用密钥' : server.authMethod === 'sshAgent' ? 'SSH Agent / 默认密钥' : server.authMethod === 'privateKey' ? '指定私钥' : server.authMethod === 'sshConfig' ? 'SSH Config' : '系统钥匙串密码'}</dd></div><div><dt>SSH Config</dt><dd>{server.sshAlias || '未使用别名'}</dd></div><div><dt>私钥</dt><dd className="mono">{server.identityFile || '由 OpenSSH 自动选择'}</dd></div><div><dt>ProxyJump</dt><dd className="mono">{server.proxyJump || '无'}</dd></div><div><dt>远端历史</dt><dd>{server.remoteHistoryEnabled ? `已启用 · ${server.remoteHistoryLastSyncAt ? `同步于 ${relativeTime(server.remoteHistoryLastSyncAt)}` : '等待首次同步'}` : '未启用'}</dd></div></dl><div className="panel__actions"><button className="button button--primary" onClick={onRefresh} disabled={isRefreshing}><RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />测试并重新连接</button><button className="button button--secondary" onClick={onEdit}><Settings size={16} />编辑配置</button></div></section>{ignoredCount > 0 && <section className="panel ignored-warning-list"><PanelHeader icon={<BellOff />} title="已忽略的提醒" subtitle={`${ignoredCount} 项提醒仅在此处保留`} /><div>{systemMemoryWarningIgnored && <div className="ignored-warning-row"><div><strong>系统 MEM 告警</strong><p>当前系统内存使用率 {systemMemoryPercent(snapshot)!.toFixed(1)}%。</p></div><button className="button button--secondary button--small" onClick={onRestoreSystemMemoryWarning}><Bell size={14} />恢复提醒</button></div>}{canRestoreNvidiaWarning && <div className="ignored-warning-row"><div><strong>GPU 读取异常</strong><p>不可读取的显卡仍会显示，但服务器状态暂按在线处理。</p></div><button className="button button--secondary button--small" onClick={onRestoreNvidiaWarning}><Bell size={14} />恢复提醒</button></div>}{ignoredMemoryWarnings.map((gpu) => <div className="ignored-warning-row" key={gpu.uuid}><div><strong>{accelerator} {gpu.index} · {gpu.name.replace(/^NVIDIA\s+/i, '')} 显存占用预警</strong><p>当前占用 {(gpu.memoryUsedMb / 1024).toFixed(1)} / {(gpu.memoryTotalMb / 1024).toFixed(1)} GB，UTL {clampPercent(gpu.utilization).toFixed(0)}%。</p></div><button className="button button--secondary button--small" onClick={() => onRestoreGpuMemoryStallWarning(`gpu-memory-stall:${server.id}:${gpu.uuid}`)}><Bell size={14} />恢复提醒</button></div>)}</div></section>}<ServerNotificationSettingsMenu settings={notificationSettings} onChange={onNotificationSettingsChange} openRequested={notificationMenuRequested} onOpenRequestHandled={onNotificationMenuRequestHandled} /><section className="panel danger-zone"><div><strong>删除服务器</strong><p>删除本机记录和关联；无其他关联时清理共享历史，旧版历史保留。</p></div><button className="button button--danger" onClick={onDelete}><Trash2 size={16} />删除</button></section></div>
 }
 
 function NvidiaWarning({ snapshot, onRefresh, onIgnore }: { snapshot: Snapshot; onRefresh: () => void; onIgnore: () => void }) {
@@ -2421,7 +2505,7 @@ function MasonryItem({ children }: { children: React.ReactNode }) {
   return <div className="masonry-item" ref={ref}>{children}</div>
 }
 
-function FleetOverview({ onboarding, servers, snapshots, ignoredNvidiaWarnings, ignoredSystemMemoryWarnings, settings, totals, sort, descending, onSort, onToggleOrder, onSelect, onContextMenu }: { onboarding?: React.ReactNode; servers: Server[]; snapshots: Record<string, Snapshot>; ignoredNvidiaWarnings: Set<string>; ignoredSystemMemoryWarnings: Set<string>; settings: AppSettings | null; totals: FleetTotals; sort: FleetSort; descending: boolean; onSort: (sort: FleetSort) => void; onToggleOrder: () => void; onSelect: (serverId: string, tab: DetailTab, gpuUuid?: string) => void; onContextMenu: (event: MouseEvent<HTMLElement>, server: Server) => void }) {
+function FleetOverview({ onboarding, servers, snapshots, ignoredNvidiaWarnings, systemMemoryWarnings, onOpenSystemMemoryWarning, settings, totals, sort, descending, onSort, onToggleOrder, onSelect, onContextMenu }: { onboarding?: React.ReactNode; servers: Server[]; snapshots: Record<string, Snapshot>; ignoredNvidiaWarnings: Set<string>; systemMemoryWarnings: SystemMemoryWarning[]; onOpenSystemMemoryWarning: (serverId: string) => void; settings: AppSettings | null; totals: FleetTotals; sort: FleetSort; descending: boolean; onSort: (sort: FleetSort) => void; onToggleOrder: () => void; onSelect: (serverId: string, tab: DetailTab, gpuUuid?: string) => void; onContextMenu: (event: MouseEvent<HTMLElement>, server: Server) => void }) {
   const orderedServers = sortFleetServers(servers, snapshots, settings, sort, descending)
   return <div className="detail-page fleet-page">
     {onboarding}
@@ -2441,6 +2525,7 @@ function FleetOverview({ onboarding, servers, snapshots, ignoredNvidiaWarnings, 
     <section className="fleet-grid" aria-label="服务器加速卡状态墙">
       {orderedServers.map((server) => {
         const snapshot = snapshots[server.id]
+        const memoryWarning = systemMemoryWarnings.find((warning) => warning.serverId === server.id)
         const accelerator = snapshot ? acceleratorLabel(snapshot) : 'GPU'
         return <MasonryItem key={server.id}><article className={`panel fleet-card fleet-card--${server.status}`} onContextMenu={(event) => onContextMenu(event, server)}>
           <button className="fleet-card__header" onClick={() => onSelect(server.id, 'overview')}>
@@ -2453,7 +2538,7 @@ function FleetOverview({ onboarding, servers, snapshots, ignoredNvidiaWarnings, 
             <div className="fleet-system">
               <button onClick={() => onSelect(server.id, 'cpu')}><span>CPU</span><strong>{clampPercent(snapshot.system.cpuUtilization).toFixed(0)}%</strong><i><b style={{ width: `${clampPercent(snapshot.system.cpuUtilization)}%` }} /></i></button>
             </div>
-            {hasSystemMemoryWarning(snapshot, settings?.systemMemoryThresholdPercent) && !ignoredSystemMemoryWarnings.has(server.id) && <button className="fleet-no-gpu" onClick={() => onSelect(server.id, 'cpu')}><AlertCircle size={14} />系统 MEM 告警 · {systemMemoryPercent(snapshot)!.toFixed(1)}%</button>}
+            {memoryWarning && <button className="fleet-no-gpu" onClick={() => onOpenSystemMemoryWarning(server.id)}><AlertCircle size={14} />系统 MEM 告警 · {memoryWarning.percent.toFixed(1)}%</button>}
             {(snapshot.gpus.length > 0 || !ignoredNvidiaWarnings.has(server.id)) && <div className="fleet-gpus">
               <div className="fleet-gpus__labels"><span>设备</span><span>显存</span><span>{accelerator}</span></div>
               {snapshot.gpus.map((gpu) => {
@@ -2623,10 +2708,11 @@ function IdleReservationSheet({ reservation, filters, availableGpuKeys, onClose,
 
 const reservationStatusLabel: Record<IdleReservation['status'], string> = { active: '监测中', paused: '已暂停', completed: '已完成', expired: '已过期' }
 
-function IdleReservationCenter({ reservations, warnings, onClose, onEdit, onStatusChange, onClearPending, onDelete, onIgnoreWarning }: { reservations: IdleReservation[]; warnings: GpuMemoryStallWarning[]; onClose: () => void; onEdit: (reservation: IdleReservation) => void; onStatusChange: (reservation: IdleReservation, status: IdleReservation['status']) => Promise<void>; onClearPending: (reservation: IdleReservation) => Promise<void>; onDelete: (reservationId: string) => Promise<void>; onIgnoreWarning: (warning: GpuMemoryStallWarning) => void }) {
+function IdleReservationCenter({ reservations, warnings, systemMemoryWarnings, onOpenSystemMemoryWarning, onIgnoreSystemMemoryWarning, onClose, onEdit, onStatusChange, onClearPending, onDelete, onIgnoreWarning }: { reservations: IdleReservation[]; warnings: GpuMemoryStallWarning[]; systemMemoryWarnings: SystemMemoryWarning[]; onOpenSystemMemoryWarning: (serverId: string) => void; onIgnoreSystemMemoryWarning: (serverId: string) => void; onClose: () => void; onEdit: (reservation: IdleReservation) => void; onStatusChange: (reservation: IdleReservation, status: IdleReservation['status']) => Promise<void>; onClearPending: (reservation: IdleReservation) => Promise<void>; onDelete: (reservationId: string) => Promise<void>; onIgnoreWarning: (warning: GpuMemoryStallWarning) => void }) {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const activeCount = reservations.filter((reservation) => reservation.status === 'active').length
+  const warningCount = warnings.length + systemMemoryWarnings.length
   const run = async (id: string, action: () => Promise<void>) => {
     setBusyId(id)
     setError(null)
@@ -2634,8 +2720,13 @@ function IdleReservationCenter({ reservations, warnings, onClose, onEdit, onStat
   }
   return <div className="scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <section className="sheet reservation-center-sheet" role="dialog" aria-modal="true" aria-labelledby="reservation-center-title">
-      <header className="sheet__header"><div><p className="eyebrow">预约与通知</p><h2 id="reservation-center-title">{activeCount} 个预约正在监测{warnings.length ? ` · ${warnings.length} 个预警` : ''}</h2></div></header>
+      <header className="sheet__header"><div><p className="eyebrow">预约与通知</p><h2 id="reservation-center-title">{activeCount} 个预约正在监测{warningCount ? ` · ${warningCount} 个预警` : ''}</h2></div></header>
       <div className="reservation-list">
+        {systemMemoryWarnings.map((warning) => <div className="reservation-row reservation-row--warning" key={`system-memory:${warning.serverId}`}>
+          <span className="reservation-row__status reservation-row__status--warning"><AlertCircle size={15} /></span>
+          <div className="reservation-row__content"><div><button type="button" className="reservation-warning-open" onClick={() => onOpenSystemMemoryWarning(warning.serverId)} aria-label={`查看 ${warning.serverName} 系统 MEM 异常详情`}><strong>{warning.serverName} · 系统 MEM</strong><ChevronRight size={13} aria-hidden="true" /></button><em>系统内存预警</em></div><p>系统 MEM 已使用 {formatBytes(warning.memoryUsedBytes)} / {formatBytes(warning.memoryTotalBytes)}，使用率 {warning.percent.toFixed(1)}%</p><small>超过 {warning.threshold}% 阈值</small></div>
+          <div className="reservation-row__actions"><button className="button button--secondary button--small" onClick={() => onIgnoreSystemMemoryWarning(warning.serverId)}>忽略</button></div>
+        </div>)}
         {warnings.map((warning) => { const accelerator = acceleratorLabel(warning); return <div className="reservation-row reservation-row--warning" key={warning.id}>
           <span className="reservation-row__status reservation-row__status--warning"><AlertCircle size={15} /></span>
           <div className="reservation-row__content"><div><strong>{gpuContextName(warning.serverName, warning.gpuIndex, warning.gpuName, accelerator)}</strong><em>显存占用预警</em></div><p>{warning.defunctProcesses.length ? `检测到僵尸 ${accelerator} 进程，仍占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} / ${(warning.memoryTotalMb / 1024).toFixed(1)} GB 显存` : `${accelerator} MEM 已占用 ${(warning.memoryUsedMb / 1024).toFixed(1)} / ${(warning.memoryTotalMb / 1024).toFixed(1)} GB，但 UTL 为 0，已持续 ${Math.floor(warning.durationSeconds / 3600)} 小时`}</p><small>{warning.defunctProcesses.length ? `进程：${warning.defunctProcesses.map((process) => `${process.username}（PID ${process.pid}）`).join('、')}` : warning.usernames.length ? `用户：${warning.usernames.join('、')}` : '未识别到对应进程'}</small></div>
@@ -2652,7 +2743,7 @@ function IdleReservationCenter({ reservations, warnings, onClose, onEdit, onStat
             <button className="icon-button reservation-delete" title="删除预约" aria-label={`删除 ${reservation.name}`} disabled={busyId === reservation.id} onClick={() => void run(reservation.id, () => onDelete(reservation.id))}><Trash2 size={14} /></button>
           </div>
         </div>)}
-        {reservations.length === 0 && warnings.length === 0 && <div className="inline-empty"><Bell size={24} /><strong>还没有预约</strong><p>在“寻找空闲算力”的条件栏中创建预约。</p></div>}
+        {reservations.length === 0 && warningCount === 0 && <div className="inline-empty"><Bell size={24} /><strong>还没有预约</strong><p>在“寻找空闲算力”的条件栏中创建预约。</p></div>}
         {error && <p className="form-error" role="alert">{error}</p>}
       </div>
       <footer className="sheet__footer"><button className="button button--secondary" onClick={onClose}>完成</button></footer>

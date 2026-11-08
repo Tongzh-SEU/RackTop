@@ -5,6 +5,7 @@
       {
         "label": "main",
         "title": "RackTop",
+        "dragDropEnabled": false,
         "width": 1500,
         "height": 900,
         "minWidth": 900,
