@@ -1,6 +1,6 @@
 import { ProfileParameterSummary } from './ProfileParameterSummary'
 import { useEffect, useMemo, useState } from 'react'
-import { AlertCircle, Box, CheckCircle2, ChevronDown, ChevronRight, CircleDot, Database, FolderGit2, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, RotateCcw, Save, ScrollText, Server as ServerIcon, SlidersHorizontal, Square, TerminalSquare, Trash2, X } from 'lucide-react'
+import { AlertCircle, ArrowDown, ArrowUp, Box, CheckCircle2, ChevronDown, ChevronRight, CircleDot, Database, FolderGit2, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, RotateCcw, Save, ScrollText, Server as ServerIcon, SlidersHorizontal, Square, TerminalSquare, Trash2, X } from 'lucide-react'
 import { api } from '../services/api'
 import type { LaunchProfile, ManagedRun, ManagedRunRemoteStatus, Project, Server, Snapshot } from '../types/models'
 import { hasOtherUserGpuWorkload } from '../utils/gpu'
@@ -123,6 +123,10 @@ export function ManagedProcessView({ servers, snapshots, projects, launchIntent,
 }) {
   const [tab, setTab] = useState<ViewTab>(initialTab)
   const [profiles, setProfiles] = useState<LaunchProfile[]>(() => loadLaunchProfiles())
+  const [profileSort, setProfileSort] = useState<'createdAt' | 'updatedAt'>(() =>
+    typeof localStorage !== 'undefined' && localStorage.getItem('racktop.profileSort.v1') === 'updatedAt' ? 'updatedAt' : 'createdAt')
+  const [profileDescending, setProfileDescending] = useState(() =>
+    typeof localStorage !== 'undefined' && localStorage.getItem('racktop.profileDescending.v1') === 'true')
   const [profileProjectId, setProfileProjectId] = useState<string | null>(() => {
     const projectIds = new Set(projects.filter((project) => project.kind === 'project').map((project) => project.id))
     return loadLaunchProfiles().find((profile) => profile.projectId && projectIds.has(profile.projectId))?.projectId ?? projects.find((project) => project.kind === 'project')?.id ?? null
@@ -161,6 +165,8 @@ export function ManagedProcessView({ servers, snapshots, projects, launchIntent,
   const [stoppingUnmanagedKeys, setStoppingUnmanagedKeys] = useState<Set<string>>(new Set())
 
   useEffect(() => { saveLaunchProfiles(profiles) }, [profiles])
+  useEffect(() => { localStorage.setItem('racktop.profileSort.v1', profileSort) }, [profileSort])
+  useEffect(() => { localStorage.setItem('racktop.profileDescending.v1', String(profileDescending)) }, [profileDescending])
   useEffect(() => { saveManagedRuns(runs) }, [runs])
 
   useEffect(() => {
@@ -245,25 +251,25 @@ export function ManagedProcessView({ servers, snapshots, projects, launchIntent,
   }, [excludeOccupiedGpus, launchProfile.minimumGpuMemoryGb, selectedSnapshot])
   const launchParameters = useMemo(() => parseTaskParameters(launchProfile.command), [launchProfile.command])
   const selectedGpuIndices = useMemo(() => selectedGpuUuids.map((uuid) => selectedSnapshot?.gpus.find((gpu) => gpu.uuid === uuid)?.index).filter((index): index is number => index != null), [selectedGpuUuids, selectedSnapshot])
+  const sortedProfiles = useMemo(() => [...profiles].sort((left, right) => {
+    const difference = left[profileSort] - right[profileSort] || left.createdAt - right.createdAt || left.id.localeCompare(right.id)
+    return profileDescending ? -difference : difference
+  }), [profiles, profileSort, profileDescending])
   const profileGroups = useMemo(() => {
     const projectGroups = projects
       .filter((project) => project.kind === 'project')
-      .map((project) => ({ id: `project:${project.id}`, name: project.name, profiles: profiles.filter((profile) => profile.projectId === project.id) }))
+      .map((project) => ({ id: `project:${project.id}`, name: project.name, profiles: sortedProfiles.filter((profile) => profile.projectId === project.id) }))
       .filter((group) => group.profiles.length > 0)
     const associated = new Set(projects.filter((project) => project.kind === 'project').map((project) => project.id))
-    const unassociated = profiles.filter((profile) => !profile.projectId || !associated.has(profile.projectId))
+    const unassociated = sortedProfiles.filter((profile) => !profile.projectId || !associated.has(profile.projectId))
     return unassociated.length ? [...projectGroups, { id: 'unassociated', name: '未关联项目', profiles: unassociated }] : projectGroups
-  }, [profiles, projects])
+  }, [sortedProfiles, projects])
   const visibleProfileGroups = useMemo(() => launchProjectContextId ? profileGroups.filter((group) => group.id === `project:${launchProjectContextId}`) : profileGroups, [launchProjectContextId, profileGroups])
   const profileProjects = useMemo(() => projects.filter((project) => project.kind === 'project'), [projects])
   const selectedProfileProject = profileProjects.find((project) => project.id === profileProjectId)
-  const selectedProjectProfiles = useMemo(() => profiles
-    .filter((profile) => selectedProfileProject ? profile.projectId === selectedProfileProject.id : !profile.projectId || !profileProjects.some((project) => project.id === profile.projectId))
-    .sort((left, right) => {
-      const latestLeft = runs.filter((run) => run.profileId === left.id).sort((a, b) => b.startedAt - a.startedAt)[0]?.startedAt ?? 0
-      const latestRight = runs.filter((run) => run.profileId === right.id).sort((a, b) => b.startedAt - a.startedAt)[0]?.startedAt ?? 0
-      return latestRight - latestLeft || right.updatedAt - left.updatedAt
-    }), [profileProjects, profiles, runs, selectedProfileProject])
+  const selectedProjectProfiles = sortedProfiles.filter((profile) => selectedProfileProject
+    ? profile.projectId === selectedProfileProject.id
+    : !profile.projectId || !profileProjects.some((project) => project.id === profile.projectId))
 
   useEffect(() => {
     if (profileProjectId && profileProjects.some((project) => project.id === profileProjectId)) return
@@ -549,7 +555,7 @@ export function ManagedProcessView({ servers, snapshots, projects, launchIntent,
       </section>}
     </>}
 
-    {tab === 'profiles' && <section className="managed-profile-view"><header><div><h2>项目启动配置</h2><p>按项目保存命令与超参数，运行时再选择服务器、项目副本和 GPU。</p></div></header><div className="managed-profile-workspace"><aside className="managed-profile-projects"><header><strong>项目</strong><span>{profileProjects.length}</span></header>{profileProjects.map((project) => { const count = profiles.filter((profile) => profile.projectId === project.id).length; return <button className={project.id === profileProjectId ? 'is-selected' : ''} key={project.id} onClick={() => setProfileProjectId(project.id)}><FolderGit2 size={14} /><span><strong>{project.name}</strong><small>{count} 个配置</small></span></button>})}{profiles.some((profile) => !profile.projectId || !profileProjects.some((project) => project.id === profile.projectId)) && <button className={profileProjectId === null ? 'is-selected' : ''} onClick={() => setProfileProjectId(null)}><SlidersHorizontal size={14} /><span><strong>未关联配置</strong><small>兼容已有模板</small></span></button>}</aside><div className="managed-profile-content"><header><div><strong>{selectedProfileProject?.name ?? '未关联配置'}</strong><small>{selectedProfileProject ? selectedProfileProject.sourcePath : '建议将这些配置关联到项目，以便跨服务器切换工作目录。'}</small></div><button className="button button--secondary" onClick={() => openLaunch(defaultProfile(projects, selectedProfileProject?.id ?? null), undefined, selectedProfileProject?.id ?? null)}><Plus size={14} />新建配置</button></header>{selectedProjectProfiles.length > 0 ? <div className="managed-profile-template-list">{selectedProjectProfiles.map((profile) => { const latest = runs.filter((run) => run.profileId === profile.id).sort((left, right) => right.startedAt - left.startedAt)[0]; const parameters = parseTaskParameters(profile.command); const normalized = normalizeLaunchCommand(profile.command).command; return <article className="managed-profile-template" key={profile.id}><header><div><strong>{profile.name}</strong><span>{parameters.length} 个超参数</span></div><div><button className="button button--secondary button--small" onClick={() => openLaunch(profile, undefined, profile.projectId ?? null)}><SlidersHorizontal size={12} />调整并运行</button><button className="icon-button" title="删除配置" aria-label={`删除配置 ${profile.name}`} onClick={() => setProfiles((current) => current.filter((item) => item.id !== profile.id))}><Trash2 size={13} /></button></div></header><code title={normalized}>{normalized}</code><ProfileParameterSummary parameters={parameters} /><dl><div><dt>工作目录</dt><dd>{selectedProfileProject ? '随所选服务器的项目副本切换' : profile.workingDirectory}</dd></div><div><dt>默认资源</dt><dd>{profile.gpuCount ? `${profile.gpuCount} 张 GPU${profile.minimumGpuMemoryGb ? ` · 每卡空闲 ≥ ${profile.minimumGpuMemoryGb} GB` : ''}` : 'CPU'}</dd></div><div><dt>最近运行</dt><dd>{formatTimestamp(latest?.startedAt)}</dd></div></dl></article>})}</div> : <div className="managed-profile-project-empty"><SlidersHorizontal size={22} /><strong>这个项目还没有启动配置</strong><p>保存一套命令和超参数后，可以在项目的任意服务器副本上调整 GPU 卡号并启动。</p><button className="button button--secondary" onClick={() => openLaunch(defaultProfile(projects, selectedProfileProject?.id ?? null), undefined, selectedProfileProject?.id ?? null)}><Plus size={14} />添加配置</button></div>}</div></div></section>}
+    {tab === 'profiles' && <section className="managed-profile-view"><header><div><h2>项目启动配置</h2><p>按项目保存命令与超参数，运行时再选择服务器、项目副本和 GPU。</p></div></header><div className="managed-profile-workspace"><aside className="managed-profile-projects"><header><strong>项目</strong><span>{profileProjects.length}</span></header>{profileProjects.map((project) => { const count = profiles.filter((profile) => profile.projectId === project.id).length; return <button className={project.id === profileProjectId ? 'is-selected' : ''} key={project.id} onClick={() => setProfileProjectId(project.id)}><FolderGit2 size={14} /><span><strong>{project.name}</strong><small>{count} 个配置</small></span></button>})}{profiles.some((profile) => !profile.projectId || !profileProjects.some((project) => project.id === profile.projectId)) && <button className={profileProjectId === null ? 'is-selected' : ''} onClick={() => setProfileProjectId(null)}><SlidersHorizontal size={14} /><span><strong>未关联配置</strong><small>兼容已有模板</small></span></button>}</aside><div className="managed-profile-content"><header><div><strong>{selectedProfileProject?.name ?? '未关联配置'}</strong><small>{selectedProfileProject ? selectedProfileProject.sourcePath : '建议将这些配置关联到项目，以便跨服务器切换工作目录。'}</small></div><span className="managed-profile-actions"><button className="button button--secondary" aria-label={profileSort === 'createdAt' ? '当前按创建时间排序，切换为更新时间' : '当前按更新时间排序，切换为创建时间'} onClick={() => setProfileSort((current) => current === 'createdAt' ? 'updatedAt' : 'createdAt')}>{profileSort === 'createdAt' ? '创建时间' : '更新时间'}</button><button className="icon-button" title={profileDescending ? '当前降序，点击切换为升序' : '当前升序，点击切换为降序'} aria-label={profileDescending ? '当前降序，切换为升序' : '当前升序，切换为降序'} onClick={() => setProfileDescending((current) => !current)}>{profileDescending ? <ArrowDown size={14} aria-hidden="true" /> : <ArrowUp size={14} aria-hidden="true" />}</button><button className="button button--secondary" onClick={() => openLaunch(defaultProfile(projects, selectedProfileProject?.id ?? null), undefined, selectedProfileProject?.id ?? null)}><Plus size={14} />新建配置</button></span></header>{selectedProjectProfiles.length > 0 ? <div className="managed-profile-template-list">{selectedProjectProfiles.map((profile) => { const latest = runs.filter((run) => run.profileId === profile.id).sort((left, right) => right.startedAt - left.startedAt)[0]; const parameters = parseTaskParameters(profile.command); const normalized = normalizeLaunchCommand(profile.command).command; return <article className="managed-profile-template" key={profile.id}><header><div><strong>{profile.name}</strong><span>{parameters.length} 个超参数</span></div><div><button className="button button--secondary button--small" onClick={() => openLaunch(profile, undefined, profile.projectId ?? null)}><SlidersHorizontal size={12} />调整并运行</button><button className="icon-button" title="删除配置" aria-label={`删除配置 ${profile.name}`} onClick={() => setProfiles((current) => current.filter((item) => item.id !== profile.id))}><Trash2 size={13} /></button></div></header><code title={normalized}>{normalized}</code><ProfileParameterSummary parameters={parameters} /><dl><div><dt>工作目录</dt><dd>{selectedProfileProject ? '随所选服务器的项目副本切换' : profile.workingDirectory}</dd></div><div><dt>默认资源</dt><dd>{profile.gpuCount ? `${profile.gpuCount} 张 GPU${profile.minimumGpuMemoryGb ? ` · 每卡空闲 ≥ ${profile.minimumGpuMemoryGb} GB` : ''}` : 'CPU'}</dd></div><div><dt>最近运行</dt><dd>{formatTimestamp(latest?.startedAt)}</dd></div></dl></article>})}</div> : <div className="managed-profile-project-empty"><SlidersHorizontal size={22} /><strong>这个项目还没有启动配置</strong><p>保存一套命令和超参数后，可以在项目的任意服务器副本上调整 GPU 卡号并启动。</p><button className="button button--secondary" onClick={() => openLaunch(defaultProfile(projects, selectedProfileProject?.id ?? null), undefined, selectedProfileProject?.id ?? null)}><Plus size={14} />添加配置</button></div>}</div></div></section>}
 
     {tab === 'recent' && <section className="managed-recent-view"><header><div><h2>最近结束</h2><p>仅保留 RackTop 管理任务的结果和日志入口。</p></div></header>{recentRuns.length ? <div className="managed-recent-list">{recentRuns.map((run) => { const server = servers.find((item) => item.id === run.serverId); return <div key={run.id}><span className={`managed-exit-state is-${run.status}`}>{run.status === 'completed' ? <CheckCircle2 size={13} /> : run.status === 'stopped' ? <Square size={10} fill="currentColor" /> : <AlertCircle size={13} />}</span><span><strong>{run.name}</strong><small>{server?.name ?? '服务器已移除'} · {run.gpuIndices.length ? `GPU ${run.gpuIndices.join(', ')}` : 'CPU'}</small></span><span><strong>{run.status === 'completed' ? '正常完成' : run.status === 'stopped' ? '手动结束' : `意外退出${run.exitCode == null ? '' : ` · 代码 ${run.exitCode}`}`}</strong><small>运行 {relativeDuration(run.startedAt)}</small></span><time>{formatTimestamp(run.endedAt)}</time><button className="button button--secondary button--small" onClick={() => void restartRun(run)}><RefreshCw size={12} />再次运行</button></div>})}</div> : <div className="managed-process-empty"><CheckCircle2 size={27} /><strong>没有最近结束的任务</strong><p>完成、停止或意外退出的 RackTop 任务会显示在这里。</p></div>}</section>}
 
