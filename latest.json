@@ -1,23 +1,23 @@
 {
-  "version": "1.26.2",
-  "notes": "RackTop v1.26.2 稳定版：修复远端历史采集与同步、缓存释放，新增系统 MEM 告警，优化进程页与平台托盘。Windows 1.25.6、1.26.0 用户需手动覆盖安装一次。",
-  "pub_date": "2026-10-28T14:13:08Z",
+  "version": "1.26.3",
+  "notes": "RackTop v1.26.3 稳定版",
+  "pub_date": "2026-11-08T06:34:31Z",
   "platforms": {
     "darwin-aarch64": {
-      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.2/RackTop_1.26.2_macos-arm64.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaGZUelc2WEpaaFFHbm5jOFVzeHJSRzluTXluQUp6TGdtbWoydVJuSmZRYzdzR081STgxZ1YrekowZ0NyTDA3UDNueEFIU3FLZnlhN3dsdi9vWTExWXd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTk1MzM0CWZpbGU6UmFja1RvcF8xLjI2LjJfbWFjb3MtYXJtNjQuYXBwLnRhci5negpqa3hXaHJ1cGdBdTkxR2FCbzhDYXJuRkJSL0VON3R3MDAxNG9OczVEeHBBQzA3SHMvMXNhaFJIRFJDeE1xRVhSWDlKVU1iVDdTOHpqUWg3dEdTaEVCUT09Cg=="
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.3/RackTop_1.26.3_macos-arm64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaFRtZFRzVEYrSDVMeGZtdU5WNDBuWDJLMEw5LzJlL1ZCblhmSmMyZmRmemR4bGxRQ1RWVEJCSXU1ek5PbEplOVM3UEo1RW94K0NweDVWdG5qT3RURlFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MDY1ODY5CWZpbGU6UmFja1RvcF8xLjI2LjNfbWFjb3MtYXJtNjQuYXBwLnRhci5negpYelUwRWlnY0hWUmRCa1pSbXlNV3lCSkhOb3QrazVudWNmMXJOUHVTNWIzMjNzVXg0UG5qZUhZdWxTMVFyMEF3OFdMbkFLcTFCNlQ0WWRrYzl4RENCdz09Cg=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.2/RackTop_1.26.2_x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaGJQMWIxWERPSFJGem53ZFZnMUlPNE82UW5xdXc4SmYvMjEvYzFGZFl0NFRtQ0tCTWNzS0Y2S1FjVnN3dTVadjBIY0hReXpaR2tMYkxPTlNhWHMvR3drPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTk1NTI5CWZpbGU6UmFja1RvcF8xLjI2LjJfeDY0LXNldHVwLmV4ZQo2QnJIaDcvR0Q0dzBwam5mRkxRRGU5Ni9pRDd4dHFWVWRObXVHaVRydDRVak50SkR5NWZwdzFQUFNpaXNpTUF1cldxWnZVcGJ5RzBPNWRlUDIrWWtBZz09Cg=="
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.3/RackTop_1.26.3_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaFEzNEVJalhmd3d6SWlrbHVKemlvcFJQT3BYYWwwWmVUR2RqWGhFRm5TZEF2V0x2WWl2YVRXQktZYzNVTExlTGV4SkFWdWcxQlY2NnFmZW9iczlUcWdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MDY2MTU2CWZpbGU6UmFja1RvcF8xLjI2LjNfeDY0LXNldHVwLmV4ZQppT0VTTGp2ekxneERpcnNBWFdpZXozNVpRbHV1bDd6TmNlQ0xsRWRNV2NuSmx3ZVpKdzNTaWFVYVh3WCt2MlZJclVvUW9MNzRFZnQ1Q0FYNFZLNTJCUT09Cg=="
     },
     "linux-x86_64-appimage": {
-      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.2/RackTop_1.26.2_amd64.AppImage",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaGZtVndIcmR6RitLdlNOMDdsbzVSeWVJK1E4WnhSQXdRalBtMHdSczhVT1FELzQvbGxJMUNBZjY5UnVGT2Rtb3d2RTJUNHN2a1UxL3hCa0lURmUxYUFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTk1NjMwCWZpbGU6UmFja1RvcF8xLjI2LjJfYW1kNjQuQXBwSW1hZ2UKL0ZLTmlPcHpJZXJubk5jL1ZIQXFQZFVQTmFWeEN2K0JjKzJGRGtlRVZ3N2F2a0dhRElCN0svSUZKZUNGZWdiOVI1ZmRLeFJlenhXRGtCZVBpM2pYQ2c9PQo="
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.3/RackTop_1.26.3_amd64.AppImage",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaFI4bkFoZFAvSjNGOXpEK3NpUUZHUFBqS2I0T05WUC9YcVVCb0NjbkR5Y3BTczR4bWtEcElqM3NBRlZnVjBxU25hcjVPd0dVQUVsMHdlL0Q4VFRDS3cwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MDY2MTMzCWZpbGU6UmFja1RvcF8xLjI2LjNfYW1kNjQuQXBwSW1hZ2UKNGtyWmRJbHhVd1Jqc1Fla1RGNWVEenRRWXFtbUdwLzA3dHkvU215VGFNdTIwTlVxU01ack4xdytDdjVFQjFXWU1ydld6Q0t2N2pRelJ1Q3pwWGJYRHc9PQo="
     },
     "linux-x86_64-deb": {
-      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.2/RackTop_1.26.2_amd64.deb",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaGQ2RTRJdFF1MENaeWpPdmhodUVTT0JhWU4rU2kvczFSS3pPWnYrY0VWUVhmeTQySWVxS2JENjVJd01lOWgwMjVobU5wbGtveU5vaUtodm5EV2UwOHdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTk1NjMwCWZpbGU6UmFja1RvcF8xLjI2LjJfYW1kNjQuZGViCjl1bzhJd2gzNjE3OUxDbnhMYVkwZVdyNmY5eDNua05qbkVOaUhkTjY1WEtxK1VGTnRJR3NIWEt0dFMrUnZZWllZZ0NzTkZPUnRrOWtTNFllTTlhQUFBPT0K"
+      "url": "https://github.com/Tongzh-SEU/RackTop/releases/download/v1.26.3/RackTop_1.26.3_amd64.deb",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVULzVpZk55UDFxaFcwL2FlL1JYYWJrMFhsd1drM3JjTGQ3bVlvR0J6MVRrSmtiankrcnZtMnc3ekFyU3ArbGhLOUNTdTlxMGRMUWg5WFpPdW9nS1JsWHZaS2NxWWljVkFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MDY2MTMzCWZpbGU6UmFja1RvcF8xLjI2LjNfYW1kNjQuZGViCjJmVUpybDlPd0dkY1U4UVRoNmhFYjRoVTBWMVhGUkxYTHhTSXdCTzdMSXFITzBENkhoUk9iYlg3YUE3blBHQlVReC9LVWpoc0hsaFFLSUxVS0k0QUNnPT0K"
     }
   }
 }
