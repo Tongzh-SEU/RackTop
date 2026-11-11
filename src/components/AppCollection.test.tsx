@@ -37,6 +37,7 @@ beforeEach(async () => {
   const settings = { ...(await api.getSettings()), idleNotificationsEnabled: false, reduceMotion: true }
   vi.useFakeTimers()
   vi.setSystemTime(start)
+  vi.spyOn(Math, 'random').mockReturnValue(0)
   vi.spyOn(api, 'listServers').mockResolvedValue([server])
   vi.spyOn(api, 'listLatestSnapshots').mockResolvedValue([snapshot])
   vi.spyOn(api, 'getSettings').mockResolvedValue(settings)
@@ -114,6 +115,53 @@ describe('App disk collection cadence', () => {
     expect(collect.mock.lastCall?.[2]).toBe(false)
     await act(async () => vi.advanceTimersByTimeAsync(500))
     expect(collect.mock.lastCall?.[2]).toBe(true)
+  })
+})
+
+describe('live collection failure cooldown', () => {
+  it('manual refresh cannot bypass or extend the jittered retry deadline', async () => {
+    vi.mocked(Math.random).mockReturnValue(0.9)
+    const collect = vi.spyOn(api, 'collectServer').mockImplementation(collectSuccessfully)
+      .mockRejectedValueOnce(new Error('连接超时（30 秒）'))
+    await render()
+    expect(collect).toHaveBeenCalledTimes(1)
+    const refresh = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === '刷新全部')!
+    await act(async () => refresh.click())
+    expect(collect).toHaveBeenCalledTimes(1)
+    expect(container.textContent).toContain('采集失败后正在等待重试')
+
+    await act(async () => vi.advanceTimersByTimeAsync(1500))
+    expect(collect).toHaveBeenCalledTimes(1)
+    await act(async () => refresh.click())
+    expect(collect).toHaveBeenCalledTimes(1)
+    // The original 1900ms deadline still applies, despite repeated clicks.
+    await act(async () => vi.advanceTimersByTimeAsync(500))
+    expect(collect).toHaveBeenCalledTimes(2)
+  })
+
+  it('a successful retry clears failure cooldown for a later manual refresh', async () => {
+    const collect = vi.spyOn(api, 'collectServer').mockImplementation(collectSuccessfully)
+      .mockRejectedValueOnce(new Error('SSH连接失败'))
+    await render()
+    await act(async () => vi.advanceTimersByTimeAsync(1000))
+    expect(collect).toHaveBeenCalledTimes(2)
+    const refresh = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === '刷新全部')!
+    await act(async () => refresh.click())
+    expect(collect).toHaveBeenCalledTimes(3)
+  })
+
+  it('automatic and manual refresh do not enqueue more work for an in-flight server', async () => {
+    let resolve!: (value: Snapshot) => void
+    const collect = vi.spyOn(api, 'collectServer').mockImplementation(() => new Promise<Snapshot>((done) => { resolve = done }))
+    await render()
+    const refresh = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === '刷新全部')!
+    await act(async () => refresh.click())
+    await act(async () => vi.advanceTimersByTimeAsync(3000))
+    expect(collect).toHaveBeenCalledTimes(1)
+    await act(async () => resolve({ ...snapshot, processesSampled: true }))
   })
 })
 
