@@ -91,6 +91,7 @@ import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, idleFilterSummaryParts, lo
 import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservationFiltersEqual, idleReservationGpuKey, idleReservationSummary } from './utils/idleReservations'
 import { canOfferNvidiaDriverInstall, clearResolvedNvidiaWarningId, displayedNvidiaServerStatus, loadIgnoredNvidiaWarningIds, nvidiaIssueGuidance, nvidiaIssueTitle, saveIgnoredNvidiaWarningIds } from './utils/nvidiaStatus'
 import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldCollectDetailData, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
+import { collectionRetryDelayMs, collectionRetryRemainingMs } from './utils/collectionRetry'
 import { deriveGpuMemoryStallWarnings, ignoredGpuMemoryStallGpus } from './utils/gpuMemoryWarnings'
 import { acquiredDataItems, interactionDurationSeconds, interactionVisualStatus } from './utils/activityLog'
 import { duplicateImportIndexes } from './utils/serverIdentity'
@@ -514,14 +515,18 @@ function App() {
   const refreshServer = useCallback(async (serverId: string, quiet = false) => {
     if (inFlightServers.current.has(serverId)) return
     const nowMs = Date.now()
+    const retryRemainingMs = collectionRetryRemainingMs(nextRetryAt.current[serverId], nowMs)
+    if (retryRemainingMs > 0) {
+      if (!quiet) setToast(`采集失败后正在等待重试，${Math.ceil(retryRemainingMs / 1000)} 秒后可刷新`)
+      return
+    }
     const serverConfig = servers.find((server) => server.id === serverId)
     if (quiet && serverConfig) {
       const fastStatusView = mainView === 'fleet' || (mainView === 'server' && selectedTab === 'overview' && selectedServerId === serverId)
       const refreshIntervalMs = statusRefreshIntervalMs(fastStatusView, document.hidden, serverConfig.samplingIntervalSeconds, settings?.backgroundSamplingIntervalSeconds ?? 15)
-      if (nowMs - (lastAttemptAt.current[serverId] ?? 0) < refreshIntervalMs || nowMs < (nextRetryAt.current[serverId] ?? 0)) return
+      if (nowMs - (lastAttemptAt.current[serverId] ?? 0) < refreshIntervalMs) return
     }
     lastAttemptAt.current[serverId] = nowMs
-    if (!quiet) delete nextRetryAt.current[serverId]
     inFlightServers.current.add(serverId)
     setBusy((current) => new Set(current).add(serverId))
     const activeProjectSync = projectSyncProgressRef.current.some((progress) => {
@@ -590,8 +595,9 @@ function App() {
       const message = error instanceof Error ? error.message : String(error)
       failureCounts.current[serverId] = (failureCounts.current[serverId] ?? 0) + 1
       const failureCount = failureCounts.current[serverId]
-      const retryDelays = [1, 2, 5, 10, 30]
-      nextRetryAt.current[serverId] = Date.now() + retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)] * 1000
+      const retryDelayMs = collectionRetryDelayMs(failureCount)
+      const retryDelaySeconds = Math.ceil(retryDelayMs / 1000)
+      nextRetryAt.current[serverId] = Date.now() + retryDelayMs
       if (failureCount >= offlineFailureThreshold(activeProjectSync)) {
         const key = `offline:${serverId}`
         if (!notifiedConditions.current.has(key)) {
@@ -604,8 +610,8 @@ function App() {
         ...server,
         status: serverStatusAfterSyncAwareFailure(server.status, failureCount, activeProjectSync, Boolean(snapshotsRef.current[serverId])),
         lastError: activeProjectSync && failureCount < offlineFailureThreshold(true)
-          ? `大文件同步期间采集暂时延迟 · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试`
-          : `${message} · ${retryDelays[Math.min(failureCount - 1, retryDelays.length - 1)]} 秒后重试`,
+          ? `大文件同步期间采集暂时延迟 · ${retryDelaySeconds} 秒后重试`
+          : `${message} · ${retryDelaySeconds} 秒后重试`,
       } : server))
       if (!quiet && message.includes('主机指纹')) {
         try {

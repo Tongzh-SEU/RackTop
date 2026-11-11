@@ -3,6 +3,7 @@ mod config_transfer;
 #[cfg(target_os = "linux")]
 mod linux_app_update;
 pub mod collector;
+mod collection_limiter;
 mod host_key;
 pub mod models;
 mod process_lifetime;
@@ -534,6 +535,7 @@ async fn verify_ssh_setup(draft: ServerDraft) -> Result<(), String> {
 async fn collect_server(
     database: State<'_, Database>,
     logs: State<'_, InteractionLogStore>,
+    limiter: State<'_, collection_limiter::CollectionLimiter>,
     client_identity: State<'_, remote_history::ClientIdentity>,
     server_id: String,
     include_processes: bool,
@@ -541,6 +543,9 @@ async fn collect_server(
     record_history: bool,
     allow_credential_prompt: bool,
 ) -> Result<Snapshot, String> {
+    let permit = limiter.acquire(&server_id).await?;
+    // Read the current config after waiting: edits/removals while queued must
+    // not start a connection with a stale saved configuration.
     let server = database.get_server(&server_id)?;
     let log_id = logs.begin(
         &server,
@@ -562,15 +567,16 @@ async fn collect_server(
             return Err(error);
         }
     };
-    match collector::collect_with_password_detailed(
+    let outcome = collector::collect_with_password_detailed(
         &server,
         password.as_deref(),
         include_processes,
         include_disks,
         client_identity.as_str(),
     )
-    .await
-    {
+    .await;
+    drop(permit);
+    match outcome {
         Ok(collected) => {
             let response_bytes = collected.response_bytes;
             let snapshot = collected.snapshot;
@@ -1579,6 +1585,7 @@ pub fn run() {
             app.manage(config_transfer::ConfigTransferState::default());
             app.manage(TerminalManager::default());
             app.manage(disk_scan::DiskScanManager::default());
+            app.manage(collection_limiter::CollectionLimiter::default());
             app.manage(InteractionLogStore::default());
             #[cfg(target_os = "windows")]
             app.manage(tray_theme::WindowsTrayState::default());
