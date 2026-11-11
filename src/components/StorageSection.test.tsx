@@ -75,3 +75,26 @@ it('manual refresh bypasses schedule, disables duplicates and promptly polls the
   await act(async () => vi.advanceTimersByTimeAsync(2000))
   expect(button.disabled).toBe(false)
 })
+
+it('keeps a cached network mount visible without scheduling it when the current snapshot only contains local disks', async () => {
+  vi.useFakeTimers()
+  const state: DiskScanState = {
+    ...scan(), running: false,
+    mounts: [
+      { mountPoint: '/', status: 'success', result: disk('/', 100, 10), collectedAt: 110 },
+      { mountPoint: '/net/shared', status: 'success', result: disk('/net/shared', 500, 20), collectedAt: 90 },
+    ],
+  }
+  vi.spyOn(api, 'getDiskScan').mockResolvedValue(state)
+  const collect = vi.spyOn(api, 'collectDiskUsage').mockResolvedValue(state)
+  vi.spyOn(api, 'collectServer').mockResolvedValue({ disks: [disk('/')] } as Awaited<ReturnType<typeof api.collectServer>>)
+  const container = await render([disk('/')])
+
+  expect(collect).toHaveBeenCalledWith('one', ['/'])
+  expect(container.textContent).toContain('/net/shared')
+  expect(container.textContent).toContain('总计 500.0 GB')
+  expect(container.textContent).toContain('部分挂载点暂未采样')
+  await act(async () => container.querySelector<HTMLButtonElement>('button')!.click())
+  expect(collect).toHaveBeenCalledWith('one', ['/'], true)
+  expect(collect.mock.calls.every(([, mounts]) => mounts.length === 1 && mounts[0] === '/')).toBe(true)
+})

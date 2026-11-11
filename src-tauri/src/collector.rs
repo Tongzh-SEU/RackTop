@@ -63,9 +63,9 @@ printf '__RACKTOP_LOAD__\n'; cat /proc/loadavg;
 printf '__RACKTOP_MEM__\n'; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo;
 if [ "${RACKTOP_INCLUDE_DISKS:-1}" = "1" ]; then
   printf '__RACKTOP_DISK__\n';
-  if ! disk_rows="$(timeout -k 1 3 df -P -k -x tmpfs -x devtmpfs 2>/dev/null)"; then
-    disk_rows="$(timeout -k 1 3 df -P -k -l -x tmpfs -x devtmpfs 2>/dev/null || true)";
-  fi;
+  # Do not contact network filesystems before falling back: a remote I/O wait
+  # can outlive timeout and leave another scan behind on the next collection.
+  disk_rows="$(timeout -k 1 3 df -P -k -l -x tmpfs -x devtmpfs 2>/dev/null || true)";
   printf '%s\n' "$disk_rows" | awk 'NR > 1 && $2 ~ /^[0-9]+$/ { print $6 "|" $3 "|" $2 "|" $4 }' | while IFS='|' read -r mount used total available; do
     case "$mount" in /sys|/sys/*|/proc|/proc/*|/dev|/dev/*|/run|/run/*|/boot/efi|/boot/efi/*|/snap/*|/var/lib/docker/*|/var/lib/containers/*|/var/lib/kubelet/*) continue ;; esac
     printf '%s|%s|%s|%s\n' "$mount" "$used" "$total" "$available";
@@ -1135,9 +1135,9 @@ mod tests {
     }
 
     #[test]
-    fn disk_collection_falls_back_to_local_filesystems_when_a_network_mount_stalls() {
-        assert!(REMOTE_SCRIPT.contains("timeout -k 1 3 df -P -k -x tmpfs -x devtmpfs"));
-        assert!(REMOTE_SCRIPT.contains("df -P -k -l -x tmpfs -x devtmpfs"));
+    fn live_disk_collection_queries_local_filesystems_only() {
+        assert!(REMOTE_SCRIPT.contains("timeout -k 1 3 df -P -k -l -x tmpfs -x devtmpfs"));
+        assert!(!REMOTE_SCRIPT.contains("df -P -k -x tmpfs -x devtmpfs"));
         assert!(!REMOTE_SCRIPT.contains("du -"));
     }
 
