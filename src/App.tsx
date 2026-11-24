@@ -90,7 +90,7 @@ import { canDisplayServerDetails, offlineFailureThreshold, serverStatusAfterSync
 import { DEFAULT_IDLE_FILTERS, displayedFreeMemoryGb, idleFilterSummaryParts, loadIdleFilters, rankIdleGpuItems, saveIdleFilters, type IdleFilters, type IdleGpuItem } from './utils/idleFilters'
 import { CURRENT_SNAPSHOT_STABLE_SECONDS, evaluateIdleReservation, idleReservationFiltersEqual, idleReservationGpuKey, idleReservationSummary } from './utils/idleReservations'
 import { canOfferNvidiaDriverInstall, clearResolvedNvidiaWarningId, displayedNvidiaServerStatus, loadIgnoredNvidiaWarningIds, nvidiaIssueGuidance, nvidiaIssueTitle, saveIgnoredNvidiaWarningIds } from './utils/nvidiaStatus'
-import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldCollectDetailData, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
+import { FOREGROUND_STATUS_INTERVAL_MS, shouldCollectDetailData, shouldRecordHistory, statusRefreshIntervalMs } from './utils/refreshCadence'
 import { deriveGpuMemoryStallWarnings, ignoredGpuMemoryStallGpus } from './utils/gpuMemoryWarnings'
 import { acquiredDataItems, interactionDurationSeconds, interactionVisualStatus } from './utils/activityLog'
 import { duplicateImportIndexes } from './utils/serverIdentity'
@@ -447,8 +447,6 @@ function App() {
   const failureCounts = useRef<Record<string, number>>({})
   const lastAttemptAt = useRef<Record<string, number>>({})
   const lastProcessAttemptAt = useRef<Record<string, number>>({})
-  const lastDiskAttemptAt = useRef<Record<string, number>>({})
-  const diskUsageInFlight = useRef(new Set<string>())
   const lastHistoryRecordedAt = useRef<Record<string, number>>({})
   const remoteHistoryServersRef = useRef<Server[]>([])
   const remoteSyncInFlight = useRef(new Set<string>())
@@ -542,9 +540,8 @@ function App() {
       const fastStatusView = !document.hidden && (mainView === 'fleet' || (mainView === 'server' && selectedTab === 'overview' && selectedServerId === serverId))
       const collectDetailData = shouldCollectDetailData(quiet, Boolean(previous))
       const includeProcesses = collectDetailData && (!quiet || fastStatusView || nowMs - (lastProcessAttemptAt.current[serverId] ?? 0) >= (settings?.processIntervalSeconds ?? 5) * 1000)
-      const includeDisks = collectDetailData && (!quiet || nowMs - (lastDiskAttemptAt.current[serverId] ?? 0) >= DISK_STATUS_INTERVAL_MS)
+      const includeDisks = collectDetailData && !quiet
       const recordHistory = !serverConfig || shouldRecordHistory(lastHistoryRecordedAt.current[serverId], nowMs, serverConfig.samplingIntervalSeconds)
-      if (includeDisks) lastDiskAttemptAt.current[serverId] = nowMs
       const collected = await api.collectServer(serverId, includeProcesses, includeDisks, recordHistory, !quiet)
       if (deletedServerIds.current.has(serverId)) return
       if (collected.processesSampled) lastProcessAttemptAt.current[serverId] = nowMs
@@ -569,12 +566,6 @@ function App() {
         saveIgnoredNvidiaWarningIds(retainedNvidiaWarnings)
       }
       setSnapshots((current) => ({ ...current, [serverId]: snapshot }))
-      if (includeDisks && snapshot.disks?.length && !diskUsageInFlight.current.has(serverId)) {
-        diskUsageInFlight.current.add(serverId)
-        void api.collectDiskUsage(serverId, snapshot.disks.map((disk) => disk.mountPoint)).catch(() => {
-          // Optional disk ownership must not change connection status or retry cadence.
-        }).finally(() => diskUsageInFlight.current.delete(serverId))
-      }
       setServers((current) => current.map((server) => server.id === serverId ? { ...server, status: displayedNvidiaServerStatus(snapshot, retainedNvidiaWarnings.has(serverId)), lastSeenAt: snapshot.timestamp, lastError: snapshot.nvidiaMessage } : server))
       if (recordHistory) {
         lastHistoryRecordedAt.current[serverId] = nowMs
@@ -1580,7 +1571,6 @@ function App() {
       delete failureCounts.current[server.id]
       delete lastAttemptAt.current[server.id]
       delete lastProcessAttemptAt.current[server.id]
-      delete lastDiskAttemptAt.current[server.id]
       delete lastHistoryRecordedAt.current[server.id]
       delete nextRetryAt.current[server.id]
       for (const key of Object.keys(conditionSince.current)) if (key.includes(`:${server.id}:`)) delete conditionSince.current[key]

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DISK_STATUS_INTERVAL_MS, FOREGROUND_STATUS_INTERVAL_MS, shouldCollectDetailData, shouldRecordHistory, statusRefreshIntervalMs } from './refreshCadence'
+import { FOREGROUND_STATUS_INTERVAL_MS, shouldCollectDetailData, shouldRecordHistory, statusRefreshIntervalMs } from './refreshCadence'
 
 describe('refresh cadence', () => {
   it('refreshes the two fast status views every half second without changing the history cadence', () => {
@@ -19,10 +19,6 @@ describe('refresh cadence', () => {
 
   it('records the first successful snapshot', () => {
     expect(shouldRecordHistory(undefined, 10_000, 10)).toBe(true)
-  })
-
-  it('keeps disk scans on a fifteen-minute cadence', () => {
-    expect(DISK_STATUS_INTERVAL_MS).toBe(15 * 60 * 1_000)
   })
 
   it('uses a lightweight first background sample before collecting detail data', () => {

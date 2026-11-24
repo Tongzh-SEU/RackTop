@@ -1,5 +1,4 @@
 export const FOREGROUND_STATUS_INTERVAL_MS = 500
-export const DISK_STATUS_INTERVAL_MS = 15 * 60 * 1_000
 
 export function shouldCollectDetailData(quiet: boolean, hasPreviousSnapshot: boolean): boolean {
   return !quiet || hasPreviousSnapshot

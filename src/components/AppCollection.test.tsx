@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../App'
 import { api } from '../services/api'
 import type { Server, Snapshot } from '../types/models'
-import { DISK_STATUS_INTERVAL_MS } from '../utils/refreshCadence'
 
 vi.mock('./SshTerminal', () => ({ SshTerminal: () => null }))
 vi.mock('./TrendChart', () => ({ TrendChart: () => null }))
@@ -72,26 +71,22 @@ function collectSuccessfully(_serverId: string, includeProcesses = true, include
   })
 }
 
-describe('App disk collection cadence', () => {
-  it('throttles a failed disk attempt and retries disks when the interval expires', async () => {
+describe('App disk collection trigger', () => {
+  it('keeps recurring background samples disk-free, including after a failed attempt', async () => {
     const collect = vi.spyOn(api, 'collectServer').mockImplementation(collectSuccessfully)
       .mockRejectedValueOnce(new Error('连接超时（30 秒）'))
     await render()
     expect(collect).toHaveBeenCalledTimes(1)
-    expect(collect.mock.calls[0][2]).toBe(true)
+    expect(collect.mock.calls[0][2]).toBe(false)
 
     await act(async () => vi.advanceTimersByTimeAsync(1000))
     expect(collect).toHaveBeenCalledTimes(2)
     expect(collect.mock.calls[1][2]).toBe(false)
-
-    vi.setSystemTime(start + DISK_STATUS_INTERVAL_MS - 1000)
-    await act(async () => vi.advanceTimersByTimeAsync(500))
-    expect(collect.mock.lastCall?.[2]).toBe(false)
-    await act(async () => vi.advanceTimersByTimeAsync(500))
-    expect(collect.mock.lastCall?.[2]).toBe(true)
+    await act(async () => vi.advanceTimersByTimeAsync(60_000))
+    expect(collect.mock.calls.every((call) => call[2] === false)).toBe(true)
   })
 
-  it('still allows a manual refresh to collect disks during the cooldown', async () => {
+  it('still allows an explicit manual refresh to collect disks', async () => {
     const collect = vi.spyOn(api, 'collectServer').mockImplementation(collectSuccessfully)
     await render()
     await act(async () => vi.advanceTimersByTimeAsync(500))
@@ -104,7 +99,7 @@ describe('App disk collection cadence', () => {
     expect(collect.mock.lastCall?.[2]).toBe(true)
   })
 
-  it('does not start the disk cooldown for a lightweight request without disks', async () => {
+  it('keeps background collection disk-free without a previous snapshot', async () => {
     vi.mocked(api.listLatestSnapshots).mockResolvedValue([])
     const collect = vi.spyOn(api, 'collectServer').mockImplementation(collectSuccessfully)
       .mockRejectedValueOnce(new Error('连接超时（30 秒）'))
@@ -113,7 +108,7 @@ describe('App disk collection cadence', () => {
     await act(async () => vi.advanceTimersByTimeAsync(1000))
     expect(collect.mock.lastCall?.[2]).toBe(false)
     await act(async () => vi.advanceTimersByTimeAsync(500))
-    expect(collect.mock.lastCall?.[2]).toBe(true)
+    expect(collect.mock.lastCall?.[2]).toBe(false)
   })
 })
 
