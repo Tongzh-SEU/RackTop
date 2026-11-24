@@ -6,6 +6,8 @@
 
 - 切换到“指定 GPU”时清空自动推荐的选择，重复点击手动模式时保留已选 GPU。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #166](https://github.com/Tongzh-SEU/RackTop/pull/166)。
 - 修复启动任务资源未选齐时警告图标错误显示为绿色的问题。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #166](https://github.com/Tongzh-SEU/RackTop/pull/166)。
+- 支持按创建时间或更新时间排列启动配置，默认按创建时间升序。感谢 [LokHsu](https://github.com/LokHsu) 提交 [PR #174](https://github.com/Tongzh-SEU/RackTop/pull/174)。
+
 
 ## 1.26.3
 
