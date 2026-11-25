@@ -92,7 +92,7 @@ pub fn run_proxy(data: &str, host: &str, port: &str) -> Result<i32, String> {
     let password = if hop.auth_method == "password" {
         Some(keyring::Entry::new("com.racktop.desktop", hop.credential_id.as_deref().ok_or("跳板机缺少凭据")?).map_err(|e| e.to_string())?.get_password().map_err(|e| format!("无法读取跳板机密码：{e}"))?)
     } else { None };
-    let server = Server { id: String::new(), name: "jump".into(), location: None, host: hop.host, port: hop.port, username: hop.username, ssh_alias: None, identity_file: hop.identity_file, proxy_jump: None, ssh_hops: hops, tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false, remote_history_last_sync_at: None, sort_order: 0, auth_method: hop.auth_method, status: "unknown".into(), last_error: None, last_seen_at: None };
+    let server = Server { id: String::new(), name: "jump".into(), location: None, host: hop.host, port: hop.port, username: hop.username, ssh_alias: None, identity_file: hop.identity_file, proxy_jump: None, ssh_hops: hops, tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false, slurm_enabled: false, remote_history_last_sync_at: None, sort_order: 0, auth_method: hop.auth_method, status: "unknown".into(), last_error: None, last_seen_at: None };
     let port: u16 = port.parse().map_err(|_| "转发端口无效")?;
     if port == 0 || host.is_empty() || host.chars().any(|c| c.is_whitespace() || c.is_control()) { return Err("转发目标无效".into()); }
     let (mut command, target) = crate::collector::configured_ssh_command(&server, password.as_deref())?;
@@ -108,7 +108,7 @@ pub fn run_proxy(data: &str, host: &str, port: &str) -> Result<i32, String> {
 mod tests {
     use super::*;
     fn draft(name: &str, proxy: Option<&str>) -> ServerDraft {
-        ServerDraft { id: Some(name.into()), name: name.into(), location: None, host: format!("{name}.example"), port: 2222, username: name.into(), ssh_alias: Some(name.into()), identity_file: Some(format!("/{name}.key")), proxy_jump: proxy.map(str::to_owned), ssh_hops: Vec::new(), tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false, auth_method: "privateKey".into(), password: None, save_password: false }
+        ServerDraft { id: Some(name.into()), name: name.into(), location: None, host: format!("{name}.example"), port: 2222, username: name.into(), ssh_alias: Some(name.into()), identity_file: Some(format!("/{name}.key")), proxy_jump: proxy.map(str::to_owned), ssh_hops: Vec::new(), tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false, slurm_enabled: false, auth_method: "privateKey".into(), password: None, save_password: false }
     }
     #[test]
     fn concrete_endpoints_need_no_host_record() {

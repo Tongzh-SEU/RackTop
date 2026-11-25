@@ -36,6 +36,7 @@ export interface Server {
   samplingIntervalSeconds: number
   historyRetentionDays: number
   remoteHistoryEnabled: boolean
+  slurmEnabled?: boolean
   remoteHistoryLastSyncAt?: number | null
   sortOrder?: number
   authMethod: AuthMethod
@@ -290,7 +291,32 @@ export interface GpuMemoryStallWarning {
   durationSeconds: number
 }
 
-export type DetailTab = 'overview' | 'processes' | 'terminal' | 'gpu' | 'cpu' | 'history' | 'connection'
+export type DetailTab = 'overview' | 'processes' | 'terminal' | 'gpu' | 'cpu' | 'history' | 'slurm' | 'connection'
+
+export interface SlurmNode {
+  hostname: string
+  address: string
+  state: string
+  cpuTotal: number | null
+  cpuAllocated: number | null
+  gpuTypes: Array<{ name: string; count: number }>
+}
+
+export interface SlurmJob {
+  id: string
+  user: string
+  partition: string
+  cpus: number
+  reason: string
+  name: string
+}
+
+export interface SlurmOverview {
+  username: string
+  partitions: Array<{ name: string; nodeNames: string[] }>
+  nodes: Record<string, SlurmNode>
+  jobs: SlurmJob[]
+}
 
 export interface ServerDraft {
   id?: string
@@ -307,6 +333,7 @@ export interface ServerDraft {
   samplingIntervalSeconds: number
   historyRetentionDays: number
   remoteHistoryEnabled: boolean
+  slurmEnabled?: boolean
   authMethod: AuthMethod
   password?: string
   savePassword?: boolean

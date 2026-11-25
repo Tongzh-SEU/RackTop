@@ -823,7 +823,7 @@ mod tests {
         ServerDraft {
             id: None, name: name.into(), location: None, host: host.into(), port: 22, username: username.into(),
             ssh_alias: None, identity_file: None, proxy_jump: None, ssh_hops: Vec::new(), tags: vec![], sampling_interval_seconds: 2,
-            history_retention_days: 1, remote_history_enabled: false, auth_method: "sshAgent".into(), password: None, save_password: false,
+            history_retention_days: 1, remote_history_enabled: false, slurm_enabled: false, auth_method: "sshAgent".into(), password: None, save_password: false,
         }
     }
 

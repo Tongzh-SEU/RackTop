@@ -72,6 +72,7 @@ import { AppUpdateDialog, AppUpdateProgressButton, AppUpdateTriggerButton } from
 import { HistoryHeatmaps } from './components/HistoryHeatmap'
 import { StorageSection } from './components/StorageSection'
 import { MetricBar } from './components/MetricBar'
+import { SlurmView } from './components/SlurmView'
 import { WarningDialog } from './components/WarningDialog'
 import { ManagedProcessView, type ManagedLaunchIntent } from './components/ManagedProcessView'
 import { OnboardingChecklist, type OnboardingStep } from './components/OnboardingChecklist'
@@ -132,6 +133,7 @@ const tabs: Array<{ value: DetailTab; label: string }> = [
   { value: 'history', label: '趋势' },
   { value: 'gpu', label: 'GPU' },
   { value: 'cpu', label: 'CPU' },
+  { value: 'slurm', label: 'Slurm' },
   { value: 'connection', label: '配置' },
 ]
 
@@ -250,6 +252,7 @@ function serverToDraft(server: Server): Partial<ServerDraft> {
     samplingIntervalSeconds: server.samplingIntervalSeconds,
     historyRetentionDays: server.historyRetentionDays,
     remoteHistoryEnabled: server.remoteHistoryEnabled,
+    slurmEnabled: server.slurmEnabled,
     authMethod: server.authMethod,
   }
 }
@@ -320,7 +323,7 @@ function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null)
   const [terminalServerIds, setTerminalServerIds] = useState<Set<string>>(() => new Set())
-  const [selectedTab, setSelectedTab] = useState<DetailTab>(() => browserPreviewState === 'terminal' ? 'terminal' : browserPreviewState === 'notifications' ? 'connection' : 'overview')
+  const [selectedTab, setSelectedTab] = useState<DetailTab>(() => browserPreviewState === 'terminal' ? 'terminal' : browserPreviewState === 'notifications' ? 'connection' : browserPreviewState === 'slurm' ? 'slurm' : 'overview')
   const [selectedGpuUuid, setSelectedGpuUuid] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [draggedServerId, setDraggedServerId] = useState<string | null>(null)
@@ -355,7 +358,7 @@ function App() {
   const [ignoredUpdateVersion, setIgnoredUpdateVersion] = useState(loadIgnoredUpdateVersion)
   const [importingConfig, setImportingConfig] = useState(false)
   const [importDrafts, setImportDrafts] = useState<ServerDraft[] | null>(null)
-  const [mainView, setMainView] = useState<'server' | 'fleet' | 'idle' | 'mine' | 'projects'>(() => browserPreviewState === 'terminal' || browserPreviewState === 'reconnecting' || browserPreviewState === 'notifications' ? 'server' : 'fleet')
+  const [mainView, setMainView] = useState<'server' | 'fleet' | 'idle' | 'mine' | 'projects'>(() => browserPreviewState === 'terminal' || browserPreviewState === 'reconnecting' || browserPreviewState === 'notifications' || browserPreviewState === 'slurm' ? 'server' : 'fleet')
   const [projects, setProjects] = useState<Project[]>([])
   const [projectEditor, setProjectEditor] = useState<Project | null | 'new'>(null)
   const [projectPendingDelete, setProjectPendingDelete] = useState<Project | null>(null)
@@ -477,6 +480,10 @@ function App() {
   })
 
   const selectedServer = servers.find((server) => server.id === selectedServerId)
+  const visibleSelectedTab = selectedTab === 'slurm' && !selectedServer?.slurmEnabled ? 'overview' : selectedTab
+  useEffect(() => {
+    if (selectedServer && visibleSelectedTab !== selectedTab) setSelectedTab(visibleSelectedTab)
+  }, [selectedServer, selectedTab, visibleSelectedTab])
   const selectedSnapshot = selectedServerId ? snapshots[selectedServerId] : undefined
   const showTerminal = mainView === 'server' && selectedTab === 'terminal' && !!selectedServer && !!selectedSnapshot && canDisplayServerDetails(selectedServer.status, true)
 
@@ -1874,7 +1881,8 @@ function App() {
               snapshot={selectedSnapshot}
               points={history[selectedServer.id] ?? []}
               settings={settings}
-              tab={selectedTab}
+              tab={visibleSelectedTab}
+              slurmView={visibleSelectedTab === 'slurm' && <SlurmView key={selectedServer.id} serverId={selectedServer.id} servers={servers} snapshots={snapshots} />}
               selectedGpuUuid={selectedGpuUuid}
               onTab={(tab) => { setSelectedTab(tab); if (tab !== 'gpu') setSelectedGpuUuid(null) }}
               onSelectGpu={(gpuUuid) => { setSelectedGpuUuid(gpuUuid); setSelectedTab('gpu') }}
@@ -1973,6 +1981,7 @@ interface ServerDetailProps {
   points: HistoryPoint[]
   settings: AppSettings | null
   tab: DetailTab
+  slurmView?: React.ReactNode
   selectedGpuUuid: string | null
   onTab: (tab: DetailTab) => void
   onSelectGpu: (gpuUuid: string) => void
@@ -2000,7 +2009,7 @@ interface ServerDetailProps {
   onNotificationMenuRequestHandled: () => void
 }
 
-function ServerDetail({ server, snapshot, points, settings, systemMemoryWarningIgnored, onIgnoreSystemMemoryWarning, onRestoreSystemMemoryWarning, systemMemoryWarning, onOpenSystemMemoryWarning, tab, selectedGpuUuid, onTab, onSelectGpu, onRefresh, onDelete, onEdit, onRequestTerminate, terminatingPid, nvidiaWarningIgnored, onIgnoreNvidiaWarning, onRestoreNvidiaWarning, isRefreshing, animateCharts, gpuMemoryWarnings, ignoredGpuMemoryStallWarningIds, onRestoreGpuMemoryStallWarning, notificationSettings, onNotificationSettingsChange, notificationMenuRequested, onNotificationMenuRequestHandled }: ServerDetailProps) {
+function ServerDetail({ server, snapshot, points, settings, systemMemoryWarningIgnored, onIgnoreSystemMemoryWarning, onRestoreSystemMemoryWarning, systemMemoryWarning, onOpenSystemMemoryWarning, tab, slurmView, selectedGpuUuid, onTab, onSelectGpu, onRefresh, onDelete, onEdit, onRequestTerminate, terminatingPid, nvidiaWarningIgnored, onIgnoreNvidiaWarning, onRestoreNvidiaWarning, isRefreshing, animateCharts, gpuMemoryWarnings, ignoredGpuMemoryStallWarningIds, onRestoreGpuMemoryStallWarning, notificationSettings, onNotificationSettingsChange, notificationMenuRequested, onNotificationMenuRequestHandled }: ServerDetailProps) {
   const [showLogs, setShowLogs] = useState(false)
   const [historyContentReady, setHistoryContentReady] = useState(false)
   const isReconnecting = isRefreshing || server.status === 'connecting'
@@ -2024,7 +2033,7 @@ function ServerDetail({ server, snapshot, points, settings, systemMemoryWarningI
       </div>
       {showLogs && <div className="floating-log-panel"><LogsView server={server} snapshot={snapshot} /><button className="icon-button floating-log-panel__close" onClick={() => setShowLogs(false)} aria-label="关闭日志"><X size={15} /></button></div>}
       <div className="detail-tabs" role="tablist">
-        {tabs.map((item) => <button key={item.value} role="tab" aria-selected={tab === item.value} className={tab === item.value ? 'is-active' : ''} onClick={() => selectTab(item.value)}>{item.value === 'gpu' ? acceleratorLabel(snapshot) : item.label}</button>)}
+        {tabs.filter((item) => item.value !== 'slurm' || server.slurmEnabled).map((item) => <button key={item.value} role="tab" aria-selected={tab === item.value} className={tab === item.value ? 'is-active' : ''} onClick={() => selectTab(item.value)}>{item.value === 'gpu' ? acceleratorLabel(snapshot) : item.label}</button>)}
       </div>
       <div className="detail-content">
         {systemMemoryWarning && <section className="nvidia-warning" role="alert"><AlertCircle size={20} /><div><strong>系统 MEM 告警</strong><p>系统内存已使用 {systemMemoryWarning.percent.toFixed(1)}%，超过 {systemMemoryWarning.threshold}% 阈值。内存紧张可能影响 SSH 与其他服务，请及时检查。</p><div className="nvidia-warning__actions"><button className="button button--secondary button--small" onClick={onIgnoreSystemMemoryWarning}><BellOff size={13} />忽略系统 MEM 告警</button></div></div></section>}
@@ -2032,6 +2041,7 @@ function ServerDetail({ server, snapshot, points, settings, systemMemoryWarningI
         {tab === 'overview' && <ServerOverview snapshot={snapshot} points={points} idleThreshold={settings?.idleGpuThreshold ?? 10} onSelectGpu={onSelectGpu} onOpenCpu={() => selectTab('cpu')} onRequestTerminate={onRequestTerminate} terminatingPid={terminatingPid} animateCharts={animateCharts} gpuMemoryWarnings={gpuMemoryWarnings} systemMemoryWarning={systemMemoryWarning} onOpenSystemMemoryWarning={onOpenSystemMemoryWarning} isRefreshing={isRefreshing} />}
         {tab === 'gpu' && <GpuDetail snapshot={snapshot} points={points} selectedGpuUuid={selectedGpuUuid} onSelectGpu={onSelectGpu} animateChart={animateCharts} />}
         {tab === 'cpu' && <CpuDetail snapshot={snapshot} points={points} animateChart={animateCharts} />}
+        {slurmView}
         {tab === 'processes' && <ProcessBlocks snapshot={snapshot} terminatingPid={terminatingPid} onRequestTerminate={onRequestTerminate} loading={isRefreshing} />}
         {tab === 'history' && (historyContentReady ? <HistoryView server={server} snapshot={snapshot} /> : <div className="history-page-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={18} /><span>正在加载趋势…</span></div>)}
         {tab === 'connection' && <ConnectionView server={server} snapshot={snapshot} systemMemoryWarningIgnored={systemMemoryWarningIgnored && hasSystemMemoryWarning(snapshot, settings?.systemMemoryThresholdPercent)} onRestoreSystemMemoryWarning={onRestoreSystemMemoryWarning} nvidiaWarningIgnored={nvidiaWarningIgnored} ignoredGpuMemoryStallWarningIds={ignoredGpuMemoryStallWarningIds} onRestoreNvidiaWarning={onRestoreNvidiaWarning} onRestoreGpuMemoryStallWarning={onRestoreGpuMemoryStallWarning} onRefresh={onRefresh} onDelete={onDelete} onEdit={onEdit} isRefreshing={isRefreshing} notificationSettings={notificationSettings} onNotificationSettingsChange={onNotificationSettingsChange} notificationMenuRequested={notificationMenuRequested} onNotificationMenuRequestHandled={onNotificationMenuRequestHandled} />}

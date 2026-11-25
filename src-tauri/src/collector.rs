@@ -1211,6 +1211,7 @@ mod tests {
             id: "server-1".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22,
             username: "user".into(), ssh_alias: None, identity_file: Some("~/.ssh/stale_key".into()), proxy_jump: None, ssh_hops: Vec::new(),
             tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
+            slurm_enabled: false,
             remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(), status: "unknown".into(),
             last_error: None, last_seen_at: None,
         };
@@ -1225,6 +1226,7 @@ mod tests {
             id: "server-1".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22,
             username: "user".into(), ssh_alias: None, identity_file: None, proxy_jump: None, ssh_hops: Vec::new(),
             tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
+            slurm_enabled: false,
             remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(), status: "unknown".into(),
             last_error: None, last_seen_at: None,
         };
@@ -1241,6 +1243,7 @@ mod tests {
             id: "server-1".into(), name: "GPU".into(), location: None, host: "example.com".into(), port: 22,
             username: "user".into(), ssh_alias: None, identity_file: Some("~/.ssh/id_ed25519".into()), proxy_jump: None, ssh_hops: Vec::new(),
             tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: false,
+            slurm_enabled: false,
             remote_history_last_sync_at: None, sort_order: 0, auth_method: "privateKey".into(), status: "unknown".into(),
             last_error: None, last_seen_at: None,
         };
@@ -1257,6 +1260,7 @@ mod tests {
             id: "server-1".into(), name: "GPU".into(), location: None, host: "coolas-12".into(), port: 22,
             username: "user".into(), ssh_alias: None, identity_file: None, proxy_jump: None, ssh_hops: Vec::new(),
             tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90, remote_history_enabled: true,
+            slurm_enabled: false,
             remote_history_last_sync_at: None, sort_order: 0, auth_method: "sshAgent".into(), status: "unknown".into(),
             last_error: None, last_seen_at: None,
         };

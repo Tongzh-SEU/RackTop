@@ -42,7 +42,7 @@ pub fn parse(content: &str) -> Vec<ServerDraft> {
             ssh_alias: Some(alias), identity_file: values.get("identityfile").cloned(),
             proxy_jump: values.get("proxyjump").filter(|p| !p.eq_ignore_ascii_case("none")).cloned(), ssh_hops: Vec::new(),
             tags: Vec::new(), sampling_interval_seconds: 2, history_retention_days: 90,
-            remote_history_enabled: false, auth_method: "sshConfig".into(), password: None, save_password: false }
+            remote_history_enabled: false, slurm_enabled: false, auth_method: "sshConfig".into(), password: None, save_password: false }
     }).collect()
 }
 

@@ -112,6 +112,29 @@ describe('App disk collection trigger', () => {
   })
 })
 
+it('only opens and queries Slurm on configured servers', async () => {
+  const enabled = { ...server, slurmEnabled: true }
+  const other = { ...server, id: 'ordinary', name: 'Ordinary server', slurmEnabled: false }
+  vi.mocked(api.listServers).mockResolvedValue([enabled, other])
+  vi.mocked(api.listLatestSnapshots).mockResolvedValue([snapshot, { ...snapshot, serverId: other.id }])
+  vi.spyOn(api, 'collectServer').mockImplementation(async (serverId) => ({ ...snapshot, serverId }))
+  const collectSlurm = vi.spyOn(api, 'collectSlurm').mockResolvedValue({ username: 'me', partitions: [], nodes: {}, jobs: [] })
+  await render()
+
+  const [firstRow, secondRow] = container.querySelectorAll<HTMLButtonElement>('.server-row')
+  await act(async () => firstRow.click())
+  const slurmTab = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((button) => button.textContent === 'Slurm')!
+  expect(collectSlurm).not.toHaveBeenCalled()
+  await act(async () => slurmTab.click())
+  expect(collectSlurm).toHaveBeenCalledExactlyOnceWith(enabled.id)
+  expect(container.textContent).toContain('等待作业列表')
+
+  await act(async () => secondRow.click())
+  expect([...container.querySelectorAll('[role="tab"]')].some((button) => button.textContent === 'Slurm')).toBe(false)
+  expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('概览')
+  expect(collectSlurm).toHaveBeenCalledTimes(1)
+})
+
 it('shows the actual history sync failure when opening the status', async () => {
   api.isDesktop = true
   vi.mocked(api.listServers).mockResolvedValue([{ ...server, remoteHistoryEnabled: true, remoteHistoryLastSyncAt: null }])

@@ -32,6 +32,8 @@ pub struct Server {
     #[serde(default)]
     pub remote_history_enabled: bool,
     #[serde(default)]
+    pub slurm_enabled: bool,
+    #[serde(default)]
     pub remote_history_last_sync_at: Option<i64>,
     #[serde(default)]
     pub sort_order: i64,
@@ -61,6 +63,8 @@ pub struct ServerDraft {
     pub history_retention_days: u32,
     #[serde(default)]
     pub remote_history_enabled: bool,
+    #[serde(default)]
+    pub slurm_enabled: bool,
     pub auth_method: String,
     pub password: Option<String>,
     #[serde(default)]
