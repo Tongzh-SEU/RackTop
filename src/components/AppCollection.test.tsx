@@ -112,12 +112,12 @@ describe('App disk collection trigger', () => {
   })
 })
 
-it('only opens and queries Slurm on configured servers', async () => {
-  const enabled = { ...server, slurmEnabled: true }
+it('opens Slurm on automatically detected servers and hides it on ordinary servers', async () => {
+  const enabled = { ...server, slurmEnabled: false }
   const other = { ...server, id: 'ordinary', name: 'Ordinary server', slurmEnabled: false }
   vi.mocked(api.listServers).mockResolvedValue([enabled, other])
   vi.mocked(api.listLatestSnapshots).mockResolvedValue([snapshot, { ...snapshot, serverId: other.id }])
-  vi.spyOn(api, 'collectServer').mockImplementation(async (serverId) => ({ ...snapshot, serverId }))
+  vi.spyOn(api, 'collectServer').mockImplementation(async (serverId) => ({ ...snapshot, serverId, slurmAvailable: serverId === enabled.id }))
   const collectSlurm = vi.spyOn(api, 'collectSlurm').mockResolvedValue({ username: 'me', partitions: [], nodes: {}, jobs: [] })
   await render()
 
@@ -126,13 +126,55 @@ it('only opens and queries Slurm on configured servers', async () => {
   const slurmTab = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((button) => button.textContent === 'Slurm')!
   expect(collectSlurm).not.toHaveBeenCalled()
   await act(async () => slurmTab.click())
-  expect(collectSlurm).toHaveBeenCalledExactlyOnceWith(enabled.id)
+  expect(collectSlurm).toHaveBeenCalledExactlyOnceWith(enabled.id, 0)
   expect(container.textContent).toContain('等待作业列表')
 
   await act(async () => secondRow.click())
   expect([...container.querySelectorAll('[role="tab"]')].some((button) => button.textContent === 'Slurm')).toBe(false)
   expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('概览')
   expect(collectSlurm).toHaveBeenCalledTimes(1)
+})
+
+it('opens Slurm through a confirmed login node when the selected compute node lacks the client', async () => {
+  api.isDesktop = true
+  const login = { ...server, name: 'Slurm login', slurmEnabled: true }
+  const worker = { ...server, id: 'worker', name: 'Compute worker', host: 'compute.cluster', slurmEnabled: false }
+  const workerSnapshot = { ...snapshot, serverId: worker.id, hostname: worker.host, slurmAvailable: false }
+  vi.mocked(api.listServers).mockResolvedValue([login, worker])
+  vi.mocked(api.listLatestSnapshots).mockResolvedValue([snapshot, workerSnapshot])
+  vi.spyOn(api, 'collectServer').mockImplementation(async (id) => id === worker.id ? workerSnapshot : snapshot)
+  const overview = { username: 'me', partitions: [{ name: 'gpu', nodeNames: ['compute'] }], nodes: { compute: { hostname: worker.host, address: worker.host, state: 'idle', cpuTotal: null, cpuAllocated: null, gpuTypes: [] } }, jobs: [] }
+  const collectSlurm = vi.spyOn(api, 'collectSlurm').mockResolvedValue(overview)
+  await render()
+  expect(collectSlurm.mock.calls).toEqual([[login.id, 0, false]])
+
+  await act(async () => container.querySelectorAll<HTMLButtonElement>('.server-row')[1].click())
+  const slurmTab = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((button) => button.textContent === 'Slurm')!
+  await act(async () => slurmTab.click())
+  expect(collectSlurm.mock.calls).toEqual([[login.id, 0, false], [login.id, 0]])
+  expect(container.textContent).toContain('查询来源 Slurm login')
+})
+
+it('discards the previous Slurm request when the SSH settings are saved under the same server ID', async () => {
+  const enabled = { ...server, slurmEnabled: true }
+  vi.mocked(api.listServers).mockResolvedValue([enabled])
+  vi.spyOn(api, 'collectServer').mockImplementation(collectSuccessfully)
+  vi.spyOn(api, 'saveServer').mockResolvedValue({ ...enabled, username: 'new-account' })
+  const oldData = { username: 'old-account', partitions: [], nodes: {}, jobs: [{ id: '1', user: 'old-account', name: 'old queue', partition: 'gpu', cpus: 1, reason: 'Priority' }] }
+  let finishOld!: (value: typeof oldData) => void
+  const collectSlurm = vi.spyOn(api, 'collectSlurm')
+    .mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve }))
+    .mockResolvedValueOnce({ username: 'new-account', partitions: [], nodes: {}, jobs: [{ ...oldData.jobs[0], user: 'new-account', name: 'new queue' }] })
+  await render()
+  await act(async () => container.querySelector<HTMLButtonElement>('.server-row')!.click())
+  const slurmTab = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((button) => button.textContent === 'Slurm')!
+  await act(async () => slurmTab.click())
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="编辑服务器"]')!.click())
+  await act(async () => container.querySelector<HTMLButtonElement>('.server-form button[type="submit"]')!.click())
+  expect(collectSlurm.mock.calls).toEqual([[enabled.id, 0], [enabled.id, 1]])
+  await act(async () => finishOld(oldData))
+  expect(container.querySelector('.slurm-queue')?.textContent).toContain('new queue')
+  expect(container.querySelector('.slurm-queue')?.textContent).not.toContain('old queue')
 })
 
 it('shows the actual history sync failure when opening the status', async () => {

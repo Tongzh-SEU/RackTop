@@ -122,6 +122,7 @@ export interface SystemMetric {
 }
 
 export interface Snapshot {
+  slurmAvailable?: boolean
   serverId: string
   hostname: string
   username: string
@@ -296,6 +297,7 @@ export type DetailTab = 'overview' | 'processes' | 'terminal' | 'gpu' | 'cpu' | 
 export interface SlurmNode {
   hostname: string
   address: string
+  resolvedAddresses?: string[]
   state: string
   cpuTotal: number | null
   cpuAllocated: number | null
@@ -306,16 +308,19 @@ export interface SlurmJob {
   id: string
   user: string
   partition: string
-  cpus: number
+  cpus: number | null
   reason: string
   name: string
 }
 
 export interface SlurmOverview {
   username: string
+  queryHostname?: string
   partitions: Array<{ name: string; nodeNames: string[] }>
   nodes: Record<string, SlurmNode>
   jobs: SlurmJob[]
+  partitionError?: string
+  jobError?: string
 }
 
 export interface ServerDraft {

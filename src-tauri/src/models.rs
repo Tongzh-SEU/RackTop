@@ -359,6 +359,8 @@ pub struct Snapshot {
     pub status: String,
     #[serde(default = "default_accelerator_vendor")]
     pub accelerator_vendor: String,
+    #[serde(default)]
+    pub slurm_available: bool,
     pub system: SystemMetric,
     pub gpus: Vec<GpuMetric>,
     #[serde(default)]

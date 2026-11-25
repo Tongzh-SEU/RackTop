@@ -38,8 +38,8 @@ afterEach(() => {
 
 it('groups the visible queue by the actual SSH user and shows each unsampled GPU', async () => {
   const collect = vi.spyOn(api, 'collectSlurm').mockResolvedValue(overview)
-  await act(async () => root.render(<SlurmView serverId="login" servers={[]} snapshots={{}} />))
-  expect(collect).toHaveBeenCalledExactlyOnceWith('login')
+  await act(async () => root.render(<SlurmView serverId="login" connectionRevision={0} servers={[]} snapshots={{}} />))
+  expect(collect).toHaveBeenCalledExactlyOnceWith('login', 0)
   expect(container.querySelector('.slurm-queue-own')?.textContent).toContain('actual-ssh-user')
   expect(container.querySelector('tbody:not(.slurm-queue-own)')?.textContent).toContain('someone-else')
   expect(container.querySelectorAll('.fleet-gpu-row--unavailable')).toHaveLength(2)
@@ -50,9 +50,23 @@ it('groups the visible queue by the actual SSH user and shows each unsampled GPU
 
 it('retains the last visible queue when a manual refresh fails', async () => {
   const collect = vi.spyOn(api, 'collectSlurm').mockResolvedValueOnce(overview).mockRejectedValueOnce('Slurm 查询超时')
-  await act(async () => root.render(<SlurmView serverId="login" servers={[]} snapshots={{}} />))
+  await act(async () => root.render(<SlurmView serverId="login" connectionRevision={0} servers={[]} snapshots={{}} />))
   await act(async () => container.querySelector<HTMLButtonElement>('.slurm-heading button')!.click())
   expect(collect).toHaveBeenCalledTimes(2)
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('Slurm 查询超时')
+  expect(container.querySelector('.slurm-queue')?.textContent).toContain('mine')
+})
+
+it('continues displaying partition resources when the queue query fails', async () => {
+  vi.spyOn(api, 'collectSlurm').mockResolvedValue({ ...overview, jobs: [], jobError: '队列不可用' })
+  await act(async () => root.render(<SlurmView serverId="login" connectionRevision={0} servers={[]} snapshots={{}} />))
+  expect(container.querySelector('.slurm-queue [role="alert"]')?.textContent).toContain('队列不可用')
+  expect(container.querySelector('.slurm-partition')?.textContent).toContain('worker-01')
+})
+
+it('displays the queue when only the partition query fails', async () => {
+  vi.spyOn(api, 'collectSlurm').mockResolvedValue({ ...overview, partitions: [], nodes: {}, partitionError: '分区不可用' })
+  await act(async () => root.render(<SlurmView serverId="login" connectionRevision={0} servers={[]} snapshots={{}} />))
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('分区不可用')
   expect(container.querySelector('.slurm-queue')?.textContent).toContain('mine')
 })

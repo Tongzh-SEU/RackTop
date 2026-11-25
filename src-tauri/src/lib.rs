@@ -617,17 +617,14 @@ async fn collect_server(
 }
 
 #[tauri::command]
-async fn collect_slurm(database: State<'_, Database>, server_id: String) -> Result<slurm::SlurmOverview, String> {
+async fn collect_slurm(database: State<'_, Database>, server_id: String, include_jobs: Option<bool>) -> Result<slurm::SlurmOverview, String> {
     let server = database.get_server(&server_id)?;
-    if !server.slurm_enabled {
-        return Err("此服务器未启用 Slurm 监控".into());
-    }
     let password = if server.auth_method == "password" {
         database.get_password(&server_id, true)?
     } else {
         None
     };
-    slurm::collect(&server, password.as_deref()).await
+    slurm::collect(&server, password.as_deref(), include_jobs.unwrap_or(true)).await
 }
 
 #[tauri::command]

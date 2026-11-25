@@ -4,18 +4,18 @@ import { ChevronRight, RefreshCw } from 'lucide-react'
 import type { GpuMetric, Server, SlurmJob, SlurmOverview, Snapshot } from '../types/models'
 import { api } from '../services/api'
 import { clampPercent, displayedGpuMemoryPercent, gpuLoadLevel, gpuMemoryLevel, gpuMemoryPercent, isGpuAvailable } from '../utils/gpu'
-import { slurmPartitionResources } from '../utils/slurm'
+import { slurmNodeSamples, slurmPartitionResources } from '../utils/slurm'
 import './SlurmView.css'
 
 const waitingReasons: Record<string, string> = { Dependency: '等待依赖作业', Priority: '调度优先级', Resources: '资源不足' }
 
-export function SlurmView({ serverId, servers, snapshots }: { serverId: string; servers: Server[]; snapshots: Record<string, Snapshot> }) {
+export function SlurmView({ serverId, sourceName, connectionRevision, servers, snapshots }: { serverId: string; sourceName?: string; connectionRevision: number; servers: Server[]; snapshots: Record<string, Snapshot> }) {
   const [attempt, setAttempt] = useState(0)
   const [state, setState] = useState<{ data?: SlurmOverview; error?: string; updatedAt?: Date; completedAttempt: number }>({ completedAttempt: -1 })
   const loading = state.completedAttempt !== attempt
   useEffect(() => {
     let active = true
-    api.collectSlurm(serverId).then(
+    api.collectSlurm(serverId, connectionRevision).then(
       (data) => { if (active) setState({ data, completedAttempt: attempt, updatedAt: new Date() }) },
       (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error)
@@ -23,13 +23,14 @@ export function SlurmView({ serverId, servers, snapshots }: { serverId: string; 
       },
     )
     return () => { active = false }
-  }, [serverId, attempt])
+  }, [serverId, connectionRevision, attempt])
 
   const { data, error, updatedAt } = state
-  const now = Math.floor(Date.now() / 1000)
+  const samples = data ? slurmNodeSamples(data, servers, snapshots, Math.floor(Date.now() / 1000), serverId) : new Map<string, Snapshot>()
   return <div className="content-stack slurm-view">
     <header className="slurm-heading">
       <h2>Slurm 集群</h2>
+      {sourceName && <span>查询来源 {sourceName}</span>}
       <div><span role="status">{loading ? '正在查询 Slurm…' : updatedAt ? `最近查询 ${updatedAt.toLocaleTimeString()}` : ''}</span>
         <button type="button" className="button button--secondary button--small" disabled={loading} onClick={() => setAttempt((value) => value + 1)}><RefreshCw size={14} aria-hidden="true" />刷新 Slurm</button>
       </div>
@@ -39,10 +40,12 @@ export function SlurmView({ serverId, servers, snapshots }: { serverId: string; 
       <WaitingJobs overview={data} />
       <section aria-labelledby="slurm-partitions">
         <header className="slurm-heading"><h3 id="slurm-partitions">分区资源</h3><span>{data.partitions.length} 个分区 · 用量来自已接入 RackTop 的节点</span></header>
-        {data.partitions.length === 0
+        {data.partitionError
+          ? <p role="alert" className="panel slurm-message">无法读取分区。{data.partitionError}</p>
+          : data.partitions.length === 0
           ? <p className="panel slurm-message">当前账号看不到任何 Slurm 分区。</p>
           : <div className="fleet-grid slurm-partitions">
-            {data.partitions.map((partition) => <PartitionCard key={partition.name} name={partition.name} resource={slurmPartitionResources(data, partition, servers, snapshots, now)} />)}
+            {data.partitions.map((partition) => <PartitionCard key={partition.name} name={partition.name} resource={slurmPartitionResources(data, partition, samples)} />)}
           </div>}
       </section>
     </>}
@@ -55,19 +58,19 @@ function WaitingJobs({ overview }: { overview: SlurmOverview }) {
     { label: '其他用户的等待作业', own: false, jobs: overview.jobs.filter((job) => job.user !== overview.username) },
   ]
   return <section className="panel slurm-queue" aria-labelledby="slurm-waiting-jobs">
-    <header className="slurm-heading"><h3 id="slurm-waiting-jobs">等待作业列表</h3><span>{overview.jobs.length} 个可见等待作业</span></header>
-    <div className="slurm-table-scroll"><table aria-labelledby="slurm-waiting-jobs">
+    <header className="slurm-heading"><h3 id="slurm-waiting-jobs">等待作业列表</h3>{!overview.jobError && <span>{overview.jobs.length} 个可见等待作业</span>}</header>
+    {overview.jobError ? <p role="alert" className="slurm-message">无法读取等待作业。{overview.jobError}</p> : <div className="slurm-table-scroll" role="region" aria-label="等待作业表格" tabIndex={0}><table aria-labelledby="slurm-waiting-jobs">
       <thead><tr>{['作业 ID', '名称', '用户', '分区', 'CPU', '等待原因'].map((label) => <th key={label} scope="col">{label}</th>)}</tr></thead>
       {groups.map(({ label, own, jobs }) => <tbody key={label} className={own ? 'slurm-queue-own' : undefined}>
         <tr className="slurm-queue-group"><th scope="rowgroup" colSpan={6}>{label} <small>{jobs.length} 个</small></th></tr>
         {jobs.length ? jobs.map((job) => <JobRow key={`${job.id}:${job.partition}`} job={job} />) : <tr><td colSpan={6}>暂无可见作业</td></tr>}
       </tbody>)}
-    </table></div>
+    </table></div>}
   </section>
 }
 
 function JobRow({ job }: { job: SlurmJob }) {
-  return <tr><td>{job.id}</td><td>{job.name}</td><td className="slurm-job-user">{job.user}</td><td>{job.partition}</td><td>{job.cpus}</td><td>{Object.hasOwn(waitingReasons, job.reason) ? waitingReasons[job.reason] : job.reason || '—'}</td></tr>
+  return <tr><td>{job.id}</td><td>{job.name}</td><td className="slurm-job-user">{job.user}</td><td>{job.partition}</td><td>{job.cpus ?? '—'}</td><td>{Object.hasOwn(waitingReasons, job.reason) ? waitingReasons[job.reason] : job.reason || '—'}</td></tr>
 }
 
 function PartitionCard({ name, resource }: { name: string; resource: ReturnType<typeof slurmPartitionResources> }) {

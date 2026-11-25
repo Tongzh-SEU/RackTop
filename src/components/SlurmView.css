@@ -17,9 +17,11 @@
 .slurm-queue { overflow: hidden; }
 .slurm-queue > header { padding: 11px 14px; margin: 0; }
 .slurm-table-scroll { overflow-x: auto; }
+.slurm-queue .slurm-table-scroll { max-height: clamp(152px, 30vh, 270px); overflow: auto; }
 .slurm-queue table { width: 100%; border-collapse: collapse; text-align: left; font-size: calc(11px + var(--font-adjust, 0px)); font-variant-numeric: tabular-nums; }
 .slurm-queue :is(th, td) { padding: 7px 12px; border-top: 1px solid var(--border); }
 .slurm-queue th { background: var(--surface-subtle); font-weight: 550; white-space: nowrap; }
+.slurm-queue thead th { position: sticky; top: 0; z-index: 1; background: var(--surface-solid); }
 .slurm-queue td:nth-child(2) { min-width: 95px; overflow-wrap: anywhere; }
 .slurm-queue td:nth-child(5) { text-align: right; }
 .slurm-queue td:last-child { min-width: 90px; overflow-wrap: anywhere; }

@@ -4782,6 +4782,7 @@ mod tests {
             timestamp,
             status: "online".into(),
             accelerator_vendor: "nvidia".into(),
+            slurm_available: false,
             system: SystemMetric {
                 cpu_model: "Test CPU".into(),
                 memory_total_bytes: 1024,

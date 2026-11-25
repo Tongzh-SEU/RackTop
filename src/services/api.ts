@@ -403,12 +403,13 @@ export const api = {
   async updateTraySummary(mode: AppSettings['menuBarMode'], reservationPending: number, processWarnings: number): Promise<void> {
     if (isTauri) return invoke('update_tray_summary', { mode, reservationPending, processWarnings })
   },
-  async collectSlurm(serverId: string): Promise<SlurmOverview> {
+  async collectSlurm(serverId: string, connectionRevision: number, includeJobs = true): Promise<SlurmOverview> {
     if (isTauri) {
-      const pending = slurmRequests.get(serverId)
+      const key = `${serverId}:${connectionRevision}:${includeJobs}`
+      const pending = slurmRequests.get(key)
       if (pending) return pending
-      const request = invoke<SlurmOverview>('collect_slurm', { serverId }).finally(() => slurmRequests.delete(serverId))
-      slurmRequests.set(serverId, request)
+      const request = invoke<SlurmOverview>('collect_slurm', { serverId, includeJobs }).finally(() => slurmRequests.delete(key))
+      slurmRequests.set(key, request)
       return request
     }
     const server = browserServers.find((item) => item.id === serverId)

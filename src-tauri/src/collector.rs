@@ -54,6 +54,8 @@ printf '__RACKTOP_USER__\n'; id -un;
 uid_min="$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null)"; uid_min="${uid_min:-1000}";
 printf '__RACKTOP_UIDMIN__\n%s\n' "$uid_min";
 printf '__RACKTOP_HOST__\n'; hostname;
+printf '__RACKTOP_SLURM__\n';
+if command -v sinfo >/dev/null 2>&1 && command -v squeue >/dev/null 2>&1; then printf 'available\n'; fi;
 printf '__RACKTOP_OS__\n'; if [ -r /etc/os-release ]; then . /etc/os-release; printf '%s|%s\n' "${ID:-unknown}" "${PRETTY_NAME:-Linux}"; else printf 'unknown|Linux\n'; fi;
 printf '__RACKTOP_CPUMODEL__\n'; if command -v lscpu >/dev/null 2>&1; then lscpu | awk -F: '/^Model name:/ {sub(/^[[:space:]]+/, "", $2); print $2; exit}'; else awk -F: '/^model name[[:space:]]*:/ {sub(/^[[:space:]]+/, "", $2); print $2; exit}' /proc/cpuinfo; fi;
 printf '__RACKTOP_CPU1__\n'; head -n 1 /proc/stat;
@@ -520,7 +522,8 @@ pub fn parse_snapshot(server_id: &str, output: &str) -> Result<Snapshot, String>
     let cpu_processes = parse_cpu_processes(&ps, &processes, &username, uid_min);
     let processes_sampled = sections.contains_key("GPUPROC");
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_secs() as i64;
-    Ok(Snapshot { server_id: server_id.into(), hostname, username, os_id: os_id.into(), os_name: os_name.into(), timestamp, status: if nvidia_smi == "available" { "online".into() } else { "warning".into() }, accelerator_vendor, system, gpus, disks, processes, cpu_processes, processes_sampled, nvidia_smi, nvidia_message })
+    let slurm_available = first_line(&sections, "SLURM") == Some("available");
+    Ok(Snapshot { server_id: server_id.into(), hostname, username, os_id: os_id.into(), os_name: os_name.into(), timestamp, status: if nvidia_smi == "available" { "online".into() } else { "warning".into() }, accelerator_vendor, slurm_available, system, gpus, disks, processes, cpu_processes, processes_sampled, nvidia_smi, nvidia_message })
 }
 
 fn parse_disk(line: &str) -> Result<DiskMetric, String> {
@@ -924,6 +927,14 @@ mod tests {
         for (value, expected) in [("0", Some(0)), ("", None), ("denied", None), ("-1", None)] {
             let input = SAMPLE.replace("__RACKTOP_NVIDIA__", &format!("__RACKTOP_USERMEM__\n{value}\n__RACKTOP_NVIDIA__"));
             assert_eq!(parse_snapshot("s", &input).unwrap().system.current_user_memory_used_bytes, expected);
+        }
+    }
+
+    #[test]
+    fn parses_slurm_capability_from_ssh_collection() {
+        for (section, expected) in [("__RACKTOP_SLURM__\navailable\n", true), ("__RACKTOP_SLURM__\n", false), ("", false)] {
+            let input = SAMPLE.replace("__RACKTOP_NVIDIA__", &format!("{section}__RACKTOP_NVIDIA__"));
+            assert_eq!(parse_snapshot("s", &input).unwrap().slurm_available, expected);
         }
     }
 
