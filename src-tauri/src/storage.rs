@@ -1447,6 +1447,7 @@ impl Database {
                     sampling_interval_seconds INTEGER NOT NULL DEFAULT 2,
                     history_retention_days INTEGER NOT NULL DEFAULT 90,
                     remote_history_enabled INTEGER NOT NULL DEFAULT 0,
+                    slurm_enabled INTEGER NOT NULL DEFAULT 0,
                     remote_history_last_sync_at INTEGER,
                     sort_order INTEGER NOT NULL DEFAULT 0,
                     auth_method TEXT NOT NULL DEFAULT 'sshAgent',
@@ -1671,6 +1672,9 @@ impl Database {
             connection
                 .execute("ALTER TABLE servers ADD COLUMN location TEXT", [])
                 .map_err(|error| error.to_string())?;
+        }
+        if !server_columns.contains("slurm_enabled") {
+            connection.execute("ALTER TABLE servers ADD COLUMN slurm_enabled INTEGER NOT NULL DEFAULT 0", []).map_err(|error| error.to_string())?;
         }
         if !server_columns.contains("remote_history_enabled") {
             connection.execute("ALTER TABLE servers ADD COLUMN remote_history_enabled INTEGER NOT NULL DEFAULT 0", []).map_err(|error| error.to_string())?;
@@ -1936,7 +1940,7 @@ impl Database {
     pub fn list_servers(&self) -> Result<Vec<Server>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection
-            .prepare("SELECT id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,remote_history_last_sync_at,auth_method,status,last_error,last_seen_at,sort_order,CASE WHEN ssh_hops_valid=1 THEN ssh_hops_json ELSE '[]' END FROM servers ORDER BY sort_order,name COLLATE NOCASE")
+            .prepare("SELECT id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,remote_history_last_sync_at,auth_method,status,last_error,last_seen_at,sort_order,CASE WHEN ssh_hops_valid=1 THEN ssh_hops_json ELSE '[]' END,slurm_enabled FROM servers ORDER BY sort_order,name COLLATE NOCASE")
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], |row| {
@@ -1955,6 +1959,7 @@ impl Database {
                     sampling_interval_seconds: row.get(10)?,
                     history_retention_days: row.get(11)?,
                     remote_history_enabled: row.get(12)?,
+                    slurm_enabled: row.get(20)?,
                     remote_history_last_sync_at: row.get(13)?,
                     auth_method: row.get(14)?,
                     status: row.get(15)?,
@@ -2166,10 +2171,10 @@ impl Database {
             ));
         }
         connection.execute(
-            "INSERT INTO servers (id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,auth_method,status,sort_order,ssh_hops_json)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'unknown',COALESCE((SELECT MAX(sort_order)+1 FROM servers),0),?15)
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name,location=excluded.location,host=excluded.host,port=excluded.port,username=excluded.username,ssh_alias=excluded.ssh_alias,identity_file=excluded.identity_file,proxy_jump=excluded.proxy_jump,tags_json=excluded.tags_json,sampling_interval_seconds=excluded.sampling_interval_seconds,history_retention_days=excluded.history_retention_days,remote_history_enabled=excluded.remote_history_enabled,auth_method=excluded.auth_method,ssh_hops_json=excluded.ssh_hops_json,ssh_route_revision=servers.ssh_route_revision+1,ssh_hops_valid=1",
-            params![id, name, blank_to_none(draft.location), draft.host.trim(), draft.port, draft.username.trim(), blank_to_none(draft.ssh_alias), blank_to_none(draft.identity_file), blank_to_none(draft.proxy_jump), tags, draft.sampling_interval_seconds.max(2), draft.history_retention_days.max(1), draft.remote_history_enabled, draft.auth_method, serde_json::to_string(&draft.ssh_hops).map_err(|e| e.to_string())?],
+            "INSERT INTO servers (id,name,location,host,port,username,ssh_alias,identity_file,proxy_jump,tags_json,sampling_interval_seconds,history_retention_days,remote_history_enabled,auth_method,status,sort_order,ssh_hops_json,slurm_enabled)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'unknown',COALESCE((SELECT MAX(sort_order)+1 FROM servers),0),?15,?16)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name,location=excluded.location,host=excluded.host,port=excluded.port,username=excluded.username,ssh_alias=excluded.ssh_alias,identity_file=excluded.identity_file,proxy_jump=excluded.proxy_jump,tags_json=excluded.tags_json,sampling_interval_seconds=excluded.sampling_interval_seconds,history_retention_days=excluded.history_retention_days,remote_history_enabled=excluded.remote_history_enabled,slurm_enabled=excluded.slurm_enabled,auth_method=excluded.auth_method,ssh_hops_json=excluded.ssh_hops_json,ssh_route_revision=servers.ssh_route_revision+1,ssh_hops_valid=1",
+            params![id, name, blank_to_none(draft.location), draft.host.trim(), draft.port, draft.username.trim(), blank_to_none(draft.ssh_alias), blank_to_none(draft.identity_file), blank_to_none(draft.proxy_jump), tags, draft.sampling_interval_seconds.max(2), draft.history_retention_days.max(1), draft.remote_history_enabled, draft.auth_method, serde_json::to_string(&draft.ssh_hops).map_err(|e| e.to_string())?, draft.slurm_enabled],
         ).map_err(|error| error.to_string())?;
         drop(connection);
 
@@ -4694,6 +4699,7 @@ mod tests {
             sampling_interval_seconds: 2,
             history_retention_days: retention_days,
             remote_history_enabled: false,
+            slurm_enabled: false,
             auth_method: "sshAgent".into(),
             password: None,
             save_password: false,
@@ -4776,6 +4782,7 @@ mod tests {
             timestamp,
             status: "online".into(),
             accelerator_vendor: "nvidia".into(),
+            slurm_available: false,
             system: SystemMetric {
                 cpu_model: "Test CPU".into(),
                 memory_total_bytes: 1024,
@@ -5060,12 +5067,14 @@ mod tests {
             .save_server(ServerDraft {
                 location: Some("Lab 301 / Rack R2".into()),
                 sampling_interval_seconds: 1,
+                slurm_enabled: true,
                 password: Some("secret".into()),
                 ..draft("GPU", 30)
             })
             .unwrap();
         assert_eq!(saved.sampling_interval_seconds, 2);
         assert_eq!(saved.location.as_deref(), Some("Lab 301 / Rack R2"));
+        assert!(db.get_server(&saved.id).unwrap().slurm_enabled);
         assert_eq!(db.list_servers().unwrap().len(), 1);
     }
 

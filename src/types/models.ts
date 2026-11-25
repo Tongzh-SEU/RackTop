@@ -36,6 +36,7 @@ export interface Server {
   samplingIntervalSeconds: number
   historyRetentionDays: number
   remoteHistoryEnabled: boolean
+  slurmEnabled?: boolean
   remoteHistoryLastSyncAt?: number | null
   sortOrder?: number
   authMethod: AuthMethod
@@ -121,6 +122,7 @@ export interface SystemMetric {
 }
 
 export interface Snapshot {
+  slurmAvailable?: boolean
   serverId: string
   hostname: string
   username: string
@@ -290,7 +292,36 @@ export interface GpuMemoryStallWarning {
   durationSeconds: number
 }
 
-export type DetailTab = 'overview' | 'processes' | 'terminal' | 'gpu' | 'cpu' | 'history' | 'connection'
+export type DetailTab = 'overview' | 'processes' | 'terminal' | 'gpu' | 'cpu' | 'history' | 'slurm' | 'connection'
+
+export interface SlurmNode {
+  hostname: string
+  address: string
+  resolvedAddresses?: string[]
+  state: string
+  cpuTotal: number | null
+  cpuAllocated: number | null
+  gpuTypes: Array<{ name: string; count: number }>
+}
+
+export interface SlurmJob {
+  id: string
+  user: string
+  partition: string
+  cpus: number | null
+  reason: string
+  name: string
+}
+
+export interface SlurmOverview {
+  username: string
+  queryHostname?: string
+  partitions: Array<{ name: string; nodeNames: string[] }>
+  nodes: Record<string, SlurmNode>
+  jobs: SlurmJob[]
+  partitionError?: string
+  jobError?: string
+}
 
 export interface ServerDraft {
   id?: string
@@ -307,6 +338,7 @@ export interface ServerDraft {
   samplingIntervalSeconds: number
   historyRetentionDays: number
   remoteHistoryEnabled: boolean
+  slurmEnabled?: boolean
   authMethod: AuthMethod
   password?: string
   savePassword?: boolean

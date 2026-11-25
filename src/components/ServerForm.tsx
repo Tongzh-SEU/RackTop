@@ -44,6 +44,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
     samplingIntervalSeconds: 2,
     historyRetentionDays: 90,
     remoteHistoryEnabled: initial?.remoteHistoryEnabled ?? defaultRemoteHistoryEnabled,
+    slurmEnabled: initial?.slurmEnabled ?? false,
     authMethod: initial?.authMethod ?? 'sshAgent',
     savePassword: initial?.savePassword ?? true,
   })
@@ -313,6 +314,7 @@ export function ServerForm({ initial, defaultRemoteHistoryEnabled = true, showGu
               <label>标签<div className="server-tag-input" onClick={(event) => event.currentTarget.querySelector('input')?.focus()}>{draft.tags.map((tag, index) => <span className="server-tag-input__token" key={`${tag}-${index}`}>{tag}</span>)}<input aria-label="添加服务器标签" value={tagText} onChange={(event) => updateTagText(event.target.value)} onBlur={commitTagText} onKeyDown={(event) => { if ((event.key === 'Backspace' || event.key === 'Delete') && editLastTag()) event.preventDefault() }} placeholder={draft.tags.length === 0 ? 'lab, h100' : ''} /></div></label>
             </div>
             <label className="switch-row remote-history-row"><Database size={18} /><span><strong>服务器远端缓存 30 天</strong><small>固定保留 30 天；RackTop 关闭期间继续采集，重新打开后同步到本机 90 天历史。不保存进程和命令。</small></span><input type="checkbox" checked={draft.remoteHistoryEnabled} onChange={(event) => set('remoteHistoryEnabled', event.target.checked)} /></label>
+            <label className="switch-row"><span><strong>手动显示 Slurm 标签</strong><small>RackTop 会在 SSH 采集时自动检测 Slurm。也可手动显示标签，查看分区资源和等待作业。</small></span><input type="checkbox" checked={draft.slurmEnabled ?? false} onChange={(event) => set('slurmEnabled', event.target.checked)} /></label>
             {error && <p className="form-error" role="alert">{error}</p>}
           </div>
           <footer className="sheet__footer">

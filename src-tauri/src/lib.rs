@@ -8,6 +8,7 @@ pub mod models;
 mod process_lifetime;
 mod project_sync;
 mod remote_history;
+mod slurm;
 mod ssh_config;
 pub mod ssh_routes;
 mod ssh_keys;
@@ -195,6 +196,7 @@ mod interaction_log_tests {
             sampling_interval_seconds: 2,
             history_retention_days: 90,
             remote_history_enabled: false,
+            slurm_enabled: false,
             remote_history_last_sync_at: None,
             sort_order: 0,
             auth_method: "sshAgent".into(),
@@ -498,6 +500,7 @@ async fn verify_ssh_setup(draft: ServerDraft) -> Result<(), String> {
         sampling_interval_seconds: 2,
         history_retention_days: 90,
         remote_history_enabled: false,
+        slurm_enabled: false,
         remote_history_last_sync_at: None,
         sort_order: 0,
         auth_method: "privateKey".into(),
@@ -611,6 +614,17 @@ async fn collect_server(
             Err(error)
         }
     }
+}
+
+#[tauri::command]
+async fn collect_slurm(database: State<'_, Database>, server_id: String, include_jobs: Option<bool>) -> Result<slurm::SlurmOverview, String> {
+    let server = database.get_server(&server_id)?;
+    let password = if server.auth_method == "password" {
+        database.get_password(&server_id, true)?
+    } else {
+        None
+    };
+    slurm::collect(&server, password.as_deref(), include_jobs.unwrap_or(true)).await
 }
 
 #[tauri::command]
@@ -1708,6 +1722,7 @@ pub fn run() {
             open_setup_terminal,
             verify_ssh_setup,
             collect_server,
+            collect_slurm,
             collect_disk_usage,
             get_disk_scan,
             list_latest_snapshots,

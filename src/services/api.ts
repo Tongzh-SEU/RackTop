@@ -6,11 +6,13 @@ import { clampPercent, gpuMemoryPercent, hasOtherUserGpuWorkload } from '../util
 import { normalizeIdleFilters } from '../utils/idleFilters'
 import { RACKTOP_MANAGED_IDENTITY_PATH } from '../utils/sshSetup'
 import type { ReleaseInfo } from '../utils/updateCheck'
-import type { DiskScanState } from '../types/models'
+import type { DiskScanState, SlurmOverview } from '../types/models'
 
 const demoDiskScans = new Map<string, DiskScanState>()
+const slurmRequests = new Map<string, Promise<SlurmOverview>>()
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+const slurmPreview = !isTauri && typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('previewState') === 'slurm'
 
 const now = Math.floor(Date.now() / 1000)
 const demoServers: Server[] = [
@@ -25,6 +27,7 @@ const demoServers: Server[] = [
     samplingIntervalSeconds: 2,
     historyRetentionDays: 90,
     remoteHistoryEnabled: false,
+    slurmEnabled: slurmPreview,
     sortOrder: 0,
     authMethod: 'privateKey',
     identityFile: RACKTOP_MANAGED_IDENTITY_PATH,
@@ -399,6 +402,32 @@ export const api = {
   },
   async updateTraySummary(mode: AppSettings['menuBarMode'], reservationPending: number, processWarnings: number): Promise<void> {
     if (isTauri) return invoke('update_tray_summary', { mode, reservationPending, processWarnings })
+  },
+  async collectSlurm(serverId: string, connectionRevision: number, includeJobs = true): Promise<SlurmOverview> {
+    if (isTauri) {
+      const key = `${serverId}:${connectionRevision}:${includeJobs}`
+      const pending = slurmRequests.get(key)
+      if (pending) return pending
+      const request = invoke<SlurmOverview>('collect_slurm', { serverId, includeJobs }).finally(() => slurmRequests.delete(key))
+      slurmRequests.set(key, request)
+      return request
+    }
+    const server = browserServers.find((item) => item.id === serverId)
+    if (!slurmPreview || !server?.slurmEnabled) throw new Error('Slurm 查询需要在 RackTop 桌面 App 中使用')
+    return {
+      username: server.username,
+      partitions: [{ name: 'gpu', nodeNames: ['gpu-01', 'gpu-02'] }, { name: 'compute', nodeNames: ['cpu-01'] }],
+      nodes: {
+        'gpu-01': { address: '10.201.37.233', hostname: 'gpu-server-233', state: 'MIXED', cpuAllocated: 24, cpuTotal: 64, gpuTypes: [{ name: 'RTX 4090D', count: 4 }] },
+        'gpu-02': { address: '', hostname: '', state: 'IDLE+DRAIN', cpuAllocated: 0, cpuTotal: 64, gpuTypes: [{ name: 'NVIDIA H100', count: 4 }] },
+        'cpu-01': { address: '', hostname: '', state: 'IDLE', cpuAllocated: 0, cpuTotal: 64, gpuTypes: [] },
+      },
+      jobs: [
+        { id: '48248', name: 'mesh-sweep', user: server.username, partition: 'compute', cpus: 64, reason: 'Resources' },
+        { id: '48252', name: 'eval-batch', user: server.username, partition: 'gpu', cpus: 8, reason: 'Priority' },
+        { id: '48250', name: 'sample-grid', user: 'wang', partition: 'compute', cpus: 32, reason: 'Dependency' },
+      ],
+    }
   },
   async collectServer(serverId: string, includeProcesses = true, includeDisks = true, recordHistory = true, allowCredentialPrompt = false): Promise<Snapshot> {
     if (isTauri) return invoke('collect_server', { serverId, includeProcesses, includeDisks, recordHistory, allowCredentialPrompt })
