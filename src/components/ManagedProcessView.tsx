@@ -1,5 +1,5 @@
 import { ProfileParameterSummary } from './ProfileParameterSummary'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { AlertCircle, ArrowDown, ArrowUp, Box, CheckCircle2, ChevronDown, ChevronRight, CircleDot, Database, FolderGit2, LoaderCircle, MoreHorizontal, Play, Plus, RefreshCw, RotateCcw, Save, ScrollText, Server as ServerIcon, SlidersHorizontal, Square, TerminalSquare, Trash2, X } from 'lucide-react'
 import { api } from '../services/api'
 import type { LaunchProfile, ManagedRun, ManagedRunRemoteStatus, Project, Server, Snapshot } from '../types/models'
@@ -157,6 +157,8 @@ export function ManagedProcessView({ servers, snapshots, projects, launchIntent,
   const [logRun, setLogRun] = useState<ManagedRun | null>(null)
   const [logContent, setLogContent] = useState('')
   const [loadingLog, setLoadingLog] = useState(false)
+  const logElement = useRef<HTMLPreElement>(null)
+  const followLog = useRef(true)
   const [pendingStop, setPendingStop] = useState<ManagedRun | null>(null)
   const [pendingUnmanagedStop, setPendingUnmanagedStop] = useState<{ server: Server; group: UnmanagedProcessGroup } | null>(null)
   const [pendingAssociation, setPendingAssociation] = useState<{ server: Server; group: UnmanagedProcessGroup } | null>(null)
@@ -168,6 +170,33 @@ export function ManagedProcessView({ servers, snapshots, projects, launchIntent,
   useEffect(() => { localStorage.setItem('racktop.profileSort.v1', profileSort) }, [profileSort])
   useEffect(() => { localStorage.setItem('racktop.profileDescending.v1', String(profileDescending)) }, [profileDescending])
   useEffect(() => { saveManagedRuns(runs) }, [runs])
+
+  useEffect(() => {
+    if (!logRun) return
+    let cancelled = false
+    let timer: number | undefined
+    const readLog = async () => {
+      try {
+        const content = await api.readManagedRunLog(logRun.serverId, logRun.id)
+        if (!cancelled) setLogContent(content)
+      } catch (reason) {
+        if (!cancelled) setLogContent(`无法读取日志：${String(reason).replace(/^Error:\s*/, '')}`)
+      } finally {
+        if (!cancelled) {
+          setLoadingLog(false)
+          timer = window.setTimeout(readLog, 2_000)
+        }
+      }
+    }
+    void readLog()
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [logRun])
+
+  useLayoutEffect(() => {
+    if (!loadingLog && followLog.current && logElement.current) {
+      logElement.current.scrollTop = logElement.current.scrollHeight
+    }
+  }, [logRun, logContent, loadingLog])
 
   useEffect(() => {
     setRuns((current) => {
@@ -404,11 +433,11 @@ export function ManagedProcessView({ servers, snapshots, projects, launchIntent,
     setSelectedGpuUuids(run.gpuUuids)
   }
 
-  async function openLog(run: ManagedRun) {
-    setLogRun(run)
+  function openLog(run: ManagedRun) {
+    followLog.current = true
+    setLogRun({ ...run })
     setLogContent('')
     setLoadingLog(true)
-    try { setLogContent(await api.readManagedRunLog(run.serverId, run.id)) } catch (reason) { setLogContent(`无法读取日志：${String(reason).replace(/^Error:\s*/, '')}`) } finally { setLoadingLog(false) }
   }
 
   async function stopRun() {
@@ -527,7 +556,7 @@ export function ManagedProcessView({ servers, snapshots, projects, launchIntent,
               <div className="managed-run-identity"><div><CircleDot size={13} /><strong>{run.name}</strong>{terminating ? <span className="managed-run-terminating" role="status"><LoaderCircle className="spin" size={11} />正在结束</span> : run.projectId && <span>项目任务</span>}</div><p>{profiles.find((profile) => profile.id === run.profileId)?.name ?? '临时任务'} · <code title={run.command}>{run.command}</code></p></div>
               <div className="managed-run-placement"><strong>{run.gpuIndices.length ? `GPU ${run.gpuIndices.join(', ')}` : 'CPU'}</strong><small>{run.gpuIndices.length ? `${run.gpuIndices.length} 张 GPU` : '未使用 GPU'}</small></div>
               <dl className="managed-run-metrics">{run.gpuIndices.length ? <><div><dt>UTL</dt><dd>{utilization.toFixed(0)}%</dd></div><div><dt>MEM</dt><dd>{formatMemoryMb(memoryMb)}</dd></div><div><dt>SM</dt><dd>{sm.toFixed(0)}%</dd></div></> : <><div><dt>CPU</dt><dd>{observed.reduce((sum, process) => sum + process.cpuPercent, 0).toFixed(0)}%</dd></div><div><dt>内存</dt><dd>{formatMemoryMb(observed.reduce((sum, process) => sum + ('memoryUsedBytes' in process ? process.memoryUsedBytes / 1024 ** 2 : 0), 0))}</dd></div><div><dt>进程</dt><dd>{observed.length}</dd></div></>}<div><dt>运行</dt><dd>{relativeDuration(run.startedAt)}</dd></div></dl>
-              <div className="managed-run-actions"><button className="icon-button" title="打开终端" disabled={terminating} onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={14} /></button><button className="icon-button" title="查看日志" disabled={terminating} onClick={() => void openLog(run)}><ScrollText size={14} /></button><button className="icon-button" title="重新启动" disabled={terminating} onClick={() => void restartRun(run)}><RotateCcw size={14} /></button><button className="icon-button is-danger" title={terminating ? '正在结束' : '结束任务'} disabled={terminating} onClick={() => setPendingStop(run)}>{terminating ? <LoaderCircle className="spin" size={13} /> : <Square size={12} fill="currentColor" />}</button><button className="icon-button" title="更多操作" disabled={terminating}><MoreHorizontal size={15} /></button></div>
+              <div className="managed-run-actions"><button className="icon-button" title="打开终端" disabled={terminating} onClick={() => onOpenTerminal(server.id)}><TerminalSquare size={14} /></button><button className="icon-button" title="查看日志" disabled={terminating} onClick={() => openLog(run)}><ScrollText size={14} /></button><button className="icon-button" title="重新启动" disabled={terminating} onClick={() => void restartRun(run)}><RotateCcw size={14} /></button><button className="icon-button is-danger" title={terminating ? '正在结束' : '结束任务'} disabled={terminating} onClick={() => setPendingStop(run)}>{terminating ? <LoaderCircle className="spin" size={13} /> : <Square size={12} fill="currentColor" />}</button><button className="icon-button" title="更多操作" disabled={terminating}><MoreHorizontal size={15} /></button></div>
               {expanded && <div className="managed-run-details"><dl><div><dt>工作目录</dt><dd><code>{run.workingDirectory}</code></dd></div><div><dt>任务根 PID</dt><dd><code>{run.pid}</code></dd></div><div><dt>日志</dt><dd><code>{run.logPath}</code></dd></div><div><dt>状态</dt><dd>{run.status === 'starting' ? '正在确认进程' : run.status === 'unknown' ? '等待远端确认' : '运行中'}</dd></div></dl>{observed.length > 0 ? <div className="managed-process-tree">{observed.map((process) => <div key={`${process.pid}-${'gpuUuid' in process ? process.gpuUuid : 'cpu'}`}><i /><code>PID {process.pid}</code><span>{process.command}</span><em>{'gpuIndex' in process ? `GPU ${process.gpuIndex}` : 'CPU'}</em></div>)}</div> : <p className="managed-run-waiting"><LoaderCircle className="spin" size={13} />等待下一次进程采样建立附属关系</p>}</div>}
             </article>
           })}</div>
@@ -594,7 +623,7 @@ export function ManagedProcessView({ servers, snapshots, projects, launchIntent,
       </section>
     </div>}
 
-    {logRun && <aside className="managed-log-inspector"><header><div><p className="eyebrow">实时日志</p><h2>{logRun.name}</h2></div><button className="icon-button" onClick={() => setLogRun(null)} aria-label="关闭"><X size={16} /></button></header><div className="managed-log-meta"><span>{servers.find((server) => server.id === logRun.serverId)?.name ?? '服务器已移除'}</span><span>{logRun.gpuIndices.length ? `GPU ${logRun.gpuIndices.join(', ')}` : 'CPU'}</span></div><pre>{loadingLog ? '正在读取远端日志…' : logContent || '日志暂时为空。'}</pre><footer><button className="button button--secondary" onClick={() => void openLog(logRun)}><RefreshCw size={13} />刷新日志</button><button className="button button--primary" onClick={() => onOpenTerminal(logRun.serverId)}><TerminalSquare size={13} />打开终端</button></footer></aside>}
+    {logRun && <aside className="managed-log-inspector"><header><div><p className="eyebrow">实时日志</p><h2>{logRun.name}</h2></div><button className="icon-button" onClick={() => setLogRun(null)} aria-label="关闭"><X size={16} /></button></header><div className="managed-log-meta"><span>{servers.find((server) => server.id === logRun.serverId)?.name ?? '服务器已移除'}</span><span>{logRun.gpuIndices.length ? `GPU ${logRun.gpuIndices.join(', ')}` : 'CPU'}</span></div><pre ref={logElement} onScroll={(event) => { const element = event.currentTarget; followLog.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 1 }}>{loadingLog ? '正在读取远端日志…' : logContent || '日志暂时为空。'}</pre><footer><button className="button button--secondary" onClick={() => openLog(logRun)}><RefreshCw size={13} />刷新日志</button><button className="button button--primary" onClick={() => onOpenTerminal(logRun.serverId)}><TerminalSquare size={13} />打开终端</button></footer></aside>}
 
     {pendingAssociation && <div className="scrim"><section className="sheet managed-association-sheet" role="dialog" aria-modal="true" aria-labelledby="managed-association-title"><header className="sheet__header"><div><p className="eyebrow">关联项目</p><h2 id="managed-association-title">将外部进程纳入任务视图</h2></div><button className="icon-button" onClick={() => setPendingAssociation(null)} aria-label="关闭"><X size={17} /></button></header><div className="managed-association-body"><div><span>当前进程</span><strong>{pendingAssociation.group.root.command}</strong><small>{pendingAssociation.server.name} · 根 PID {pendingAssociation.group.rootPid}</small></div><label>关联项目<select value={associationProjectId} onChange={(event) => setAssociationProjectId(event.target.value)}><option value="">请选择项目</option>{projects.filter((project) => project.kind === 'project').map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label><p>进程的工作目录和日志无法从当前采样中确定，关联后未知字段会显示为“未获取”。</p></div><footer className="sheet__footer"><button className="button button--secondary" onClick={() => setPendingAssociation(null)}>取消</button><button className="button button--primary" onClick={associateProcess} disabled={!associationProjectId}><FolderGit2 size={13} />确认关联</button></footer></section></div>}
 
